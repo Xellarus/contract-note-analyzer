@@ -1,0 +1,9 @@
+{
+  "name": "Remix: Contract Note Analyzer",
+  "description": "Analyze Zerodha and other broker contract notes to see trade-wise breakdown of charges like STT, GST, and Stamp Duty.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "File Analysis",
+    "Financial Data Visualization"
+  ]
+}
