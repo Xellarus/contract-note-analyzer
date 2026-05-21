@@ -76,7 +76,7 @@ export const extractTextFromPDF = async (file: File, password?: string): Promise
       // Sort by Y coordinate descending (top to bottom), then by X coordinate (left to right)
       items.sort((a, b) => {
         const yDiff = b.transform[5] - a.transform[5];
-        if (Math.abs(yDiff) > 15) return yDiff; // Use a threshold for same line
+        if (Math.abs(yDiff) > 5) return yDiff; // Use a threshold of 5 points for same line
         return a.transform[4] - b.transform[4]; // X coordinate
       });
 
@@ -84,7 +84,7 @@ export const extractTextFromPDF = async (file: File, password?: string): Promise
       let lastY = items[0].transform[5];
       
       for (const item of items) {
-        if (Math.abs(item.transform[5] - lastY) > 15) {
+        if (Math.abs(item.transform[5] - lastY) > 5) {
           pageText += "\n";
           lastY = item.transform[5];
         }
@@ -159,7 +159,8 @@ const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | 
     if (!line) continue;
 
     const lDown = line.toLowerCase();
-    if (lDown.includes("annexure a") || lDown.includes("annexure-a")) {
+    const cleanL = lDown.replace(/[^a-z]/g, '');
+    if (cleanL.includes("annexurea") || lDown.includes("annexure-a") || lDown.includes("annexure a")) {
       inAnnexure = true;
       continue;
     }
@@ -170,14 +171,33 @@ const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | 
     const isinMatch = tokens.findIndex(t => t.match(/INE[A-Z0-9]{9}\d/));
     
     if (inAnnexure && tokens.length >= 8) {
-      // Look for the B/S indicator
-      const sideIdx = tokens.findIndex((t, idx) => idx >= 1 && (t === 'B' || t === 'S' || t === 'BUY' || t === 'SELL'));
+      // Look for the B/S indicator anchored by a valid exchange lookahead
+      const sideIdx = tokens.findIndex((t, idx) => {
+        if (idx < 1 || idx + 1 >= tokens.length) return false;
+        const isBOrS = t === 'B' || t === 'S' || t === 'BUY' || t === 'SELL';
+        if (!isBOrS) return false;
+        const nextTk = tokens[idx + 1].toLowerCase();
+        return nextTk === 'nse' || nextTk === 'bse' || nextTk === 'mcx' || nextTk === 'ncdex';
+      });
+
       const exchangeIdx = sideIdx + 1;
       if (sideIdx !== -1 && exchangeIdx < tokens.length) {
           const side = (tokens[sideIdx] === 'B' || tokens[sideIdx] === 'BUY') ? 'Buy' : 'Sell';
-          // Find security name before sideIdx
-          const nameTokens = tokens.slice(0, sideIdx).filter(t => !t.match(/^\d{7,}$/) && !t.match(/^\d{2}:\d{2}:\d{2}$/));
-          const security = nameTokens.join(" ");
+          
+          // Ultra-robust Security name search: slice after the Trade Time column, or fallback
+          let security = "";
+          const timeIndices = tokens.slice(0, sideIdx).reduce((acc: number[], t, idx) => {
+            if (t.match(/^\d{2}:\d{2}/)) acc.push(idx);
+            return acc;
+          }, []);
+          
+          if (timeIndices.length > 0) {
+            const lastTimeIdx = timeIndices[timeIndices.length - 1];
+            security = tokens.slice(lastTimeIdx + 1, sideIdx).join(" ").trim();
+          } else {
+            const nameTokens = tokens.slice(0, sideIdx).filter(t => !t.match(/^\d{7,}$/) && !t.match(/^\d{2}:\d{2}/));
+            security = nameTokens.join(" ").trim();
+          }
           
           const qty = Math.abs(parseNumber(tokens[sideIdx + 2]));
           const brok = parseNumber(tokens[sideIdx + 3]);
@@ -493,10 +513,20 @@ export const parseIntegratedContractNote = async (html: string): Promise<Contrac
 
 
 const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult => {
-  let tradesToProcess = rawTrades;
+  // Exclude invalid or malformed data rows (e.g. pure exchange names as securities, or order numbers as share quantities)
+  const exchangeNames = ["NSE", "BSE", "MCX", "NCDEX"];
+  const validatedTrades = rawTrades.filter(t => {
+    if (!t.securityName || t.securityName.trim().length === 0) return false;
+    const cleanName = t.securityName.trim().toUpperCase();
+    if (exchangeNames.includes(cleanName)) return false;
+    if (t.quantity >= 10000000) return false; // This is an order number/trade number, not stock quantity
+    return t.quantity > 0 && t.price > 0;
+  });
+
+  let tradesToProcess = validatedTrades;
   if (prefix === "z") {
     const groupMap = new Map<string, Map<string, any[]>>();
-    rawTrades.forEach(t => {
+    validatedTrades.forEach(t => {
       const name = t.securityName;
       const type = t.type;
       if (!groupMap.has(name)) {
