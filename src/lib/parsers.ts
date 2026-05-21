@@ -127,9 +127,9 @@ const extractSummaryFromText = (text: string): Summary => {
     if (absVal === 0 && !l.includes("net amount")) continue;
 
     // Check for tax types first
-    if (l.includes("igst") || l.includes("cgst") || l.includes("sgst")) {
-      if (l.includes("igst") || l.includes("cgst")) s.cgst += absVal;
-      else if (l.includes("sgst")) s.sgst += absVal;
+    if (l.includes("igst") || l.includes("cgst") || l.includes("sgst") || l.includes("gst")) {
+      if (l.includes("sgst")) s.sgst += absVal;
+      else s.cgst += absVal;
     } 
     else if (l.includes("pay in/pay out obligation") || l.includes("pay in / pay out obligation")) s.payinObligation = absVal;
     else if (l.includes("securities transaction tax") || l.includes("stt")) s.stt = absVal;
@@ -138,12 +138,13 @@ const extractSummaryFromText = (text: string): Summary => {
     else if (l.includes("clearing charges")) s.clearingCharges = absVal;
     else if (l.includes("sebi turnover fees") || l.includes("sebi turnover fee") || l.includes("sebi turnover")) s.sebiFees = absVal;
     else if (l.includes("stamp duty")) s.stampDuty = absVal;
+    else if (l.includes("ipf") || l.includes("investor protection fund") || l.includes("investor protection")) s.ipf = absVal;
     else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)")) s.netSettlement = val;
   }
   return s;
 };
 
-const parseZerodhaPDF = async (text: string): Promise<ContractNoteResult | null> => {
+const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | null> => {
   const summary = extractSummaryFromText(text);
   const tradeDate = getTradeDate(text);
   const aggregateTrades: any[] = [];
@@ -151,12 +152,14 @@ const parseZerodhaPDF = async (text: string): Promise<ContractNoteResult | null>
   
   const lines = text.split('\n');
   let inAnnexure = false;
+  const isZerodha = text.toLowerCase().includes("zerodha");
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
 
-    if (line.toLowerCase().includes("annexure a")) {
+    const lDown = line.toLowerCase();
+    if (lDown.includes("annexure a") || lDown.includes("annexure-a")) {
       inAnnexure = true;
       continue;
     }
@@ -168,16 +171,14 @@ const parseZerodhaPDF = async (text: string): Promise<ContractNoteResult | null>
     
     if (inAnnexure && tokens.length >= 8) {
       // Look for the B/S indicator
-      const sideIdx = tokens.findIndex((t, idx) => idx >= 1 && (t === 'B' || t === 'S'));
+      const sideIdx = tokens.findIndex((t, idx) => idx >= 1 && (t === 'B' || t === 'S' || t === 'BUY' || t === 'SELL'));
       const exchangeIdx = sideIdx + 1;
-      if (sideIdx !== -1 && exchangeIdx < tokens.length && (tokens[exchangeIdx] === 'NSE' || tokens[exchangeIdx] === 'BSE')) {
-          const side = tokens[sideIdx] === 'B' ? 'Buy' : 'Sell';
-          // Find security name before sideIdx, omitting IDs (7+ digits) and times
+      if (sideIdx !== -1 && exchangeIdx < tokens.length) {
+          const side = (tokens[sideIdx] === 'B' || tokens[sideIdx] === 'BUY') ? 'Buy' : 'Sell';
+          // Find security name before sideIdx
           const nameTokens = tokens.slice(0, sideIdx).filter(t => !t.match(/^\d{7,}$/) && !t.match(/^\d{2}:\d{2}:\d{2}$/));
           const security = nameTokens.join(" ");
           
-          let qtyTokens = tokens.slice(sideIdx + 2);
-          // Zerodha Annexure: Qty is 2 tokens away from B/S, Brokerage 3, Price 4
           const qty = Math.abs(parseNumber(tokens[sideIdx + 2]));
           const brok = parseNumber(tokens[sideIdx + 3]);
           const price = parseNumber(tokens[sideIdx + 4]);
@@ -189,17 +190,69 @@ const parseZerodhaPDF = async (text: string): Promise<ContractNoteResult | null>
       }
     }
 
-    // Try Aggregate Table logic if not matched in Annexure or not in Annexure section
+    // Standard/Integrated Trade Row Detector for PDFs (Row-by-Row layouts)
+    if (!isZerodha && !inAnnexure && tokens.length >= 5) {
+      const lowerLine = line.toLowerCase();
+      const isSummaryLine = lowerLine.includes("total") || lowerLine.includes("subtotal") || lowerLine.includes("net") || 
+                            lowerLine.includes("tax") || lowerLine.includes("charge") || lowerLine.includes("duty") || 
+                            lowerLine.includes("fee") || lowerLine.includes("gst") || lowerLine.includes("stt") || 
+                            lowerLine.includes("brokerage") || lowerLine.includes("securities transaction");
+                            
+      if (!isSummaryLine) {
+        const sideIdx = tokens.findIndex(t => {
+          const lT = t.toLowerCase();
+          return lT === "buy" || lT === "sell" || lT === "b" || lT === "s" || lT.includes("-buy") || lT.includes("-sell") || lT === "b/s";
+        });
+        
+        if (sideIdx !== -1) {
+          const numTokens = tokens.filter(t => t.match(/^\(?[0-9,.-−]+\)?$/));
+          if (numTokens.length >= 2) {
+            const sideLower = tokens[sideIdx].toLowerCase();
+            const side = (sideLower.includes("buy") || sideLower === "b") ? "Buy" : "Sell";
+            
+            const nameTokens = tokens.slice(0, sideIdx).filter(t => {
+              return !t.match(/^\d{7,}$/) && 
+                     !t.match(/^\d{2}:\d{2}:\d{2}$/) && 
+                     !t.match(/INE[A-Z0-9]{9}\d/) && 
+                     !t.match(/^\d+$/);
+            });
+            const security = nameTokens.join(" ").trim();
+            
+            if (security.length > 3) {
+              const numbersAfterSide: number[] = [];
+              for (let j = sideIdx + 1; j < tokens.length; j++) {
+                if (tokens[j].match(/^\(?[0-9,.-−]+\)?$/)) {
+                  numbersAfterSide.push(Math.abs(parseNumber(tokens[j])));
+                }
+              }
+              
+              if (numbersAfterSide.length >= 2) {
+                const qty = numbersAfterSide[0];
+                const price = numbersAfterSide[1];
+                const brok = numbersAfterSide.length >= 3 ? numbersAfterSide[2] : 0;
+                
+                if (qty > 0 && price > 0) {
+                  const alreadyExists = aggregateTrades.some(t => t.securityName === security && t.quantity === qty && Math.abs(t.price - price) < 0.01 && t.type === side);
+                  if (!alreadyExists) {
+                    aggregateTrades.push({ securityName: security, quantity: qty, price, brokeragePerShare: brok, type: side });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Try Aggregate Table logic
     if (isinMatch !== -1) {
       const isin = tokens[isinMatch].match(/INE[A-Z0-9]{9}\d/)?.[0];
       let numStartIdx = isinMatch + 1;
-      // Skip name tokens to find first number
       while (numStartIdx < tokens.length && !tokens[numStartIdx].match(/^\(?[0-9,.-−]+\)?$/)) {
         numStartIdx++;
       }
       
       if (numStartIdx < tokens.length) {
-        // Main table row detection
         const buyQty = Math.abs(parseNumber(tokens[numStartIdx]));
         const sellQty = numStartIdx + 5 < tokens.length ? Math.abs(parseNumber(tokens[numStartIdx + 5])) : 0;
         
@@ -220,9 +273,7 @@ const parseZerodhaPDF = async (text: string): Promise<ContractNoteResult | null>
     }
   }
 
-  // Use Annexure trades if available as they are more granular, otherwise use aggregate
   const rawTrades = annexureTrades.length > 0 ? annexureTrades : aggregateTrades;
-
   if (rawTrades.length === 0) return null;
 
   const merged: any[] = [];
@@ -230,13 +281,13 @@ const parseZerodhaPDF = async (text: string): Promise<ContractNoteResult | null>
     const last = merged[merged.length - 1];
     if (last && last.securityName === t.securityName && last.type === t.type && Math.abs(last.price - t.price) < 0.001) {
         last.quantity += t.quantity;
-    } else {
-        merged.push({ ...t });
-    }
+    } else merged.push({ ...t });
   });
 
-  return finalizeContractNote(summary, merged, tradeDate, "zp");
+  const prefix = text.toLowerCase().includes("zerodha") ? "z" : "p";
+  return finalizeContractNote(summary, merged, tradeDate, prefix);
 };
+
 
 const extractSummary = (doc: Document): Summary => {
   const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
@@ -380,7 +431,6 @@ export const parseIntegratedContractNote = async (html: string): Promise<Contrac
   const summary = extractSummary(doc);
   const rawTrades: any[] = [];
   const tables = Array.from(doc.querySelectorAll("table"));
-  const segments = ["capital market segment of national clearing ltd. (exchange : nse)", "capital market segment of national clearing ltd. (exchange : bse)"];
   
   for (const table of tables) {
     const rows = Array.from(table.querySelectorAll("tr"));
@@ -392,27 +442,34 @@ export const parseIntegratedContractNote = async (html: string): Promise<Contrac
         const row = rows[i];
         const cells = Array.from(row.querySelectorAll("td, th"));
         const text = cleanText(row.textContent);
-        if (text.includes("segment name")) { curSeg = text.replace("segment name", "").trim(); continue; }
-        if (text.includes("security/contract") && text.includes("quantity")) {
+        if (text.includes("segment name")) { curSeg = text.replace("segment name", "").trim(); inTable = false; continue; }
+        
+        if (text.includes("security") && text.includes("quantity")) {
             cells.forEach((c, idx) => {
                 const t = cleanText(c.textContent);
                 if (t.includes("security") || t.includes("contract")) colMap.security = idx;
-                else if (t.includes("buy") && t.includes("sell")) colMap.type = idx;
+                else if (t.includes("buy/sell") || (t.includes("buy") && t.includes("sell"))) colMap.type = idx;
                 else if (t.includes("quantity")) colMap.qty = idx;
-                else if (t.includes("gross rate") || t.includes("trade price")) { if (colMap.price === -1) colMap.price = idx; }
+                else if (t.match(/gross rate|trade price/)) { if (colMap.price === -1) colMap.price = idx; }
                 else if (t.includes("brokerage")) colMap.brokerage = idx;
-                else if (t.match(/net rate|net value|net amount|net total/)) { colMap.net = idx; colMap.netIsRate = t.includes("rate") || t.includes("price"); }
+                else if (t.match(/net rate|net value|net amount|net total/)) { colMap.net = idx; colMap.netIsRate = (t.includes("rate") || t.includes("price")) && !t.includes("total"); }
             });
             if (colMap.security !== -1 && colMap.qty !== -1) inTable = true;
             continue;
         }
-        if (inTable && segments.some(s => curSeg.includes(s))) {
-            if (cells.length < 5) continue;
+        
+        if (inTable) {
+            if (cells.length < 5) {
+              if (text.includes("total") || text.includes("subtotal")) inTable = false;
+              continue;
+            }
             const name = cells[colMap.security]?.textContent?.trim();
-            if (!name || cleanText(name).includes("total")) continue;
+            if (!name || cleanText(name).includes("total") || cleanText(name).includes("segment")) continue;
+            
             const typeStr = cleanText(cells[colMap.type]?.textContent);
             const side = typeStr.includes("buy") ? "Buy" : typeStr.includes("sell") ? "Sell" : null;
             const qty = Math.abs(parseNumber(cells[colMap.qty]?.textContent));
+            
             if (side && qty > 0) {
                 const brok = colMap.brokerage !== -1 ? parseNumber(cells[colMap.brokerage]?.textContent) : 0;
                 let price = 0;
@@ -421,31 +478,60 @@ export const parseIntegratedContractNote = async (html: string): Promise<Contrac
                     if (colMap.netIsRate) netVal = netVal * qty;
                     const totalBrok = brok * qty;
                     price = (side === "Buy" ? netVal - totalBrok : netVal + totalBrok) / qty;
-                } else { price = parseNumber(cells[colMap.price]?.textContent); }
-                rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side });
+                } else if (colMap.price !== -1) { 
+                    price = parseNumber(cells[colMap.price]?.textContent); 
+                }
+                if (price > 0) rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side });
             }
         }
     }
   }
   if (rawTrades.length === 0) return null;
   const tradeDate = getTradeDate(doc);
-  const stats = new Map();
-  rawTrades.forEach(t => {
-    const k = `${cleanText(t.securityName)}|${t.type}`;
-    if (stats.has(k)) {
-        const o = stats.get(k);
-        const q = o.quantity + t.quantity;
-        o.price = (o.quantity * o.price + t.quantity * t.price) / q;
-        o.brokeragePerShare = (o.quantity * o.brokeragePerShare + t.quantity * t.brokeragePerShare) / q;
-        o.quantity = q;
-    } else stats.set(k, { ...t });
-  });
-  return finalizeContractNote(summary, Array.from(stats.values()), tradeDate, "i");
+  return finalizeContractNote(summary, rawTrades, tradeDate, "i");
 };
 
+
 const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult => {
+  let tradesToProcess = rawTrades;
+  if (prefix === "z") {
+    const groupMap = new Map<string, Map<string, any[]>>();
+    rawTrades.forEach(t => {
+      const name = t.securityName;
+      const type = t.type;
+      if (!groupMap.has(name)) {
+        groupMap.set(name, new Map());
+      }
+      const typeMap = groupMap.get(name)!;
+      if (!typeMap.has(type)) {
+        typeMap.set(type, []);
+      }
+      typeMap.get(type)!.push(t);
+    });
+
+    tradesToProcess = [];
+    groupMap.forEach((typeMap, name) => {
+      typeMap.forEach((items, type) => {
+        const totalQty = items.reduce((sum: number, x: any) => sum + x.quantity, 0);
+        const totalTurnover = items.reduce((sum: number, x: any) => sum + (x.quantity * x.price), 0);
+        const totalBrokerage = items.reduce((sum: number, x: any) => sum + (x.quantity * (x.brokeragePerShare || 0)), 0);
+        
+        const avgPrice = totalQty > 0 ? (totalTurnover / totalQty) : 0;
+        const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
+        
+        tradesToProcess.push({
+          securityName: name,
+          type: type,
+          quantity: totalQty,
+          price: avgPrice,
+          brokeragePerShare: avgBrokerage
+        });
+      });
+    });
+  }
+
   const securityStats = new Map();
-  rawTrades.forEach(t => {
+  tradesToProcess.forEach(t => {
     if (!securityStats.has(t.securityName)) securityStats.set(t.securityName, { buyQty: 0, sellQty: 0, types: new Set() });
     const s = securityStats.get(t.securityName);
     s.types.add(t.type);
@@ -454,10 +540,10 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
 
   const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-  const totalTurnover = rawTrades.reduce((sum, t) => sum + (t.quantity * t.price), 0);
-  const totalBuyTurnover = rawTrades.reduce((sum, t) => t.type === "Buy" ? sum + (t.quantity * t.price) : sum, 0);
+  const totalTurnover = tradesToProcess.reduce((sum, t) => sum + (t.quantity * t.price), 0);
+  const totalBuyTurnover = tradesToProcess.reduce((sum, t) => t.type === "Buy" ? sum + (t.quantity * t.price) : sum, 0);
 
-  const trades: Trade[] = rawTrades.map((t, idx) => {
+  const trades: Trade[] = tradesToProcess.map((t, idx) => {
     const s = securityStats.get(t.securityName);
     const isIntraday = s.types.has("Buy") && s.types.has("Sell");
     const grossTotal = rt(t.quantity * t.price);
@@ -507,21 +593,22 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
 export const detectFormat = (html: string): "integrated" | "standard" | "zerodha" => {
   const t = html.toLowerCase();
   if (t.includes("zerodha")) return "zerodha";
-  if (t.includes("segment name") || t.includes("capital market segment of national clearing") || (t.includes("security/contract") && t.includes("buy/sell"))) return "integrated";
+  if (t.includes("segment name") || t.includes("capital market segment of national clearing") || 
+      (t.includes("security/contract") && t.includes("buy/sell")) ||
+      t.includes("integrated enterprises") || t.includes("integrated e-mail")
+  ) return "integrated";
   return "standard";
 };
 
-export const processFile = async (file: File, password?: string): Promise<ContractNoteResult | null> => {
+export const processFile = async (file: File, password?: string, broker?: 'auto' | 'zerodha' | 'integrated' | 'standard'): Promise<ContractNoteResult | null> => {
   try {
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       const text = await extractTextFromPDF(file, password);
-      const isZerodha = text.toLowerCase().includes("zerodha");
-      if (isZerodha) return await parseZerodhaPDF(text);
-      return null;
+      return await parsePdfContractNote(text);
     }
 
     const html = await file.text();
-    const format = detectFormat(html);
+    const format = (broker && broker !== 'auto') ? broker : detectFormat(html);
     let res: ContractNoteResult | null = null;
     if (format === "zerodha") res = await parseZerodhaContractNote(html);
     else if (format === "integrated") res = await parseIntegratedContractNote(html);

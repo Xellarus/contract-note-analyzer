@@ -43,7 +43,7 @@ export default function App() {
       for (let i = 0; i < Math.min(fileArray.length, MAX_FILES); i++) {
         const file = fileArray[i];
         try {
-          let res = await processFile(file, password || pdfPassword);
+          let res = await processFile(file, password || pdfPassword, broker);
           if (res) results.push(res);
         } catch (err: any) {
           if (err.message === "PDF_PASSWORD_REQUIRED") {
@@ -154,10 +154,10 @@ export default function App() {
               onDragOver={(e) => e.preventDefault()}
               onDrop={onDrop}
             >
-              <input ref={fileInputRef} type="file" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => e.target.files && handleFileUpload(e.target.files)} accept=".pdf" multiple disabled={isLoading} />
+              <input ref={fileInputRef} type="file" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => e.target.files && handleFileUpload(e.target.files)} accept=".pdf,.html,.htm" multiple disabled={isLoading} />
               <div className="text-center px-4">
                 <Upload className="mx-auto w-10 h-10 text-indigo-400 mb-4" />
-                <p className="text-lg font-bold text-slate-800">Upload PDF Contract Notes</p>
+                <p className="text-lg font-bold text-slate-800">Upload PDF or HTML Contract Notes</p>
                 <p className="text-sm text-slate-500">Supports batch processing of up to {MAX_FILES} files</p>
               </div>
             </div>
