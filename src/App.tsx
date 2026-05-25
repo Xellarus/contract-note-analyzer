@@ -76,25 +76,47 @@ export default function App() {
     if (e.dataTransfer.files?.length > 0) handleFileUpload(e.dataTransfer.files);
   };
 
+  const { totalGrossValue, totalWithExpenseInclSTT, totalWithExpenseExclSTT } = React.useMemo(() => {
+    if (!data) return { totalGrossValue: 0, totalWithExpenseInclSTT: 0, totalWithExpenseExclSTT: 0 };
+    const gross = data.trades.reduce((sum, t) => sum + (t.quantity * t.avgPrice), 0);
+    const incl = data.trades.reduce((sum, t) => {
+      const val = t.transactionType === "Buy" 
+        ? t.turnover + t.totalExpensesInclSTT 
+        : t.turnover - t.totalExpensesInclSTT;
+      return sum + val;
+    }, 0);
+    const excl = data.trades.reduce((sum, t) => {
+      const val = t.transactionType === "Buy" 
+        ? t.turnover + t.totalExpensesExclSTT 
+        : t.turnover - t.totalExpensesExclSTT;
+      return sum + val;
+    }, 0);
+    return { totalGrossValue: gross, totalWithExpenseInclSTT: incl, totalWithExpenseExclSTT: excl };
+  }, [data]);
+
   const downloadCSV = () => {
     if (!data) return;
     const headers = [
       "Trade Date", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
       "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT", 
       "Exchange Turnover Charges", "SEBI Turnover Fees", "Exchange Clearing Charges", 
-      "Stamp Duty", "IPF", "GST", "Total Expenses (incl STT)", "Total Expenses (excl STT)", "Trade Class"
+      "Stamp Duty", "IPF", "GST", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
+      "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
     
     const rows = data.trades.map(t => {
       const brokeragePerShare = t.quantity > 0 ? (t.brokerage / t.quantity).toFixed(4) : "0.0000";
-      const netSettlement = t.transactionType === "Buy" 
+      const totalWithExpenseInclSTT = t.transactionType === "Buy" 
         ? t.turnover + t.totalExpensesInclSTT 
         : t.turnover - t.totalExpensesInclSTT;
+      const totalWithExpenseExclSTT = t.transactionType === "Buy" 
+        ? t.turnover + t.totalExpensesExclSTT 
+        : t.turnover - t.totalExpensesExclSTT;
 
       return [
-        t.tradeDate, 
-        t.securityName, 
-        t.transactionType, 
+        `"${t.tradeDate}"`, 
+        `"${t.securityName.replace(/"/g, '""')}"`, 
+        `"${t.transactionType}"`, 
         t.quantity, 
         t.avgPrice.toFixed(2),
         t.turnover.toFixed(2),
@@ -109,7 +131,9 @@ export default function App() {
         t.gst.toFixed(2),
         t.totalExpensesInclSTT.toFixed(2),
         t.totalExpensesExclSTT.toFixed(2),
-        t.tradeType
+        totalWithExpenseInclSTT.toFixed(2),
+        totalWithExpenseExclSTT.toFixed(2),
+        `"${t.tradeType}"`
       ];
     });
 
@@ -118,7 +142,9 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `contract_note_analysis_${new Date().toISOString().split('T')[0]}.csv`);
+    const cleanDate = (data.tradeDate || "").trim().replace(/[\s\/\\]/g, "_") || new Date().toISOString().split('T')[0];
+    const cleanBroker = (data.brokerName || broker || "broker").toLowerCase().trim();
+    link.setAttribute("download", `contract_note_${cleanBroker}_${cleanDate}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -198,6 +224,9 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
+              <SummaryCard label="Total Amount" value={totalGrossValue} highlight />
+              <SummaryCard label="Total w/ Expense (Incl STT)" value={totalWithExpenseInclSTT} highlight />
+              <SummaryCard label="Total w/ Expense (Excl STT)" value={totalWithExpenseExclSTT} highlight />
               <SummaryCard label="Brokerage" value={data.summary.taxableValue} />
               <SummaryCard label="Total STT" value={data.summary.stt} />
               <SummaryCard label="Total GST" value={data.summary.cgst + data.summary.sgst} />
@@ -219,22 +248,38 @@ export default function App() {
                     <th className="px-6 py-4 text-center">Type</th>
                     <th className="px-6 py-4 text-right">Shares</th>
                     <th className="px-6 py-4 text-right">Price</th>
-                    <th className="px-6 py-4 text-right fon-bold text-slate-900 border-l border-slate-100">Net Obligation (Before Levies)</th>
+                    <th className="px-6 py-4 text-right">Total Amount</th>
+                    <th className="px-6 py-4 text-right">Total (Incl STT)</th>
+                    <th className="px-6 py-4 text-right">Total (Excl STT)</th>
+                    <th className="px-6 py-4 text-right font-bold text-slate-900 border-l border-slate-100">Net Obligation (Before Levies)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 italic font-mono text-xs">
-                  {data.trades.map(t => (
-                    <tr key={t.id} className="hover:bg-slate-50">
-                      <td className="px-6 py-4 text-slate-400">{t.tradeDate}</td>
-                      <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic">{t.securityName}</td>
-                      <td className="px-6 py-4 text-center">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
-                      </td>
-                      <td className="px-6 py-4 text-right font-medium">{t.quantity}</td>
-                      <td className="px-6 py-4 text-right">{t.avgPrice.toFixed(2)}</td>
-                      <td className={`px-6 py-4 text-right font-black border-l border-slate-100 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{t.netTotalBeforeLevies.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                    </tr>
-                  ))}
+                  {data.trades.map(t => {
+                    const totalQntXPrice = t.quantity * t.avgPrice;
+                    const totalInclSTT = t.transactionType === "Buy" 
+                      ? t.turnover + t.totalExpensesInclSTT 
+                      : t.turnover - t.totalExpensesInclSTT;
+                    const totalExclSTT = t.transactionType === "Buy" 
+                      ? t.turnover + t.totalExpensesExclSTT 
+                      : t.turnover - t.totalExpensesExclSTT;
+
+                    return (
+                      <tr key={t.id} className="hover:bg-slate-50">
+                        <td className="px-6 py-4 text-slate-400">{t.tradeDate}</td>
+                        <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic">{t.securityName}</td>
+                        <td className="px-6 py-4 text-center">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
+                        </td>
+                        <td className="px-6 py-4 text-right font-medium">{t.quantity}</td>
+                        <td className="px-6 py-4 text-right">{t.avgPrice.toFixed(2)}</td>
+                        <td className="px-6 py-4 text-right">{totalQntXPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td className="px-6 py-4 text-right font-semibold text-slate-700">{totalInclSTT.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td className="px-6 py-4 text-right font-semibold text-slate-700">{totalExclSTT.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td className={`px-6 py-4 text-right font-black border-l border-slate-100 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{t.netTotalBeforeLevies.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

@@ -41,4 +41,6 @@ export interface Summary {
 export interface ContractNoteResult {
   summary: Summary;
   trades: Trade[];
+  brokerName?: string;
+  tradeDate?: string;
 }

@@ -21,6 +21,34 @@ const parseNumber = (str: string | null): number => {
 const cleanText = (str: string | null): string => 
   (str?.toLowerCase().replace(/\s+/g, ' ').trim()) || "";
 
+const isFootnoteOrDisclaimer = (text: string | null): boolean => {
+  if (!text) return false;
+  const l = text.toLowerCase();
+  if (l.includes("pure agent") || 
+      l.includes("collecting") || 
+      l.includes("is levied") || 
+      l.includes("is payable") ||
+      l.includes("not considered") ||
+      l.includes("provisions of the") ||
+      l.includes("rules, bye-laws") ||
+      l.includes("authorized signatory") ||
+      l.includes("complaints@") ||
+      l.includes("compliance officer") ||
+      l.includes("proprietary trading") ||
+      l.includes("disclosure:") ||
+      l.includes("disclaimer:") ||
+      l.includes("with the rules") ||
+      l.includes("under section") ||
+      l.includes("subject to the rules")
+  ) {
+    return true;
+  }
+  if (l.length > 100 && (l.includes("the") || l.includes("and") || l.includes("for") || l.includes("with"))) {
+    return true;
+  }
+  return false;
+};
+
 const getTradeDate = (doc: Document | string): string => {
   const dateRegex = /(\d{2}[-/]\d{2}[-/]\d{4})|(\d{4}[-/]\d{2}[-/]\d{2})/;
   
@@ -103,10 +131,36 @@ export const extractTextFromPDF = async (file: File, password?: string): Promise
 
 const extractSummaryFromText = (text: string): Summary => {
   const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
-  const lines = text.split('\n');
+  
+  // Truncate text before Annexure or Disclaimer to avoid standard/footnote interference from later pages
+  const parts = text.split(/annexure\s*[a-z]|disclaimer/i);
+  const cleanPdfText = parts[0];
+  
+  const lines = cleanPdfText.split('\n');
 
+  let insideChargesBlock = false;
+  let hasChargesBlock = false;
+
+  // Check if we can use the targeted charges block parsing
   for (const line of lines) {
     const l = cleanText(line);
+    if (l.includes("pay in/pay out obligation") || l.includes("pay in / pay out obligation")) {
+      hasChargesBlock = true;
+      break;
+    }
+  }
+
+  for (const line of lines) {
+    if (isFootnoteOrDisclaimer(line)) continue;
+    const l = cleanText(line);
+
+    if (hasChargesBlock) {
+      if (l.includes("pay in/pay out") || l.includes("pay in / pay out")) {
+        insideChargesBlock = true;
+      }
+      if (!insideChargesBlock) continue;
+    }
+    
     // Ignore percentages in labels
     const textWithoutPercentages = line.replace(/\d+%\s*/g, ' ');
     const matches = textWithoutPercentages.match(/\(?\d{1,3}(?:,\d{3,})*(?:\.\d+)?\)?|\d+(?:\.\d+)?/g);
@@ -139,14 +193,24 @@ const extractSummaryFromText = (text: string): Summary => {
     else if (l.includes("sebi turnover fees") || l.includes("sebi turnover fee") || l.includes("sebi turnover")) s.sebiFees = absVal;
     else if (l.includes("stamp duty")) s.stampDuty = absVal;
     else if (l.includes("ipf") || l.includes("investor protection fund") || l.includes("investor protection")) s.ipf = absVal;
-    else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)")) s.netSettlement = val;
+    else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)")) {
+      s.netSettlement = val;
+      if (hasChargesBlock) {
+        insideChargesBlock = false;
+        break; // Stop parsing after net amount in targeted block mode
+      }
+    }
   }
   return s;
 };
 
 const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | null> => {
-  const summary = extractSummaryFromText(text);
-  const tradeDate = getTradeDate(text);
+  // Truncate text before Annexure or Disclaimer to keep only the summary section
+  const parts = text.split(/annexure\s*[a-z]|disclaimer/i);
+  const cleanPdfText = parts[0];
+
+  const summary = extractSummaryFromText(cleanPdfText);
+  const tradeDate = getTradeDate(cleanPdfText);
   const aggregateTrades: any[] = [];
   const annexureTrades: any[] = [];
   
@@ -572,6 +636,7 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
 
   const totalTurnover = tradesToProcess.reduce((sum, t) => sum + (t.quantity * t.price), 0);
   const totalBuyTurnover = tradesToProcess.reduce((sum, t) => t.type === "Buy" ? sum + (t.quantity * t.price) : sum, 0);
+  const totalSellTurnover = tradesToProcess.reduce((sum, t) => t.type === "Sell" ? sum + (t.quantity * t.price) : sum, 0);
 
   const trades: Trade[] = tradesToProcess.map((t, idx) => {
     const s = securityStats.get(t.securityName);
@@ -581,9 +646,10 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
     // Proportional distribution of summary charges
     const ratio = totalTurnover > 0 ? grossTotal / totalTurnover : 0;
     const buyRatio = totalBuyTurnover > 0 && t.type === "Buy" ? grossTotal / totalBuyTurnover : 0;
+    const sellRatio = totalSellTurnover > 0 && t.type === "Sell" ? grossTotal / totalSellTurnover : 0;
 
     const brokerage = rt(summary.taxableValue * ratio);
-    const stt = rt(summary.stt * ratio);
+    const stt = rt(summary.stt * sellRatio);
     const etc = rt(summary.etc * ratio);
     const sebiFees = rt(summary.sebiFees * ratio);
     const clearingCharges = rt(summary.clearingCharges * ratio);
@@ -617,7 +683,8 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
     };
   });
 
-  return { summary, trades };
+  const brokerName = prefix === "z" ? "zerodha" : prefix === "i" ? "integrated" : "standard";
+  return { summary, trades, brokerName, tradeDate };
 };
 
 export const detectFormat = (html: string): "integrated" | "standard" | "zerodha" => {
@@ -663,15 +730,19 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
   const summary: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
   const trades: Trade[] = [];
   let id = 0;
+  let mergedBrokerName = "";
+  let mergedTradeDate = "";
   results.forEach(r => {
     summary.payinObligation += r.summary.payinObligation; summary.stt += r.summary.stt; summary.taxableValue += r.summary.taxableValue;
     summary.cgst += r.summary.cgst; summary.sgst += r.summary.sgst; summary.etc += r.summary.etc;
     summary.sebiFees += r.summary.sebiFees; summary.clearingCharges += r.summary.clearingCharges; summary.stampDuty += r.summary.stampDuty; summary.ipf += r.summary.ipf;
     summary.netSettlement += r.summary.netSettlement;
     r.trades.forEach(t => trades.push({ ...t, id: `tx-merged-${id++}` }));
+    if (r.brokerName) mergedBrokerName = r.brokerName;
+    if (r.tradeDate) mergedTradeDate = r.tradeDate;
   });
   trades.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
-  return { summary, trades };
+  return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate };
 };
 
 export const parseZerodhaContractNote = async (html: string): Promise<ContractNoteResult | null> => {
@@ -683,26 +754,31 @@ export const parseZerodhaContractNote = async (html: string): Promise<ContractNo
   
   // 1. Extract Summary
   for (const table of tables) {
-    const rows = Array.from(table.querySelectorAll('tr'));
-    for (const row of rows) {
-      const text = cleanText(row.textContent);
-      const valToken = row.querySelector('td:last-child')?.textContent || "";
-      const val = parseNumber(valToken);
-      if (Math.abs(val) === 0) continue;
-      const absVal = Math.abs(val);
+    const tableText = cleanText(table.textContent);
+    if (tableText.includes("pay in/pay out obligation") || tableText.includes("pay in / pay out obligation")) {
+      const rows = Array.from(table.querySelectorAll('tr'));
+      for (const row of rows) {
+        if (isFootnoteOrDisclaimer(row.textContent)) continue;
+        const text = cleanText(row.textContent);
+        const valToken = row.querySelector('td:last-child')?.textContent || "";
+        const val = parseNumber(valToken);
+        if (Math.abs(val) === 0) continue;
+        const absVal = Math.abs(val);
 
-      if (text.includes("pay in/pay out obligation") || text.includes("pay in / pay out obligation")) summary.payinObligation = absVal;
-      else if (text.includes("securities transaction tax") || text.includes("stt")) summary.stt = absVal;
-      else if (text.includes("taxable value")) summary.taxableValue = absVal;
-      else if (text.includes("exchange transaction charges") || (text.includes("exchange") && text.includes("transaction") && text.includes("charge"))) summary.etc = absVal;
-      else if (text.includes("clearing charges")) summary.clearingCharges = absVal;
-      else if (text.includes("sebi turnover fees") || text.includes("sebi turnover fee")) summary.sebiFees = absVal;
-      else if (text.includes("stamp duty")) summary.stampDuty = absVal;
-      else if (text.includes("net amount receivable") || text.includes("net amount payable")) summary.netSettlement = val;
-      else if (text.includes("igst") || text.includes("cgst") || text.includes("sgst")) {
-        if (text.includes("igst") || text.includes("cgst")) summary.cgst += absVal;
-        else if (text.includes("sgst")) summary.sgst += absVal;
+        if (text.includes("pay in/pay out obligation") || text.includes("pay in / pay out obligation")) summary.payinObligation = absVal;
+        else if (text.includes("securities transaction tax") || text.includes("stt")) summary.stt = absVal;
+        else if (text.includes("taxable value")) summary.taxableValue = absVal;
+        else if (text.includes("exchange transaction charges") || (text.includes("exchange") && text.includes("transaction") && text.includes("charge"))) summary.etc = absVal;
+        else if (text.includes("clearing charges")) summary.clearingCharges = absVal;
+        else if (text.includes("sebi turnover fees") || text.includes("sebi turnover fee")) summary.sebiFees = absVal;
+        else if (text.includes("stamp duty")) summary.stampDuty = absVal;
+        else if (text.includes("net amount receivable") || text.includes("net amount payable")) summary.netSettlement = val;
+        else if (text.includes("igst") || text.includes("cgst") || text.includes("sgst")) {
+          if (text.includes("igst") || text.includes("cgst")) summary.cgst += absVal;
+          else if (text.includes("sgst")) summary.sgst += absVal;
+        }
       }
+      break; // Stop parsing other tables once the charges table is analyzed
     }
   }
 
