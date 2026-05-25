@@ -403,33 +403,21 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
   const cnSummary = cnData.summary;
   const cnTotalGST = cnSummary.cgst + cnSummary.sgst;
 
-  // STT Rule: 0.1% on SELL ONLY
+  // STT Rule: Distributed proportionally across both BUY and SELL trades (turnover-based)
   csvTrades.forEach(t => {
-    if (t.stt > 0 && t.transactionType === 'Buy') {
+    // Check if the individual STT is a reasonable proportion of the total STT of the note
+    const expectedRatio = totalTurnover > 0 ? (t.turnover / totalTurnover) : 0;
+    const expectedSTTCopy = cnSummary.stt * expectedRatio;
+    if (t.stt > 0 && Math.abs(t.stt - expectedSTTCopy) > 10.0) {
       addIssue(
         'Charge',
-        'Critical',
-        `STT leviable on BUY: Row ${t.rawRowIndex} (${t.securityName})`,
-        `STT (Securities Transaction Tax) of ₹${t.stt.toFixed(2)} was erroneously charged on a BUY order. Under standard equity delivery rules, STT should apply to SELL transactions only.`,
-        0,
+        'Minor',
+        `STT allocation discrepancy: Row ${t.rawRowIndex} (${t.securityName})`,
+        `STT of ₹${t.stt.toFixed(2)} differs from the proportional expected allocation of ₹${expectedSTTCopy.toFixed(2)}.`,
+        expectedSTTCopy,
         t.stt,
-        t.stt
+        Math.abs(t.stt - expectedSTTCopy)
       );
-    }
-    // STT Rate Check on Sell: should be ~0.1% (or closer, allowing some leeway for rounding/intraday rates)
-    if (t.transactionType === 'Sell' && t.stt > 0) {
-      const expectedSTT = t.turnover * 0.001;
-      if (Math.abs(t.stt - expectedSTT) > 1.0 && Math.abs(t.stt - (t.turnover * 0.00025)) > 1.0) { // Check both Delivery (0.1%) and Intraday (0.025%)
-        addIssue(
-          'Charge',
-          'Minor',
-          `STT Rate Discrepancy: Row ${t.rawRowIndex} (${t.securityName})`,
-          `STT on Sell order is ₹${t.stt.toFixed(2)}, but expected delivery STT is ₹${expectedSTT.toFixed(2)} (or ₹${(t.turnover * 0.00025).toFixed(2)} for Intraday).`,
-          expectedSTT,
-          t.stt,
-          Math.abs(t.stt - expectedSTT)
-        );
-      }
     }
   });
 
@@ -693,15 +681,14 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
   const totalBuyTurnover = validCsvTrades.filter(t => t.type === 'Buy').reduce((sum, t) => sum + t.correctedTurnover, 0);
   const totalTurnover = validCsvTrades.reduce((sum, t) => sum + t.correctedTurnover, 0);
 
-  // Distribute levies proportionally
-  const sellTrades = validCsvTrades.filter(t => t.type === 'Sell');
-  if (sellTrades.length > 0 && cnSummary.stt > 0) {
+  // Distribute levies proportionally across all trades
+  if (validCsvTrades.length > 0 && cnSummary.stt > 0) {
     let allocatedSum = 0;
-    sellTrades.forEach((t, idx) => {
-      if (idx === sellTrades.length - 1) {
+    validCsvTrades.forEach((t, idx) => {
+      if (idx === validCsvTrades.length - 1) {
         t.correctedStt = Math.max(0, Math.round((cnSummary.stt - allocatedSum) * 100) / 100);
       } else {
-        const share = (t.correctedTurnover / totalSellTurnover) * cnSummary.stt;
+        const share = (t.correctedTurnover / totalTurnover) * cnSummary.stt;
         const roundedShare = Math.max(0, Math.round(share * 100) / 100);
         t.correctedStt = roundedShare;
         allocatedSum += roundedShare;
@@ -825,9 +812,9 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
 
   // Generate Corrected STT table
   const correctedSttTable: { stock: string; currentStt: number; correctedStt: number; transactionAmt: number }[] = [];
-  validCsvTrades.filter(t => t.type === 'Sell').forEach(t => {
+  validCsvTrades.filter(t => t.correctedStt > 0 || t.originalStt > 0).forEach(t => {
     correctedSttTable.push({
-      stock: `${t.securityName} (${t.quantity} qty)`,
+      stock: `${t.securityName} (${t.quantity} qty - ${t.type})`,
       currentStt: t.originalStt,
       correctedStt: t.correctedStt,
       transactionAmt: t.correctedTurnover

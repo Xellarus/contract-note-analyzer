@@ -649,7 +649,7 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
     const sellRatio = totalSellTurnover > 0 && t.type === "Sell" ? grossTotal / totalSellTurnover : 0;
 
     const brokerage = rt(summary.taxableValue * ratio);
-    const stt = rt(summary.stt * sellRatio);
+    const stt = rt(summary.stt * ratio);
     const etc = rt(summary.etc * ratio);
     const sebiFees = rt(summary.sebiFees * ratio);
     const clearingCharges = rt(summary.clearingCharges * ratio);
