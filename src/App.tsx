@@ -166,8 +166,8 @@ export default function App() {
     const headers = [
       "Trade Date", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
       "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT", 
-      "Exchange Turnover Charges", "SEBI Turnover Fees", "Exchange Clearing Charges", 
-      "Stamp Duty", "IPF", "GST", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
+      "Exchange Turnover Charges", "SEBI Turnover Fees", "IGST", 
+      "Stamp Duty", "IPF", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
     
@@ -195,7 +195,6 @@ export default function App() {
         t.clearingCharges.toFixed(2),
         t.stampDuty.toFixed(2),
         t.ipf.toFixed(2),
-        t.gst.toFixed(2),
         t.totalExpensesInclSTT.toFixed(2),
         t.totalExpensesExclSTT.toFixed(2),
         totalWithExpenseInclSTT.toFixed(2),
@@ -484,10 +483,9 @@ export default function App() {
                   <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight />
                   <SummaryCard label="Brokerage/Taxable" value={calculatedTotals.brokerage} />
                   <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} />
-                  <SummaryCard label="Total GST" value={calculatedTotals.gst} />
                   <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} />
                   <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} />
-                  <SummaryCard label="Clearing Fee" value={calculatedTotals.clearingCharges} />
+                  <SummaryCard label="IGST" value={calculatedTotals.clearingCharges} />
                   <SummaryCard label="SEBI Fees & Other" value={calculatedTotals.sebiFeesAndOther} />
                 </div>
 
@@ -504,7 +502,7 @@ export default function App() {
                         <th className="px-6 py-4 text-center bg-indigo-50/50 text-indigo-700">Class</th>
                         <th className="px-6 py-4 text-right">Brokerage</th>
                         <th className="px-6 py-4 text-right text-rose-700 bg-rose-50/30">STT</th>
-                        <th className="px-6 py-4 text-right">GST</th>
+                        <th className="px-6 py-4 text-right font-semibold text-indigo-700 bg-indigo-50/10">IGST</th>
                         <th className="px-6 py-4 text-right">ETC</th>
                         <th className="px-6 py-4 text-right">Stamp Duty</th>
                         <th className="px-6 py-4 text-right">Other Levies</th>
@@ -539,10 +537,10 @@ export default function App() {
                             </td>
                             <td className="px-6 py-4 text-right text-slate-600">₹{t.brokerage.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right font-semibold text-rose-700 bg-rose-50/10">₹{t.stt.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.gst.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{t.clearingCharges.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-600">₹{t.etc.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-600">₹{t.stampDuty.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{(t.sebiFees + t.clearingCharges + t.ipf).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-600">₹{(t.sebiFees + t.ipf).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesInclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesExclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalInclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>

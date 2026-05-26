@@ -401,7 +401,7 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
 
   // 2. Charge and Tax Verifications
   const cnSummary = cnData.summary;
-  const cnTotalGST = cnSummary.cgst + cnSummary.sgst;
+  const cnTotalGST = cnSummary.gst;
 
   // STT Rule: Distributed proportionally across both BUY and SELL trades (turnover-based)
   csvTrades.forEach(t => {
@@ -450,10 +450,10 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
     }
   });
 
-  // GST Rule: 18% applied to Brokerage + ETC + SEBI (Clearing Charges included if applicable)
+  // GST Rule: 18% applied to Brokerage + ETC + SEBI + Clearing Charges
   csvTrades.forEach(t => {
     if (t.gst > 0) {
-      const gstBase = t.brokerage + t.etc + t.sebiFees;
+      const gstBase = t.brokerage + t.etc + t.sebiFees + (t.clearingCharges || 0);
       const expectedGST = gstBase * 0.18;
       // If GST exceeds expected GST significantly (e.g. they applied GST to STT, which is wrong!)
       if (t.gst > expectedGST + 0.5) {
@@ -463,7 +463,7 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
             'Charge',
             'Major',
             `Wrong GST Base: Row ${t.rawRowIndex} (${t.securityName})`,
-            `GST is ₹${t.gst.toFixed(2)}, which indicates GST was calculated on top of STT and Stamp Duty (double taxation). GST should only apply to Brokerage, Exchange Charges, and SEBI fees.`,
+            `GST is ₹${t.gst.toFixed(2)}, which indicates GST was calculated on top of STT and Stamp Duty (double taxation). GST should only apply to Brokerage, Exchange Charges, SEBI fees, and Clearing charges.`,
             expectedGST,
             t.gst,
             t.gst - expectedGST

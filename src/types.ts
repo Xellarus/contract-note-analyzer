@@ -19,6 +19,9 @@ export interface Trade {
   clearingCharges: number;
   stampDuty: number;
   ipf: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
   gst: number;
   totalExpensesInclSTT: number;
   totalExpensesExclSTT: number;
@@ -30,6 +33,8 @@ export interface Summary {
   taxableValue: number;
   cgst: number;
   sgst: number;
+  igst: number;
+  gst: number;
   etc: number;
   sebiFees: number;
   clearingCharges: number;
