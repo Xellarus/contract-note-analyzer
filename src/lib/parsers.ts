@@ -1,4 +1,4 @@
-import { ContractNoteResult, Summary, Trade, TransactionType, TradeType } from '../types';
+import { ContractNoteResult, Summary, Trade, TransactionType, TradeType, ReconciliationStatus } from '../types';
 import * as pdfjs from 'pdfjs-dist';
 
 // Configure pdfjs worker
@@ -129,88 +129,201 @@ export const extractTextFromPDF = async (file: File, password?: string): Promise
   }
 };
 
-const extractSummaryFromText = (text: string): Summary => {
-  const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
+const getConfidenceAndKey = (lText: string, insideBlock: boolean): { key: keyof Summary | null, confidence: number } => {
+  const l = lText.toLowerCase();
   
-  // Truncate text before Annexure or Disclaimer to avoid standard/footnote interference from later pages
-  const parts = text.split(/annexure\s*[a-z]|disclaimer/i);
-  const cleanPdfText = parts[0];
+  // Exclude FOOTNOTE/DISCLAIMER descriptions from matching
+  const isFootnote = isFootnoteOrDisclaimer(lText) 
+    || l.includes("is payable") 
+    || l.includes("levied") 
+    || l.includes("under section") 
+    || l.includes("per nse") 
+    || l.includes("registered office")
+    || l.includes("compliance")
+    || l.includes("sebi registration")
+    || l.includes("circular");
   
-  const lines = cleanPdfText.split('\n');
-
-  let insideChargesBlock = false;
-  let hasChargesBlock = false;
-
-  // Check if we can use the targeted charges block parsing
-  for (const line of lines) {
-    const l = cleanText(line);
-    if (l.includes("pay in/pay out obligation") || l.includes("pay in / pay out obligation")) {
-      hasChargesBlock = true;
-      break;
+  let key: keyof Summary | null = null;
+  
+  if (l.includes("pay in/pay out obligation") || l.includes("pay in / pay out obligation") || l.includes("pay-in/pay-out obligation") || l.includes("net obligation")) {
+    key = "payinObligation";
+  } else if (l.includes("securities transaction tax") || l.includes("stt")) {
+    if (insideBlock) {
+      key = "stt";
     }
+  } else if (l.includes("taxable value of supply") || l.includes("taxable value") || l.includes("taxable value of services")) {
+    key = "taxableValue";
+  } else if (l.includes("exchange transaction charges") || (l.includes("exchange") && l.includes("transaction") && l.includes("charge"))) {
+    key = "etc";
+  } else if (l.includes("clearing charges") || l.includes("clearing charge")) {
+    key = "clearingCharges";
+  } else if (l.includes("sebi turnover fees") || l.includes("sebi turnover fee") || l.includes("sebi turnover") || l.includes("sebi fees")) {
+    key = "sebiFees";
+  } else if (l.includes("stamp duty")) {
+    key = "stampDuty";
+  } else if (l.includes("ipf") || l.includes("investor protection fund") || l.includes("investor protection")) {
+    key = "ipf";
+  } else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)")) {
+    key = "netSettlement";
+  } else if (l.includes("sgst") || l.includes("utgst")) {
+    key = "sgst";
+  } else if (l.includes("cgst") || l.includes("igst") || (l.includes("gst") && !l.includes("gstin"))) {
+    key = "cgst";
   }
+  
+  if (!key) return { key: null, confidence: 0 };
+  
+  let confidence = 1;
+  if (insideBlock) {
+    confidence = 3;
+  } else if (l.includes("obligation") || l.includes("receivable") || l.includes("payable")) {
+    confidence = 2;
+  }
+  
+  if (isFootnote) {
+    confidence = 0; // Penalize footnotes heavily
+  }
+  
+  return { key, confidence };
+};
+
+const extractSummaryFromText = (text: string): Summary => {
+  const candidateMap: Record<keyof Summary, { value: number; confidence: number; lineText: string }[]> = {
+    payinObligation: [],
+    stt: [],
+    taxableValue: [],
+    cgst: [],
+    sgst: [],
+    etc: [],
+    sebiFees: [],
+    clearingCharges: [],
+    stampDuty: [],
+    ipf: [],
+    netSettlement: []
+  };
+
+  const lines = text.split('\n');
+  let insideChargesBlock = false;
 
   for (const line of lines) {
-    if (isFootnoteOrDisclaimer(line)) continue;
     const l = cleanText(line);
 
-    if (hasChargesBlock) {
-      if (l.includes("pay in/pay out") || l.includes("pay in / pay out")) {
-        insideChargesBlock = true;
-      }
-      if (!insideChargesBlock) continue;
+    // Dynamic start of the charges block
+    if (
+      l.includes("pay in/pay out obligation") || 
+      l.includes("pay in / pay out obligation") || 
+      l.includes("pay-in/pay-out obligation") ||
+      l.includes("exchange transaction charges") ||
+      l.includes("exchange transaction charge") ||
+      l.includes("taxable value") ||
+      l.includes("net amount receivable") ||
+      l.includes("net amount payable") ||
+      l.includes("net amount receivable/(payable)")
+    ) {
+      insideChargesBlock = true;
     }
-    
-    // Ignore percentages in labels
-    const textWithoutPercentages = line.replace(/\d+%\s*/g, ' ');
-    const matches = textWithoutPercentages.match(/\(?\d{1,3}(?:,\d{3,})*(?:\.\d+)?\)?|\d+(?:\.\d+)?/g);
-    if (!matches) continue;
-    
-    // In brokerage summaries, values almost always have decimals or are in parens.
-    // Footnote markers are typically single integers without decimals.
-    let candidates = matches.filter(m => m.includes('.') || m.includes('(') || m.includes(')'));
-    
-    if (candidates.length === 0) continue; 
 
-    // We take the last candidate as it matches the right-most column (Net Total) in the CN summary table
+    // End/stop insideChargesBlock more aggressively
+    if (
+      l.includes("annexure") ||
+      l.includes("disclaimer") ||
+      l.includes("authorized signatory") ||
+      l.includes("compliance officer")
+    ) {
+      insideChargesBlock = false;
+    }
+
+    const { key, confidence } = getConfidenceAndKey(line, insideChargesBlock);
+    if (!key || confidence === 0) {
+      if (
+        l.includes("net amount receivable") || 
+        l.includes("net amount payable") || 
+        l.includes("net amount receivable/(payable)")
+      ) {
+        insideChargesBlock = false;
+      }
+      continue;
+    }
+
+    // Now extract numbers
+    // Replace percentages first to avoid confusing with values
+    const textWithoutPercentages = line.replace(/\d+%\s*/g, ' ');
+    const cleanedLine = textWithoutPercentages
+      .replace(/^\s*\d+\.\s+/, ' ') // change to space to not merge words
+      .replace(/\s+\d+\.\s+/g, ' ') // replace list indicators in the middle like "1. " or "5. " or "6. "
+      .replace(/^\s*[a-zA-Z0-9]\)\s+/, ' ')
+      .replace(/\s+[a-zA-Z0-9]\)\s+/g, ' ') // replace middle "1)" or "a)"
+      .replace(/\[\d+\]/g, ' ') // replace "[5]"
+      .trim();
+
+    const matches = cleanedLine.match(/\(?\d{1,3}(?:,\d{3,})*(?:\.\d+)?\)?|\d+(?:\.\d+)?/g);
+    if (!matches) continue;
+
+    // Filter candidates to ensure no list items index leak like "5."
+    const candidates = matches.map(m => m.trim()).filter(m => {
+      if (m.length === 1 && m.match(/^\d$/)) return false;
+      if (m.endsWith('.') && !m.match(/\d\.\d+/)) return false;
+      // If it ends with ')' but doesn't start with '(' (which would mean a negative number like (25192.70)), reject it
+      if (m.endsWith(')') && !m.startsWith('(')) return false;
+      return true;
+    });
+
+    if (candidates.length === 0) continue;
+
+    // The financial value usually is the last candidate on the line (the right-most column value)
     const lastMatch = candidates[candidates.length - 1];
     const val = parseNumber(lastMatch);
     const absVal = Math.abs(val);
 
-    // If it's 0 and not the net settlement line, skip to avoid empty label matching
-    if (absVal === 0 && !l.includes("net amount")) continue;
+    // Skip zero values unless it's netSettlement or payinObligation
+    if (absVal === 0 && key !== "netSettlement" && key !== "payinObligation") continue;
 
-    // Check for tax types first
-    if (l.includes("igst") || l.includes("cgst") || l.includes("sgst") || l.includes("gst")) {
-      if (l.includes("sgst")) s.sgst += absVal;
-      else s.cgst += absVal;
-    } 
-    else if (l.includes("pay in/pay out obligation") || l.includes("pay in / pay out obligation")) s.payinObligation = absVal;
-    else if (l.includes("securities transaction tax") || l.includes("stt")) s.stt = absVal;
-    else if (l.includes("taxable value of supply") || l.includes("taxable value")) s.taxableValue = absVal;
-    else if (l.includes("exchange transaction charges") || (l.includes("exchange") && l.includes("transaction") && l.includes("charge"))) s.etc = absVal;
-    else if (l.includes("clearing charges")) s.clearingCharges = absVal;
-    else if (l.includes("sebi turnover fees") || l.includes("sebi turnover fee") || l.includes("sebi turnover")) s.sebiFees = absVal;
-    else if (l.includes("stamp duty")) s.stampDuty = absVal;
-    else if (l.includes("ipf") || l.includes("investor protection fund") || l.includes("investor protection")) s.ipf = absVal;
-    else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)")) {
-      s.netSettlement = val;
-      if (hasChargesBlock) {
-        insideChargesBlock = false;
-        break; // Stop parsing after net amount in targeted block mode
-      }
+    candidateMap[key].push({ value: val, confidence, lineText: line });
+
+    if (key === "netSettlement") {
+      insideChargesBlock = false;
     }
   }
+
+  const selectBestValue = (key: keyof Summary): number => {
+    const list = candidateMap[key];
+    if (list.length === 0) return 0;
+    
+    // Sort descending by confidence
+    list.sort((a, b) => b.confidence - a.confidence);
+    const bestConfidence = list[0].confidence;
+    
+    // Filter to only those with the best confidence
+    const bestCandidates = list.filter(c => c.confidence === bestConfidence);
+    
+    // Among same-confidence candidates: choose larger absolute value to avoid spurious list index or footnote number selection
+    if (bestCandidates.length > 1) {
+      bestCandidates.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+    }
+    
+    return bestCandidates[0].value;
+  };
+
+  const s: Summary = {
+    payinObligation: Math.abs(selectBestValue("payinObligation")),
+    stt: Math.abs(selectBestValue("stt")),
+    taxableValue: Math.abs(selectBestValue("taxableValue")),
+    cgst: Math.abs(selectBestValue("cgst")),
+    sgst: Math.abs(selectBestValue("sgst")),
+    etc: Math.abs(selectBestValue("etc")),
+    sebiFees: Math.abs(selectBestValue("sebiFees")),
+    clearingCharges: Math.abs(selectBestValue("clearingCharges")),
+    stampDuty: Math.abs(selectBestValue("stampDuty")),
+    ipf: Math.abs(selectBestValue("ipf")),
+    netSettlement: selectBestValue("netSettlement")
+  };
+
   return s;
 };
 
-const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | null> => {
-  // Truncate text before Annexure or Disclaimer to keep only the summary section
-  const parts = text.split(/annexure\s*[a-z]|disclaimer/i);
-  const cleanPdfText = parts[0];
-
-  const summary = extractSummaryFromText(cleanPdfText);
-  const tradeDate = getTradeDate(cleanPdfText);
+export const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | null> => {
+  const summary = extractSummaryFromText(text);
+  const tradeDate = getTradeDate(text);
   const aggregateTrades: any[] = [];
   const annexureTrades: any[] = [];
   
@@ -268,7 +381,7 @@ const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | 
           const price = parseNumber(tokens[sideIdx + 4]);
           
           if (qty > 0 && price > 0) {
-            annexureTrades.push({ securityName: security, quantity: qty, price, brokeragePerShare: brok, type: side });
+            annexureTrades.push({ securityName: security, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: line });
           }
           continue;
       }
@@ -318,7 +431,7 @@ const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | 
                 if (qty > 0 && price > 0) {
                   const alreadyExists = aggregateTrades.some(t => t.securityName === security && t.quantity === qty && Math.abs(t.price - price) < 0.01 && t.type === side);
                   if (!alreadyExists) {
-                    aggregateTrades.push({ securityName: security, quantity: qty, price, brokeragePerShare: brok, type: side });
+                    aggregateTrades.push({ securityName: security, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: line });
                   }
                 }
               }
@@ -345,12 +458,12 @@ const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | 
           if (buyQty > 0) {
             const price = numStartIdx + 1 < tokens.length ? parseNumber(tokens[numStartIdx + 1]) : 0;
             const brok = numStartIdx + 2 < tokens.length ? parseNumber(tokens[numStartIdx + 2]) : 0;
-            if (price > 0) aggregateTrades.push({ securityName: name, quantity: buyQty, price, brokeragePerShare: brok, type: 'Buy' });
+            if (price > 0) aggregateTrades.push({ securityName: name, quantity: buyQty, price, brokeragePerShare: brok, type: 'Buy', contextText: line });
           }
           if (sellQty > 0) {
             const price = numStartIdx + 6 < tokens.length ? parseNumber(tokens[numStartIdx + 6]) : 0;
             const brok = numStartIdx + 7 < tokens.length ? parseNumber(tokens[numStartIdx + 7]) : 0;
-            if (price > 0) aggregateTrades.push({ securityName: name, quantity: sellQty, price, brokeragePerShare: brok, type: 'Sell' });
+            if (price > 0) aggregateTrades.push({ securityName: name, quantity: sellQty, price, brokeragePerShare: brok, type: 'Sell', contextText: line });
           }
         }
       }
@@ -365,6 +478,7 @@ const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | 
     const last = merged[merged.length - 1];
     if (last && last.securityName === t.securityName && last.type === t.type && Math.abs(last.price - t.price) < 0.001) {
         last.quantity += t.quantity;
+        last.contextText = (last.contextText || "") + " " + (t.contextText || "");
     } else merged.push({ ...t });
   });
 
@@ -485,11 +599,11 @@ const extractStandardTrades = (doc: Document): any[] => {
           if (!name || cleanText(name).startsWith("total") || cleanText(name).startsWith("net")) continue;
           if (cells[buyIdx]) {
             const q = parseNumber(cells[buyIdx].textContent);
-            if (q > 0) trades.push({ securityName: name, quantity: q, price: buyPriceIdx !== -1 ? parseNumber(cells[buyPriceIdx].textContent) : 0, brokeragePerShare: buyBrokIdx !== -1 ? parseNumber(cells[buyBrokIdx].textContent) : 0, type: "Buy" });
+            if (q > 0) trades.push({ securityName: name, quantity: q, price: buyPriceIdx !== -1 ? parseNumber(cells[buyPriceIdx].textContent) : 0, brokeragePerShare: buyBrokIdx !== -1 ? parseNumber(cells[buyBrokIdx].textContent) : 0, type: "Buy", contextText: rows[j].textContent });
           }
           if (cells[sellIdx]) {
             const q = parseNumber(cells[sellIdx].textContent);
-            if (q > 0) trades.push({ securityName: name, quantity: q, price: sellPriceIdx !== -1 ? parseNumber(cells[sellPriceIdx].textContent) : 0, brokeragePerShare: sellBrokIdx !== -1 ? parseNumber(cells[sellBrokIdx].textContent) : 0, type: "Sell" });
+            if (q > 0) trades.push({ securityName: name, quantity: q, price: sellPriceIdx !== -1 ? parseNumber(cells[sellPriceIdx].textContent) : 0, brokeragePerShare: sellBrokIdx !== -1 ? parseNumber(cells[sellBrokIdx].textContent) : 0, type: "Sell", contextText: rows[j].textContent });
           }
         }
         if (trades.length > 0) return trades;
@@ -565,7 +679,7 @@ export const parseIntegratedContractNote = async (html: string): Promise<Contrac
                 } else if (colMap.price !== -1) { 
                     price = parseNumber(cells[colMap.price]?.textContent); 
                 }
-                if (price > 0) rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side });
+                if (price > 0) rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: row.textContent });
             }
         }
     }
@@ -575,6 +689,48 @@ export const parseIntegratedContractNote = async (html: string): Promise<Contrac
   return finalizeContractNote(summary, rawTrades, tradeDate, "i");
 };
 
+
+export const calculateReconciliation = (summary: Summary, trades: Trade[]): ReconciliationStatus => {
+  const totalBuys = trades.filter(t => t.transactionType === "Buy").reduce((sum, t) => sum + t.turnover, 0);
+  const totalSells = trades.filter(t => t.transactionType === "Sell").reduce((sum, t) => sum + t.turnover, 0);
+  
+  const calculatedObligation = totalSells - totalBuys;
+  const totalCharges = 
+    summary.taxableValue + // brokerage
+    summary.stt + 
+    summary.etc + 
+    summary.sebiFees + 
+    summary.clearingCharges + 
+    summary.stampDuty + 
+    summary.ipf + 
+    summary.cgst + 
+    summary.sgst;
+
+  const calculatedNet = calculatedObligation - totalCharges;
+  const extractedNet = summary.netSettlement;
+  const difference = Math.abs(calculatedNet - extractedNet);
+  const totalTurnover = totalBuys + totalSells;
+  const isSuspiciousStt = summary.stt < 10 && totalTurnover > 100000;
+  
+  const sumGeneratedStt = trades.reduce((sum, t) => sum + t.stt, 0);
+  const isSttMismatch = Math.abs(sumGeneratedStt - summary.stt) > 0.10;
+  const isValid = difference <= 0.10 && !isSuspiciousStt && !isSttMismatch;
+
+  return {
+    isValid,
+    totalBuys: Math.round(totalBuys * 100) / 100,
+    totalSells: Math.round(totalSells * 100) / 100,
+    calculatedObligation: Math.round(calculatedObligation * 100) / 100,
+    extractedObligation: summary.payinObligation,
+    totalCharges: Math.round(totalCharges * 100) / 100,
+    calculatedNet: Math.round(calculatedNet * 100) / 100,
+    extractedNet,
+    difference: Math.round(difference * 100) / 100,
+    statusText: isSuspiciousStt ? 'Suspicious STT' : (isValid ? 'PASSED' : 'Parser uncertain'),
+    isSuspiciousStt,
+    isSttMismatch
+  };
+};
 
 const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult => {
   // Exclude invalid or malformed data rows (e.g. pure exchange names as securities, or order numbers as share quantities)
@@ -588,41 +744,42 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
   });
 
   let tradesToProcess = validatedTrades;
-  if (prefix === "z") {
-    const groupMap = new Map<string, Map<string, any[]>>();
-    validatedTrades.forEach(t => {
-      const name = t.securityName;
-      const type = t.type;
-      if (!groupMap.has(name)) {
-        groupMap.set(name, new Map());
-      }
-      const typeMap = groupMap.get(name)!;
-      if (!typeMap.has(type)) {
-        typeMap.set(type, []);
-      }
-      typeMap.get(type)!.push(t);
-    });
+  const groupMap = new Map<string, Map<string, any[]>>();
+  validatedTrades.forEach(t => {
+    const name = t.securityName.trim();
+    const type = t.type;
+    if (!groupMap.has(name)) {
+      groupMap.set(name, new Map());
+    }
+    const typeMap = groupMap.get(name)!;
+    if (!typeMap.has(type)) {
+      typeMap.set(type, []);
+    }
+    typeMap.get(type)!.push(t);
+  });
 
-    tradesToProcess = [];
-    groupMap.forEach((typeMap, name) => {
-      typeMap.forEach((items, type) => {
-        const totalQty = items.reduce((sum: number, x: any) => sum + x.quantity, 0);
-        const totalTurnover = items.reduce((sum: number, x: any) => sum + (x.quantity * x.price), 0);
-        const totalBrokerage = items.reduce((sum: number, x: any) => sum + (x.quantity * (x.brokeragePerShare || 0)), 0);
-        
-        const avgPrice = totalQty > 0 ? (totalTurnover / totalQty) : 0;
-        const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
-        
-        tradesToProcess.push({
-          securityName: name,
-          type: type,
-          quantity: totalQty,
-          price: avgPrice,
-          brokeragePerShare: avgBrokerage
-        });
+  tradesToProcess = [];
+  groupMap.forEach((typeMap, name) => {
+    typeMap.forEach((items, type) => {
+      const totalQty = items.reduce((sum: number, x: any) => sum + x.quantity, 0);
+      const totalTurnover = items.reduce((sum: number, x: any) => sum + (x.quantity * x.price), 0);
+      const totalBrokerage = items.reduce((sum: number, x: any) => sum + (x.quantity * (x.brokeragePerShare || 0)), 0);
+      
+      const avgPrice = totalQty > 0 ? (totalTurnover / totalQty) : 0;
+      const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
+      
+      const mergedContext = items.map((x: any) => x.contextText || "").join(" ");
+      
+      tradesToProcess.push({
+        securityName: name,
+        type: type,
+        quantity: totalQty,
+        price: avgPrice,
+        brokeragePerShare: avgBrokerage,
+        contextText: mergedContext
       });
     });
-  }
+  });
 
   const securityStats = new Map();
   tradesToProcess.forEach(t => {
@@ -638,9 +795,71 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
   const totalBuyTurnover = tradesToProcess.reduce((sum, t) => t.type === "Buy" ? sum + (t.quantity * t.price) : sum, 0);
   const totalSellTurnover = tradesToProcess.reduce((sum, t) => t.type === "Sell" ? sum + (t.quantity * t.price) : sum, 0);
 
+  const INSTRUMENT_RULES = {
+    EQUITY: {
+      delivery: {
+        buy: 0.001,
+        sell: 0.001
+      },
+      intraday: {
+        buy: 0,
+        sell: 0.00025
+      }
+    },
+    ETF: {
+      delivery: {
+        buy: 0,
+        sell: 0
+      },
+      intraday: {
+        buy: 0,
+        sell: 0
+      }
+    }
+  };
+
+  const classifyInstrument = (symbol: string): "EQUITY" | "ETF" => {
+    const s = symbol.toUpperCase();
+    if (
+      s.includes("LIQUID") ||
+      s.includes("CASE") ||
+      s.includes("ETF")
+    ) return "ETF";
+    return "EQUITY";
+  };
+
   const trades: Trade[] = tradesToProcess.map((t, idx) => {
     const s = securityStats.get(t.securityName);
-    const isIntraday = s.types.has("Buy") && s.types.has("Sell");
+    
+    let isIntraday = false;
+    const textToCheck = ((t.contextText || "") + " " + t.securityName).toLowerCase();
+    
+    const hasIntradayKeyword = textToCheck.includes("intraday") || 
+                               textToCheck.includes("intra-day") || 
+                               textToCheck.includes("day trade") || 
+                               textToCheck.includes("day-trade") ||
+                               /\bmis\b/i.test(textToCheck);
+                               
+    const hasDeliveryKeyword = textToCheck.includes("delivery") || 
+                               textToCheck.includes("delv") || 
+                               /\bcnc\b/i.test(textToCheck) || 
+                               textToCheck.includes("carry forward") || 
+                               textToCheck.includes("carry-forward");
+    
+    if (hasIntradayKeyword && !hasDeliveryKeyword) {
+      isIntraday = true;
+    } else if (hasDeliveryKeyword && !hasIntradayKeyword) {
+      isIntraday = false;
+    } else {
+      // Compare net quantities where possible
+      if (s.buyQty === s.sellQty && s.buyQty > 0) {
+        isIntraday = true;
+      } else {
+        // Default equity CNs to Delivery rather than Intraday
+        isIntraday = false;
+      }
+    }
+
     const grossTotal = rt(t.quantity * t.price);
     
     // Proportional distribution of summary charges
@@ -649,7 +868,15 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
     const sellRatio = totalSellTurnover > 0 && t.type === "Sell" ? grossTotal / totalSellTurnover : 0;
 
     const brokerage = rt(summary.taxableValue * ratio);
-    const stt = rt(summary.stt * ratio);
+    
+    // Trade-level STT calculation
+    const tradeType = isIntraday ? "Intraday" : "Delivery";
+    const instrumentType = classifyInstrument(t.securityName);
+    const tradeTypeKey = isIntraday ? "intraday" : "delivery";
+    const sideKey = t.type === "Buy" ? "buy" : "sell";
+    const rate = INSTRUMENT_RULES[instrumentType][tradeTypeKey][sideKey];
+    const stt = Math.round(grossTotal * rate);
+
     const etc = rt(summary.etc * ratio);
     const sebiFees = rt(summary.sebiFees * ratio);
     const clearingCharges = rt(summary.clearingCharges * ratio);
@@ -668,7 +895,7 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
         quantity: t.quantity, 
         avgPrice: t.price, 
         turnover: grossTotal,
-        tradeType: isIntraday ? "Intraday" : "Delivery",
+        tradeType,
         netTotalBeforeLevies: t.type === "Sell" ? grossTotal : -grossTotal,
         brokerage,
         stt,
@@ -684,7 +911,8 @@ const finalizeContractNote = (summary: Summary, rawTrades: any[], tradeDate: str
   });
 
   const brokerName = prefix === "z" ? "zerodha" : prefix === "i" ? "integrated" : "standard";
-  return { summary, trades, brokerName, tradeDate };
+  const reconciliation = calculateReconciliation(summary, trades);
+  return { summary, trades, brokerName, tradeDate, reconciliation };
 };
 
 export const detectFormat = (html: string): "integrated" | "standard" | "zerodha" => {
@@ -701,7 +929,9 @@ export const processFile = async (file: File, password?: string, broker?: 'auto'
   try {
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       const text = await extractTextFromPDF(file, password);
-      return await parsePdfContractNote(text);
+      const res = await parsePdfContractNote(text);
+      if (res) res.rawText = text;
+      return res;
     }
 
     const html = await file.text();
@@ -715,7 +945,11 @@ export const processFile = async (file: File, password?: string, broker?: 'auto'
         if (!res || res.trades.length === 0) res = await parseStandardContractNote(html);
         if (!res || res.trades.length === 0) res = await parseIntegratedContractNote(html);
     }
-    return (res && res.trades.length > 0) ? res : null;
+    if (res && res.trades.length > 0) {
+      res.rawText = res.rawText || html;
+      return res;
+    }
+    return null;
   } catch (e: any) { 
     if (e.message === "PDF_PASSWORD_REQUIRED") {
       throw e;
@@ -818,7 +1052,7 @@ export const parseZerodhaContractNote = async (html: string): Promise<ContractNo
           if (side && qty > 0) {
             const price = parseNumber(cells[colMap.price]?.textContent);
             const brok = colMap.brokerage !== -1 ? parseNumber(cells[colMap.brokerage]?.textContent) : 0;
-            rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side });
+            rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: cells.map(c => c.textContent).join(" ") });
           }
         }
       }
@@ -833,6 +1067,7 @@ export const parseZerodhaContractNote = async (html: string): Promise<ContractNo
     const last = merged[merged.length - 1];
     if (last && last.securityName === t.securityName && last.type === t.type && Math.abs(last.price - t.price) < 0.001) {
         last.quantity += t.quantity;
+        last.contextText = (last.contextText || "") + " " + (t.contextText || "");
     } else {
         merged.push({ ...t });
     }

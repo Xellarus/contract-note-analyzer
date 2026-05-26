@@ -489,64 +489,64 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
       item: "Buy Total",
       contractNote: cnBuyTotal,
       csv: csvBuyTotal,
-      match: Math.abs(cnBuyTotal - csvBuyTotal) < 1.0,
-      status: Math.abs(cnBuyTotal - csvBuyTotal) < 1.0 ? 'match' : 'mismatch'
+      match: Math.abs(cnBuyTotal - csvBuyTotal) < 0.10,
+      status: Math.abs(cnBuyTotal - csvBuyTotal) < 0.10 ? 'match' : 'mismatch'
     },
     {
       item: "Sell Total",
       contractNote: cnSellTotal,
       csv: csvSellTotal,
-      match: Math.abs(cnSellTotal - csvSellTotal) < 1.0,
-      status: Math.abs(cnSellTotal - csvSellTotal) < 1.0 ? 'match' : 'mismatch'
+      match: Math.abs(cnSellTotal - csvSellTotal) < 0.10,
+      status: Math.abs(cnSellTotal - csvSellTotal) < 0.10 ? 'match' : 'mismatch'
     },
     {
       item: "Net Amount (Obligation)",
       contractNote: cnNetAmountObligation,
       csv: csvNetAmountObligation,
-      match: Math.abs(cnNetAmountObligation - csvNetAmountObligation) < 1.0,
-      status: Math.abs(cnNetAmountObligation - csvNetAmountObligation) < 1.0 ? 'match' : 'mismatch'
+      match: Math.abs(cnNetAmountObligation - csvNetAmountObligation) < 0.10,
+      status: Math.abs(cnNetAmountObligation - csvNetAmountObligation) < 0.10 ? 'match' : 'mismatch'
     },
     {
       item: "Securities Transaction Tax (STT)",
       contractNote: cnSummary.stt,
       csv: csvTotalSTT,
-      match: hasSTTColumn ? Math.abs(cnSummary.stt - csvTotalSTT) < 1.0 : false,
-      status: !hasSTTColumn ? 'not-present' : (Math.abs(cnSummary.stt - csvTotalSTT) < 1.0 ? 'match' : 'mismatch')
+      match: hasSTTColumn ? Math.abs(cnSummary.stt - csvTotalSTT) < 0.10 : false,
+      status: !hasSTTColumn ? 'not-present' : (Math.abs(cnSummary.stt - csvTotalSTT) < 0.10 ? 'match' : 'mismatch')
     },
     {
       item: "Stamp Duty",
       contractNote: cnSummary.stampDuty,
       csv: csvTotalStamp,
-      match: hasStampColumn ? Math.abs(cnSummary.stampDuty - csvTotalStamp) < 1.0 : false,
-      status: !hasStampColumn ? 'not-present' : (Math.abs(cnSummary.stampDuty - csvTotalStamp) < 1.0 ? 'match' : 'mismatch')
+      match: hasStampColumn ? Math.abs(cnSummary.stampDuty - csvTotalStamp) < 0.10 : false,
+      status: !hasStampColumn ? 'not-present' : (Math.abs(cnSummary.stampDuty - csvTotalStamp) < 0.10 ? 'match' : 'mismatch')
     },
     {
       item: "Exchange Transaction Charges",
       contractNote: cnSummary.etc,
       csv: csvTotalETC,
-      match: hasETCColumn ? Math.abs(cnSummary.etc - csvTotalETC) < 1.0 : false,
-      status: !hasETCColumn ? 'not-present' : (Math.abs(cnSummary.etc - csvTotalETC) < 1.0 ? 'match' : 'mismatch')
+      match: hasETCColumn ? Math.abs(cnSummary.etc - csvTotalETC) < 0.10 : false,
+      status: !hasETCColumn ? 'not-present' : (Math.abs(cnSummary.etc - csvTotalETC) < 0.10 ? 'match' : 'mismatch')
     },
     {
       item: "SEBI Turnover Fees",
       contractNote: cnSummary.sebiFees,
       csv: csvTotalSebi,
-      match: hasSebiColumn ? Math.abs(cnSummary.sebiFees - csvTotalSebi) < 1.0 : false,
-      status: !hasSebiColumn ? 'not-present' : (Math.abs(cnSummary.sebiFees - csvTotalSebi) < 1.0 ? 'match' : 'mismatch')
+      match: hasSebiColumn ? Math.abs(cnSummary.sebiFees - csvTotalSebi) < 0.10 : false,
+      status: !hasSebiColumn ? 'not-present' : (Math.abs(cnSummary.sebiFees - csvTotalSebi) < 0.10 ? 'match' : 'mismatch')
     },
     {
       item: "Goods & Services Tax (GST)",
       contractNote: cnTotalGST,
       csv: csvTotalGST,
-      match: hasGSTColumn ? Math.abs(cnTotalGST - csvTotalGST) < 1.0 : false,
-      status: !hasGSTColumn ? 'not-present' : (Math.abs(cnTotalGST - csvTotalGST) < 1.0 ? 'match' : 'mismatch')
+      match: hasGSTColumn ? Math.abs(cnTotalGST - csvTotalGST) < 0.10 : false,
+      status: !hasGSTColumn ? 'not-present' : (Math.abs(cnTotalGST - csvTotalGST) < 0.10 ? 'match' : 'mismatch')
     },
     {
       item: "Brokerage",
       contractNote: cnSummary.taxableValue,
       csv: csvTotalBrokerage,
-      match: hasBrokerageColumn ? Math.abs(cnSummary.taxableValue - csvTotalBrokerage) < 1.0 : false,
-      status: !hasBrokerageColumn ? 'not-present' : (Math.abs(cnSummary.taxableValue - csvTotalBrokerage) < 1.0 ? 'match' : 'mismatch')
+      match: hasBrokerageColumn ? Math.abs(cnSummary.taxableValue - csvTotalBrokerage) < 0.10 : false,
+      status: !hasBrokerageColumn ? 'not-present' : (Math.abs(cnSummary.taxableValue - csvTotalBrokerage) < 0.10 ? 'match' : 'mismatch')
     }
   ];
 
@@ -566,8 +566,8 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
     item: "Final Settlement",
     contractNote: cnNetSettlement,
     csv: csvNetSettlement,
-    match: Math.abs(cnNetSettlement - csvNetSettlement) < 5.0, // Allow minor rounding differences of ₹5
-    status: Math.abs(cnNetSettlement - csvNetSettlement) < 5.0 ? 'match' : 'mismatch'
+    match: Math.abs(cnNetSettlement - csvNetSettlement) < 0.10, // Allow minor rounding differences of 10 paise
+    status: Math.abs(cnNetSettlement - csvNetSettlement) < 0.10 ? 'match' : 'mismatch'
   });
 
   // Calculate error metrics
@@ -858,11 +858,11 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
   const actualNetPayable = actualNet - (actualStt + actualStamp + actualBrokerage + actualEtc + actualSebi + actualGst);
 
   const finalCheck = {
-    buyTotal: { expected: cnBuyTotal, actual: actualBuyTotal, matches: Math.abs(cnBuyTotal - actualBuyTotal) < 1.0 },
-    sellTotal: { expected: cnSellTotal, actual: actualSellTotal, matches: Math.abs(cnSellTotal - actualSellTotal) < 1.0 },
-    net: { expected: cnNetAmountObligation, actual: actualNet, matches: Math.abs(cnNetAmountObligation - actualNet) < 1.0 },
-    stt: { expected: cnSummary.stt, actual: actualStt, matches: Math.abs(cnSummary.stt - actualStt) < 1.0 },
-    netPayable: { expected: cnSummary.netSettlement, actual: actualNetPayable, matches: Math.abs(cnSummary.netSettlement - actualNetPayable) < 2.0 },
+    buyTotal: { expected: cnBuyTotal, actual: actualBuyTotal, matches: Math.abs(cnBuyTotal - actualBuyTotal) < 0.10 },
+    sellTotal: { expected: cnSellTotal, actual: actualSellTotal, matches: Math.abs(cnSellTotal - actualSellTotal) < 0.10 },
+    net: { expected: cnNetAmountObligation, actual: actualNet, matches: Math.abs(cnNetAmountObligation - actualNet) < 0.10 },
+    stt: { expected: cnSummary.stt, actual: actualStt, matches: Math.abs(cnSummary.stt - actualStt) < 0.10 },
+    netPayable: { expected: cnSummary.netSettlement, actual: actualNetPayable, matches: Math.abs(cnSummary.netSettlement - actualNetPayable) < 0.10 },
   };
 
   // 5. Final Verdict

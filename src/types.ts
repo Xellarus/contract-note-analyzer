@@ -38,9 +38,26 @@ export interface Summary {
   netSettlement: number;
 }
 
+export interface ReconciliationStatus {
+  isValid: boolean;
+  totalBuys: number;
+  totalSells: number;
+  calculatedObligation: number; // Sells - Buys
+  extractedObligation: number;  // summary.payinObligation
+  totalCharges: number;
+  calculatedNet: number;        // Sells - Buys - Charges
+  extractedNet: number;         // summary.netSettlement
+  difference: number;
+  statusText: 'PASSED' | 'Parser uncertain' | 'Suspicious STT';
+  isSuspiciousStt?: boolean;
+  isSttMismatch?: boolean;
+}
+
 export interface ContractNoteResult {
   summary: Summary;
   trades: Trade[];
   brokerName?: string;
   tradeDate?: string;
+  reconciliation?: ReconciliationStatus;
+  rawText?: string;
 }
