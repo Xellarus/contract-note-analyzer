@@ -16,7 +16,7 @@ const SummaryCard = ({ label, value, highlight = false, alertState = false }: { 
   <div className={`p-4 rounded-xl border transition-all ${alertState ? 'bg-rose-50 border-rose-200' : highlight ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'} shadow-sm`}>
     <p className={`text-xs font-semibold uppercase tracking-wider ${alertState ? 'text-rose-600' : highlight ? 'text-indigo-600' : 'text-slate-500'}`}>{label}</p>
     <p className={`text-lg font-bold mt-1 font-mono ${alertState ? 'text-rose-900' : highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
-      {value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      {value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
     </p>
   </div>
 );
@@ -1257,12 +1257,12 @@ export default function App() {
                         </div>
                         <p className="text-xs opacity-85 leading-relaxed max-w-3xl">
                           {data.reconciliation.isSuspiciousStt
-                            ? `Mathematical safety alert: Extracted STT is critically low (₹${data.summary.stt}) given your high turnover of ₹${(data.reconciliation.totalBuys + data.reconciliation.totalSells).toLocaleString()}. This usually implies the extraction isolated a spurious list item or footnote integer.`
+                            ? `Mathematical safety alert: Extracted STT is critically low (₹${data.summary.stt}) given your high turnover of ₹${(data.reconciliation.totalBuys + data.reconciliation.totalSells).toLocaleString('en-IN')}. This usually implies the extraction isolated a spurious list item or footnote integer.`
                             : data.reconciliation.isSttMismatch
-                              ? `STT validation failure: The trade-level STT calculation sums to ₹${data.trades.reduce((sum, t) => sum + t.stt, 0).toLocaleString()} (Delivery: 0.1%, Intraday Sell: 0.025%), but the note's summary STT is ₹${data.summary.stt.toLocaleString()}. This mismatch exceeds our tolerance.`
+                              ? `STT validation failure: The trade-level STT calculation sums to ₹${data.trades.reduce((sum, t) => sum + t.stt, 0).toLocaleString('en-IN')} (Delivery: 0.1%, Intraday Sell: 0.025%), but the note's summary STT is ₹${data.summary.stt.toLocaleString('en-IN')}. This mismatch exceeds our tolerance.`
                               : (data.reconciliation.isValid 
-                                  ? `Mathematical verification perfect: Sells (₹${data.reconciliation.totalSells.toLocaleString()}) minus Buys (₹${data.reconciliation.totalBuys.toLocaleString()}) minus Charges (₹${data.reconciliation.totalCharges.toLocaleString()}) aligns perfectly with the extracted net receivable of ₹${data.reconciliation.extractedNet.toLocaleString()}.`
-                                  : `Accounting check failure: Sells minus Buys minus Charges does not equal the Net Settlement value. Our mismatch calculation shows a difference of ₹${data.reconciliation.difference.toLocaleString()} (Tolerance is 10 paise).`
+                                  ? `Mathematical verification perfect: Sells (₹${data.reconciliation.totalSells.toLocaleString('en-IN')}) minus Buys (₹${data.reconciliation.totalBuys.toLocaleString('en-IN')}) minus Charges (₹${data.reconciliation.totalCharges.toLocaleString('en-IN')}) aligns perfectly with the extracted net receivable of ₹${data.reconciliation.extractedNet.toLocaleString('en-IN')}.`
+                                  : `Accounting check failure: Sells minus Buys minus Charges does not equal the Net Settlement value. Our mismatch calculation shows a difference of ₹${data.reconciliation.difference.toLocaleString('en-IN')} (Tolerance is 10 paise).`
                                 )
                           }
                         </p>
@@ -1272,7 +1272,7 @@ export default function App() {
                     <div className="text-left md:text-right shrink-0">
                       <span className="text-[10px] font-semibold uppercase tracking-wider block opacity-75">Verification Variance</span>
                       <span className={`text-md font-black font-mono block mt-0.5 ${data.reconciliation.isValid ? 'text-emerald-800' : 'text-rose-900'}`}>
-                        {data.reconciliation.isValid ? '₹0.00' : `₹${data.reconciliation.difference.toLocaleString()}`}
+                        {data.reconciliation.isValid ? '₹0.00' : `₹${data.reconciliation.difference.toLocaleString('en-IN')}`}
                       </span>
                     </div>
                   </div>
@@ -1294,21 +1294,21 @@ export default function App() {
                       <div className="bg-white/80 p-4 rounded-xl border border-rose-150 space-y-2.5 font-mono shadow-sm">
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500">Sells Gross</span>
-                          <span className="font-bold text-slate-800">₹{data.reconciliation.totalSells.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                          <span className="font-bold text-slate-800">₹{data.reconciliation.totalSells.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500">Buys Gross</span>
-                          <span className="font-bold text-slate-800">₹{data.reconciliation.totalBuys.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                          <span className="font-bold text-slate-800">₹{data.reconciliation.totalBuys.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="flex justify-between border-b border-rose-100/50 pb-1.5">
                           <span className="text-slate-500 font-bold">A) Buy/Sell Obligation (Sells - Buys)</span>
                           <span className={`font-bold ${data.reconciliation.calculatedObligation >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            ₹{data.reconciliation.calculatedObligation.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            ₹{data.reconciliation.calculatedObligation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500 font-bold">B) Extracted Obligation of CN</span>
-                          <span className="font-bold text-slate-800">₹{data.reconciliation.extractedObligation.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                          <span className="font-bold text-slate-800">₹{data.reconciliation.extractedObligation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
                       </div>
                     </div>
@@ -1317,29 +1317,29 @@ export default function App() {
                       <div className="bg-white/80 p-4 rounded-xl border border-rose-150 space-y-2.5 font-mono shadow-sm">
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500 font-bold">C) Sum of Charges + Brokerage (Levies)</span>
-                          <span className="font-bold text-amber-700">₹{data.reconciliation.totalCharges.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                          <span className="font-bold text-amber-700">₹{data.reconciliation.totalCharges.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500 font-bold">Calculated Net Settlement (A - C)</span>
                           <span className={`font-bold ${data.reconciliation.calculatedNet >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            ₹{data.reconciliation.calculatedNet.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            ₹{data.reconciliation.calculatedNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="flex justify-between border-b border-rose-100 pb-1.5 text-indigo-800 font-bold">
                           <span>Extracted Net Settlement of CN</span>
-                          <span>₹{data.reconciliation.extractedNet.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                          <span>₹{data.reconciliation.extractedNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
                         <div className="flex justify-between text-red-700 font-black">
                           <span>D) Arithmetic Mismatch Variance</span>
-                          <span>₹{data.reconciliation.difference.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                          <span>₹{data.reconciliation.difference.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                         </div>
                       </div>
 
                       <div className="p-3 bg-red-100 border border-red-200 rounded-xl text-[11px] text-red-800 font-bold mt-4 leading-relaxed">
                         {data.reconciliation.isSuspiciousStt
-                          ? `⚠️ ALERT: Securities Transaction Tax (STT) extracted is ₹${data.summary.stt} which is statistically impossible on a turnover of ₹${(data.reconciliation.totalBuys + data.reconciliation.totalSells).toLocaleString()}. This suggests spurious footnotes or list tags were incorrectly parsed as the STT fee.`
+                          ? `⚠️ ALERT: Securities Transaction Tax (STT) extracted is ₹${data.summary.stt} which is statistically impossible on a turnover of ₹${(data.reconciliation.totalBuys + data.reconciliation.totalSells).toLocaleString('en-IN')}. This suggests spurious footnotes or list tags were incorrectly parsed as the STT fee.`
                           : data.reconciliation.isSttMismatch
-                            ? `⚠️ ALERT: There is an STT mismatch of ₹${Math.abs(data.trades.reduce((sum, t) => sum + t.stt, 0) - data.summary.stt).toLocaleString()}. Delivery STT is strictly 0.1% of turnover and Intraday STT is 0.025% on Sell trades. Ensure the extracted securities and categories are complete.`
+                            ? `⚠️ ALERT: There is an STT mismatch of ₹${Math.abs(data.trades.reduce((sum, t) => sum + t.stt, 0) - data.summary.stt).toLocaleString('en-IN')}. Delivery STT is strictly 0.1% of turnover and Intraday STT is 0.025% on Sell trades. Ensure the extracted securities and categories are complete.`
                             : "⚠️ ALERT: Sells minus Buys minus Charges fails to equal the Net Settlement value. Do not trust these extracted values for regulatory tax filings directly without verification."
                         }
                       </div>
@@ -1586,7 +1586,7 @@ export default function App() {
                   ) : (
                     <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} />
                   )}
-                  <SummaryCard label="SEBI Fees & Other" value={calculatedTotals.sebiFeesAndOther} />
+                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFeesAndOther} />
                 </div>
 
                 <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
@@ -1609,7 +1609,7 @@ export default function App() {
                         )}
                         <th className="px-6 py-4 text-right">ETC</th>
                         <th className="px-6 py-4 text-right">Stamp Duty</th>
-                        <th className="px-6 py-4 text-right">Other Levies</th>
+                        <th className="px-6 py-4 text-right">SEBI Turnover Fees</th>
                         <th className="px-6 py-4 text-right">Expenses (Incl STT)</th>
                         <th className="px-6 py-4 text-right">Expenses (Excl STT)</th>
                         <th className="px-6 py-4 text-right text-indigo-700 font-bold">Net Amount (Incl STT)</th>
@@ -1635,26 +1635,26 @@ export default function App() {
                             </td>
                             <td className="px-6 py-4 text-right font-semibold">{t.quantity}</td>
                             <td className="px-6 py-4 text-right">₹{t.avgPrice.toFixed(2)}</td>
-                            <td className="px-6 py-4 text-right">₹{t.turnover.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right">₹{t.turnover.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-center bg-indigo-50/20">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-700'}`}>{t.tradeType}</span>
                             </td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.brokerage.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right font-semibold text-rose-700 bg-rose-50/10">₹{t.stt.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-600">₹{t.brokerage.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right font-semibold text-rose-700 bg-rose-50/10">₹{t.stt.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             {data?.brokerName === 'integrated' ? (
-                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{t.gst.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{t.gst.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             ) : (
-                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{(t.igst || t.gst).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{(t.igst || t.gst).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             )}
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.etc.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.stampDuty.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{(t.sebiFees + t.ipf).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesInclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesExclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalInclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalExclSTT.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-600">₹{t.etc.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-600">₹{t.stampDuty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-600">₹{(t.sebiFees + t.ipf).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             <td className={`px-6 py-4 text-right font-black border-l border-slate-100 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                              {t.netTotalBeforeLevies >= 0 ? '+' : ''}{t.netTotalBeforeLevies.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              {t.netTotalBeforeLevies >= 0 ? '+' : ''}{t.netTotalBeforeLevies.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                             </td>
                           </tr>
                         );
@@ -1831,8 +1831,8 @@ export default function App() {
                                 <div className="p-4 bg-indigo-50/50 border border-indigo-150 rounded-xl text-[11px] leading-relaxed font-sans text-indigo-900">
                                   <p className="font-bold">🧪 Regression Mathematical Verification Audit:</p>
                                   <p className="mt-1">
-                                    Sells Gross minus Buys Gross minus Charges extracted equals <strong>₹{(tc.actual!.payinObligation - (tc.actual!.stt + tc.actual!.brokerage)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>, 
-                                    which matches the parsed Net Settlement of <strong>₹{tc.actual!.netSettlement.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong> within 
+                                    Sells Gross minus Buys Gross minus Charges extracted equals <strong>₹{(tc.actual!.payinObligation - (tc.actual!.stt + tc.actual!.brokerage)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>, 
+                                    which matches the parsed Net Settlement of <strong>₹{tc.actual!.netSettlement.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong> within 
                                     a micro-variance of <strong>₹{tc.actual?.difference.toFixed(4)}</strong>. 
                                     Formula compliant mathematically? <strong className="font-bold whitespace-nowrap">{tc.actual?.isValid ? "✓ YES (100% Correct)" : "❌ NO (Parser Uncertain flag triggered correctly!)"}</strong>.
                                   </p>

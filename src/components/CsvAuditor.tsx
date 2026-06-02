@@ -297,13 +297,13 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                         <tr key={idx} className="hover:bg-slate-50/60 transition-all">
                           <td className="px-5 py-3.5 font-sans font-semibold text-slate-700">{row.item}</td>
                           <td className="px-5 py-3.5 text-right font-bold text-slate-800">
-                            ₹{row.contractNote.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₹{row.contractNote.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </td>
                           <td className="px-5 py-3.5 text-right font-bold text-slate-800">
                             {row.status === 'not-present' ? (
                               <span className="text-slate-400 font-sans italic text-[11px] font-normal">Not in CSV</span>
                             ) : (
-                              `₹${row.csv.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              `₹${row.csv.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                             )}
                           </td>
                           <td className="px-5 py-3.5 text-center">
@@ -364,7 +364,7 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                             </div>
                             <div className="bg-slate-100 p-2 rounded text-slate-700">
                               <span className="block text-[9px] uppercase tracking-wider text-slate-400 font-bold mb-0.5">Discrepancy Impact</span>
-                              ₹{issue.impactValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              ₹{issue.impactValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </div>
                           </div>
                         </div>
@@ -409,7 +409,7 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                   <div className="border border-slate-150 p-4 rounded-xl bg-white shadow-sm">
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">Net Discrepancy Amount</p>
                     <p className="text-xl font-black font-mono text-indigo-700 mt-1">
-                      ₹{report.totalDiscrepancy.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      ₹{report.totalDiscrepancy.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </p>
                   </div>
                 </div>
@@ -532,8 +532,8 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                           {report.reconciliation.correctedAmountsTable.map((row, idx) => (
                             <tr key={idx} className="hover:bg-slate-50/50">
                               <td className="px-4 py-2 font-sans font-semibold text-slate-700 truncate max-w-[150px]">{row.stock}</td>
-                              <td className="px-4 py-2 text-right text-slate-500">₹{row.currentAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                              <td className="px-4 py-2 text-right font-bold text-emerald-700">₹{row.correctedAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                              <td className="px-4 py-2 text-right text-slate-500">₹{row.currentAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                              <td className="px-4 py-2 text-right font-bold text-emerald-700">₹{row.correctedAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -602,8 +602,8 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                           return (
                             <tr key={idx} className="hover:bg-indigo-50/20">
                               <td className="px-4 py-3 font-sans font-bold text-slate-800">{metric.name}</td>
-                              <td className="px-4 py-3 text-right">₹{item.expected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                              <td className="px-4 py-3 text-right text-indigo-700 font-bold">₹{item.actual.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                              <td className="px-4 py-3 text-right">₹{item.expected.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                              <td className="px-4 py-3 text-right text-indigo-700 font-bold">₹{item.actual.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                               <td className="px-4 py-3 text-center">
                                 {item.matches ? (
                                   <span className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 font-sans font-bold px-2 py-0.5 rounded text-[9px] border border-emerald-200">

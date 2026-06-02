@@ -574,41 +574,52 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       if (t.type === "Buy") s.buyQty += t.quantity; else s.sellQty += t.quantity;
     });
 
-    const totalTurnover = tradesToProcess.reduce((sum, t) => sum + (t.quantity * t.price), 0);
-    const totalBuyTurnover = tradesToProcess.reduce((sum, t) => t.type === "Buy" ? sum + (t.quantity * t.price) : sum, 0);
-    const totalSellTurnover = tradesToProcess.reduce((sum, t) => t.type === "Sell" ? sum + (t.quantity * t.price) : sum, 0);
-
-    const INSTRUMENT_RULES = {
-      EQUITY: {
-        delivery: {
-          buy: 0.001,
-          sell: 0.001
-        },
-        intraday: {
-          buy: 0,
-          sell: 0.00025
-        }
-      },
-      ETF: {
-        delivery: {
-          buy: 0,
-          sell: 0
-        },
-        intraday: {
-          buy: 0,
-          sell: 0
-        }
-      }
-    };
-
-    const classifyInstrument = (symbol: string): "EQUITY" | "ETF" => {
+    const classifyInstrument = (symbol: string): "EQUITY" | "ETF" | "MUTUAL_FUND" => {
       const s = symbol.toUpperCase();
+      if (s.includes("MUTUAL FUND") || s.includes("MUTUALFUND")) return "MUTUAL_FUND";
       if (
         s.includes("LIQUID") ||
         s.includes("CASE") ||
         s.includes("ETF")
       ) return "ETF";
       return "EQUITY";
+    };
+
+    let totalTurnover = 0;
+    let totalBuyTurnover = 0;
+    let totalSellTurnover = 0;
+    
+    let equityTurnover = 0;
+    let equityBuyTurnover = 0;
+    let equitySellTurnover = 0;
+
+    tradesToProcess.forEach(t => {
+      const gross = t.quantity * t.price;
+      totalTurnover += gross;
+      if (t.type === "Buy") totalBuyTurnover += gross;
+      if (t.type === "Sell") totalSellTurnover += gross;
+      
+      const inst = classifyInstrument(t.securityName);
+      if (inst !== "MUTUAL_FUND") {
+        equityTurnover += gross;
+        if (t.type === "Buy") equityBuyTurnover += gross;
+        if (t.type === "Sell") equitySellTurnover += gross;
+      }
+    });
+
+    const INSTRUMENT_RULES = {
+      EQUITY: {
+        delivery: { buy: 0.001, sell: 0.001 },
+        intraday: { buy: 0, sell: 0.00025 }
+      },
+      ETF: {
+        delivery: { buy: 0, sell: 0 },
+        intraday: { buy: 0, sell: 0 }
+      },
+      MUTUAL_FUND: {
+        delivery: { buy: 0, sell: 0 },
+        intraday: { buy: 0, sell: 0 }
+      }
     };
 
     const trades: Trade[] = tradesToProcess.map((t, idx) => {
@@ -643,34 +654,39 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
 
       const grossTotal = rt(t.quantity * t.price);
       
+      const instrumentType = classifyInstrument(t.securityName);
+      const isMutualFund = instrumentType === "MUTUAL_FUND";
+      
       const isSingleTrade = validatedTrades.length === 1;
-      const ratio = totalTurnover > 0 ? grossTotal / totalTurnover : 0;
-      const buyRatio = totalBuyTurnover > 0 && t.type === "Buy" ? grossTotal / totalBuyTurnover : 0;
-      const sellRatio = totalSellTurnover > 0 && t.type === "Sell" ? grossTotal / totalSellTurnover : 0;
+      const ratio = !isMutualFund && equityTurnover > 0 ? grossTotal / equityTurnover : 0;
+      const stampDutyRatio = totalBuyTurnover > 0 && t.type === "Buy" ? grossTotal / totalBuyTurnover : 0;
+      const buyRatio = !isMutualFund && equityBuyTurnover > 0 && t.type === "Buy" ? grossTotal / equityBuyTurnover : 0;
+      const sellRatio = !isMutualFund && equitySellTurnover > 0 && t.type === "Sell" ? grossTotal / equitySellTurnover : 0;
 
       // KEEP INDEPENDENT: Extract directly from the trade row!
       let brokerage = rt(t.quantity * (t.brokeragePerShare || 0));
       // Fallback only if raw brokerage is totally 0
       if (brokerage === 0 && summary.taxableValue > 0) {
-        brokerage = isSingleTrade ? rt(summary.taxableValue) : rt(summary.taxableValue * ratio);
+        // Here we use totalTurnover because brokerage still applies across the board, including mutual funds if no per-share is given.
+        const totalRatio = totalTurnover > 0 ? grossTotal / totalTurnover : 0;
+        brokerage = isSingleTrade ? rt(summary.taxableValue) : rt(summary.taxableValue * totalRatio);
       }
       
       const tradeType = isIntraday ? "Intraday" : "Delivery";
-      const instrumentType = classifyInstrument(t.securityName);
       const tradeTypeKey = isIntraday ? "intraday" : "delivery";
       const sideKey = t.type === "Buy" ? "buy" : "sell";
       const rate = INSTRUMENT_RULES[instrumentType][tradeTypeKey][sideKey];
       const stt = Math.round(grossTotal * rate);
 
-      const etc = isSingleTrade ? rt(summary.etc) : rt(summary.etc * ratio);
-      const sebiFees = isSingleTrade ? rt(summary.sebiFees) : rt(summary.sebiFees * ratio);
-      const clearingCharges = isSingleTrade ? rt(summary.clearingCharges) : rt(summary.clearingCharges * ratio);
-      const stampDuty = isSingleTrade ? rt(summary.stampDuty) : rt(summary.stampDuty * buyRatio);
-      const ipf = isSingleTrade ? rt(summary.ipf) : rt(summary.ipf * ratio);
-      const cgst = isSingleTrade ? rt(summary.cgst) : rt(summary.cgst * ratio);
-      const sgst = isSingleTrade ? rt(summary.sgst) : rt(summary.sgst * ratio);
-      const igst = isSingleTrade ? rt(summary.igst) : rt(summary.igst * ratio);
-      const gst = isSingleTrade ? rt(summary.gst) : rt(summary.gst * ratio);
+      const etc = isMutualFund ? 0 : isSingleTrade ? rt(summary.etc) : rt(summary.etc * ratio);
+      const sebiFees = isMutualFund ? 0 : isSingleTrade ? rt(summary.sebiFees) : rt(summary.sebiFees * ratio);
+      const clearingCharges = isMutualFund ? 0 : isSingleTrade ? rt(summary.clearingCharges) : rt(summary.clearingCharges * ratio);
+      const stampDuty = isSingleTrade ? rt(summary.stampDuty) : rt(summary.stampDuty * stampDutyRatio);
+      const ipf = isMutualFund ? 0 : isSingleTrade ? rt(summary.ipf) : rt(summary.ipf * ratio);
+      const cgst = isMutualFund ? 0 : isSingleTrade ? rt(summary.cgst) : rt(summary.cgst * ratio);
+      const sgst = isMutualFund ? 0 : isSingleTrade ? rt(summary.sgst) : rt(summary.sgst * ratio);
+      const igst = isMutualFund ? 0 : isSingleTrade ? rt(summary.igst) : rt(summary.igst * ratio);
+      const gst = isMutualFund ? 0 : isSingleTrade ? rt(summary.gst) : rt(summary.gst * ratio);
 
       const totalExclSTT = brokerage + etc + sebiFees + clearingCharges + stampDuty + ipf + gst;
       const totalInclSTT = totalExclSTT + stt;
