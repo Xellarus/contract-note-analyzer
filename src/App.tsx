@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   Upload, X, Download, FileText, Info, CheckCircle2, AlertCircle, 
   ArrowRightLeft, ListChecks, Play, Trash2, PlusCircle, AlertTriangle, 
-  RefreshCw, Check, ShieldAlert, Award, ChevronRight, Gauge
+  RefreshCw, Check, ShieldAlert, Award, ChevronRight, Gauge,
+  Menu, ChevronDown, BookOpen, Calculator
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ContractNoteResult, ReconciliationStatus } from './types';
@@ -28,12 +30,72 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [fileCount, setFileCount] = useState({ total: 0, processed: 0 });
   const [dragging, setDragging] = useState(false);
-  const [broker, setBroker] = useState<'auto' | 'zerodha' | 'integrated' | 'standard'>('zerodha');
+  const [broker, setBroker] = useState<'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard'>('zerodha');
   const [pdfPassword, setPdfPassword] = useState("");
   const [isPasswordRequired, setIsPasswordRequired] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
   const [showExportConfirmation, setShowExportConfirmation] = useState(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isLogicOpen, setIsLogicOpen] = useState(false);
+  const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const DEFAULT_LEDGER_MAPPINGS = React.useMemo(() => ({
+    STT: "STT ON EQUITY-IMSPL",
+    EXCHANGE: "ETC-EQUITY-IMSPL",
+    SEBI: "SEBI TURNOVER CHRGES-EQUITY-IMSPL",
+    IPF: "IPF-EQUITY (IMSPL)",
+    GST: "GST-EQUITY (IMSPL)",
+    BROKER: "Integrated Master Securities Pvt.Ltd.",
+    BROKERAGE: "BROKERAGE ON EQUITY",
+    STAMP_DUTY: "STAMP DUTY-EQUITY (INT)",
+    CLEARING: "CLEARING CHARGES-IMSPL",
+    SHARES_TEMPLATE: "{securityName} (Shares)",
+    ROUNDED_OFF: "Rounded Off",
+    VOUCHER_PREFIX: "COMBINED/",
+    VOUCHER_START_NUMBER: "1524",
+    SECURITIES_MAPPINGS: "GOODLUCK=Goodluck India Ltd (Shares)\nLIQUIDCASE=LIQUIDCASE"
+  }), []);
+
+  const [ledgerMappings, setLedgerMappings] = useState<{ [key: string]: string }>(() => {
+    const saved = localStorage.getItem('accounting_ledger_mappings');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Ensure we fill in defaults for any missing key, specifically STAMP_DUTY or SECURITIES_MAPPINGS
+      if (parsed.STAMP_DUTY === "STAMP ON EQUITY-IMSPL") {
+        parsed.STAMP_DUTY = "STAMP DUTY-EQUITY (INT)";
+      }
+      if (!parsed.SECURITIES_MAPPINGS) {
+        parsed.SECURITIES_MAPPINGS = "GOODLUCK=Goodluck India Ltd (Shares)\nLIQUIDCASE=LIQUIDCASE";
+      }
+      return parsed;
+    }
+    return {
+      STT: "STT ON EQUITY-IMSPL",
+      EXCHANGE: "ETC-EQUITY-IMSPL",
+      SEBI: "SEBI TURNOVER CHRGES-EQUITY-IMSPL",
+      IPF: "IPF-EQUITY (IMSPL)",
+      GST: "GST-EQUITY (IMSPL)",
+      BROKER: "Integrated Master Securities Pvt.Ltd.",
+      BROKERAGE: "BROKERAGE ON EQUITY",
+      STAMP_DUTY: "STAMP DUTY-EQUITY (INT)",
+      CLEARING: "CLEARING CHARGES-IMSPL",
+      SHARES_TEMPLATE: "{securityName} (Shares)",
+      ROUNDED_OFF: "Rounded Off",
+      VOUCHER_PREFIX: "COMBINED/",
+      VOUCHER_START_NUMBER: "1524",
+      SECURITIES_MAPPINGS: "GOODLUCK=Goodluck India Ltd (Shares)\nLIQUIDCASE=LIQUIDCASE"
+    };
+  });
+  const [showLedgerConfig, setShowLedgerConfig] = useState(false);
+
+  const updateLedgerMapping = (key: string, value: string) => {
+    setLedgerMappings(prev => {
+      const next = { ...prev, [key]: value };
+      localStorage.setItem('accounting_ledger_mappings', JSON.stringify(next));
+      return next;
+    });
+  };
 
   const handleFileUpload = async (files: FileList | File[] | null, password?: string) => {
     if (!files) return;
@@ -43,7 +105,21 @@ export default function App() {
     setIsPasswordRequired(false);
     setShowExportConfirmation(false);
     
-    const fileArray = Array.from(files);
+    let fileArray = Array.from(files);
+
+    if (broker === 'zerodha') {
+      const allowedFiles = fileArray.filter(file => 
+        file.name.toUpperCase().startsWith('NJW724') && 
+        file.name.toLowerCase().endsWith('.pdf')
+      );
+      if (allowedFiles.length === 0) {
+        setError("Only PDF files starting with name 'NJW724' are allowed and processed.");
+        setIsLoading(false);
+        return;
+      }
+      fileArray = allowedFiles;
+    }
+
     setPendingFiles(fileArray);
     setFileCount({ total: fileArray.length, processed: 0 });
 
@@ -92,6 +168,7 @@ export default function App() {
         stt: 0,
         brokerage: 0,
         gst: 0,
+        igst: 0,
         etc: 0,
         stampDuty: 0,
         clearingCharges: 0,
@@ -108,6 +185,7 @@ export default function App() {
     const stt = data.trades.reduce((sum, t) => sum + t.stt, 0);
     const brokerage = data.trades.reduce((sum, t) => sum + t.brokerage, 0);
     const gst = data.trades.reduce((sum, t) => sum + t.gst, 0);
+    const igst = data.trades.reduce((sum, t) => sum + (t.igst || 0), 0);
     const etc = data.trades.reduce((sum, t) => sum + t.etc, 0);
     const stampDuty = data.trades.reduce((sum, t) => sum + t.stampDuty, 0);
     const clearingCharges = data.trades.reduce((sum, t) => sum + t.clearingCharges, 0);
@@ -140,6 +218,7 @@ export default function App() {
       stt,
       brokerage,
       gst,
+      igst,
       etc,
       stampDuty,
       clearingCharges,
@@ -163,10 +242,11 @@ export default function App() {
 
   const downloadCSV = () => {
     if (!data) return;
+    const isIntegrated = data.brokerName === 'integrated';
     const headers = [
       "Trade Date", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
       "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT", 
-      "Exchange Turnover Charges", "SEBI Turnover Fees", "IGST", 
+      "Exchange Turnover Charges", "SEBI Turnover Fees", isIntegrated ? "Total GST" : "IGST", 
       "Stamp Duty", "IPF", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
@@ -192,7 +272,7 @@ export default function App() {
         t.stt.toFixed(2),
         t.etc.toFixed(2),
         t.sebiFees.toFixed(2),
-        t.clearingCharges.toFixed(2),
+        isIntegrated ? t.gst.toFixed(2) : t.igst.toFixed(2),
         t.stampDuty.toFixed(2),
         t.ipf.toFixed(2),
         t.totalExpensesInclSTT.toFixed(2),
@@ -215,6 +295,475 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
     setShowExportConfirmation(false);
+  };
+
+  const downloadVoucherExcel = () => {
+    if (!data) return;
+
+    const getExcelDateCell = (dateStr: string) => {
+      if (!dateStr) return { t: 's', v: "" };
+      const cleaned = dateStr.trim();
+      let dObj: Date | null = null;
+      
+      // Match DD-MM-YYYY or DD/MM/YYYY
+      const dmy = cleaned.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+      if (dmy) {
+        const day = parseInt(dmy[1], 10);
+        const month = parseInt(dmy[2], 10) - 1;
+        const year = parseInt(dmy[3], 10);
+        dObj = new Date(Date.UTC(year, month, day));
+      } else {
+        // Match YYYY-MM-DD or YYYY/MM/DD
+        const ymd = cleaned.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+        if (ymd) {
+          const year = parseInt(ymd[1], 10);
+          const month = parseInt(ymd[2], 10) - 1;
+          const day = parseInt(ymd[3], 10);
+          dObj = new Date(Date.UTC(year, month, day));
+        } else {
+          const ts = Date.parse(cleaned);
+          if (!isNaN(ts)) {
+            const parsedD = new Date(ts);
+            dObj = new Date(Date.UTC(parsedD.getFullYear(), parsedD.getMonth(), parsedD.getDate()));
+          }
+        }
+      }
+
+      if (dObj) {
+        // Calculate the Excel Date Serial Number (number of days since December 30, 1899)
+        const epoch = Date.UTC(1899, 11, 30);
+        const diffMs = dObj.getTime() - epoch;
+        const serial = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+        return {
+          t: 'n',
+          v: serial,
+          z: 'dd-mmm-yyyy'
+        };
+      }
+      return { t: 's', v: dateStr };
+    };
+
+    // Group trades by tradeDate, securityName, and transactionType
+    // This allows cumulative entries for sales of the same security on the same day
+    const grouped: { [key: string]: typeof data.trades } = {};
+    for (const t of data.trades) {
+      const groupKey = `${t.tradeDate}_${t.securityName}_${t.transactionType}`;
+      if (!grouped[groupKey]) grouped[groupKey] = [];
+      grouped[groupKey].push(t);
+    }
+
+    const sheetData: any[][] = [
+      ["VoucherType", "VoucherNo", "Date", "LedgerName", "EntryType", "Amount", "Narration"]
+    ];
+
+    let voucherIndex = 0;
+    const startNum = parseInt(ledgerMappings.VOUCHER_START_NUMBER || "1524", 10);
+    const voucherPrefix = ledgerMappings.VOUCHER_PREFIX || "COMBINED/";
+
+    for (const key of Object.keys(grouped)) {
+      const group = grouped[key];
+      const first = group[0];
+      const tradeDateStr = first.tradeDate ? first.tradeDate.trim() : "";
+      const securityName = first.securityName;
+      const tType = first.transactionType;
+
+      const currentVoucherNo = `${voucherPrefix}${startNum + voucherIndex}`;
+      voucherIndex++;
+
+      const qty = group.reduce((sum, x) => sum + x.quantity, 0);
+      const turnover_val = group.reduce((sum, x) => sum + x.turnover, 0);
+      const avgPrice = turnover_val / qty;
+      const stt_val = group.reduce((sum, x) => sum + x.stt, 0);
+      const etc_val = group.reduce((sum, x) => sum + x.etc, 0);
+      const sebi_val = group.reduce((sum, x) => sum + x.sebiFees, 0);
+      const ipf_val = group.reduce((sum, x) => sum + x.ipf, 0);
+      const gst_val = group.reduce((sum, x) => sum + x.gst, 0);
+      const brokerage_val = group.reduce((sum, x) => sum + x.brokerage, 0);
+      const stamp_val = group.reduce((sum, x) => sum + x.stampDuty, 0);
+      const clearing_val = group.reduce((sum, x) => sum + x.clearingCharges, 0);
+
+      const round = (num: number) => Math.round(num * 100) / 100;
+
+      const drStt = round(stt_val);
+      const drEtc = round(etc_val);
+      const drSebi = round(sebi_val);
+      const drIpf = round(ipf_val);
+      const drGst = round(gst_val);
+      const drBrokerage = round(brokerage_val);
+      const drStamp = round(stamp_val);
+      const drClearing = round(clearing_val);
+
+      const getSharesLedgerName = (name: string): string => {
+        const overridesStr = ledgerMappings.SECURITIES_MAPPINGS || "";
+        const lines = overridesStr.split('\n');
+        for (const line of lines) {
+          const parts = line.split('=');
+          if (parts.length === 2) {
+            const parsedKey = parts[0].trim().toLowerCase();
+            const targetValue = parts[1].trim();
+            if (parsedKey && (name.toLowerCase().includes(parsedKey) || name.toLowerCase() === parsedKey)) {
+              return targetValue;
+            }
+          }
+        }
+        const template = ledgerMappings.SHARES_TEMPLATE || "{securityName} (Shares)";
+        return template.replace("{securityName}", name);
+      };
+
+      const sharesLedgerName = getSharesLedgerName(securityName);
+
+      const narration = `${securityName} ${qty} Nos @ ${avgPrice.toFixed(2)}`;
+
+      const addRow = (ledgerName: string, entryType: "Debit" | "Credit", amount: number, rowNarration: string = "") => {
+        sheetData.push([
+          "Journal",
+          currentVoucherNo,
+          getExcelDateCell(tradeDateStr),
+          ledgerName,
+          entryType,
+          amount,
+          rowNarration
+        ]);
+      };
+
+      if (tType === "Sell") {
+        const expTotal = stt_val + etc_val + sebi_val + ipf_val + gst_val + brokerage_val + stamp_val + clearing_val;
+        const netReceivable = round(turnover_val - expTotal);
+        const crSharesVal = round(turnover_val);
+
+        const drSum = netReceivable + drStt + drEtc + drSebi + drIpf + drGst + drBrokerage + drStamp + drClearing;
+        const crSum = crSharesVal;
+        const diff = round(drSum - crSum);
+
+        // 1. Broker Ledger (Debit) with Narration on the first line
+        addRow(ledgerMappings.BROKER || "Broker Ledger", "Debit", netReceivable, narration);
+
+        // 2. Shares Ledger (Credit)
+        addRow(sharesLedgerName, "Credit", crSharesVal, "");
+
+        // 3-10. Expenses
+        if (drStt > 0) addRow(ledgerMappings.STT || "STT Ledger", "Debit", drStt, "");
+        if (drEtc > 0) addRow(ledgerMappings.EXCHANGE || "Exchange Charges", "Debit", drEtc, "");
+        if (drSebi > 0) addRow(ledgerMappings.SEBI || "SEBI Ledger", "Debit", drSebi, "");
+        if (drIpf > 0) addRow(ledgerMappings.IPF || "IPF Ledger", "Debit", drIpf, "");
+        if (drGst > 0) addRow(ledgerMappings.GST || "GST Ledger", "Debit", drGst, "");
+        if (drBrokerage > 0) addRow(ledgerMappings.BROKERAGE || "Brokerage", "Debit", drBrokerage, "");
+        if (drStamp > 0) addRow(ledgerMappings.STAMP_DUTY || "Stamp Duty", "Debit", drStamp, "");
+        if (drClearing > 0) addRow(ledgerMappings.CLEARING || "Clearing", "Debit", drClearing, "");
+
+        // 11. Rounded Off
+        if (Math.abs(diff) >= 0.005) {
+          if (diff < 0) {
+            addRow(ledgerMappings.ROUNDED_OFF || "Rounded Off", "Debit", Math.abs(diff), "");
+          } else {
+            addRow(ledgerMappings.ROUNDED_OFF || "Rounded Off", "Credit", Math.abs(diff), "");
+          }
+        }
+      } else {
+        const expTotal = stt_val + etc_val + sebi_val + ipf_val + gst_val + brokerage_val + stamp_val + clearing_val;
+        const netPayable = round(turnover_val + expTotal);
+        const drSharesVal = round(turnover_val);
+
+        const drSum = drSharesVal + drStt + drEtc + drSebi + drIpf + drGst + drBrokerage + drStamp + drClearing;
+        const crSum = netPayable;
+        const diff = round(drSum - crSum);
+
+        // 1. Shares Ledger (Debit) with Narration on the first line
+        addRow(sharesLedgerName, "Debit", drSharesVal, narration);
+
+        // 2. Broker Ledger (Credit)
+        addRow(ledgerMappings.BROKER || "Broker Ledger", "Credit", netPayable, "");
+
+        // 3-10. Expenses
+        if (drStt > 0) addRow(ledgerMappings.STT || "STT Ledger", "Debit", drStt, "");
+        if (drEtc > 0) addRow(ledgerMappings.EXCHANGE || "Exchange Charges", "Debit", drEtc, "");
+        if (drSebi > 0) addRow(ledgerMappings.SEBI || "SEBI Ledger", "Debit", drSebi, "");
+        if (drIpf > 0) addRow(ledgerMappings.IPF || "IPF Ledger", "Debit", drIpf, "");
+        if (drGst > 0) addRow(ledgerMappings.GST || "GST Ledger", "Debit", drGst, "");
+        if (drBrokerage > 0) addRow(ledgerMappings.BROKERAGE || "Brokerage", "Debit", drBrokerage, "");
+        if (drStamp > 0) addRow(ledgerMappings.STAMP_DUTY || "Stamp Duty", "Debit", drStamp, "");
+        if (drClearing > 0) addRow(ledgerMappings.CLEARING || "Clearing", "Debit", drClearing, "");
+
+        // 11. Rounded Off
+        if (Math.abs(diff) >= 0.005) {
+          if (diff < 0) {
+            addRow(ledgerMappings.ROUNDED_OFF || "Rounded Off", "Debit", Math.abs(diff), "");
+          } else {
+            addRow(ledgerMappings.ROUNDED_OFF || "Rounded Off", "Credit", Math.abs(diff), "");
+          }
+        }
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    // Do NOT pass cellDates: true, to prevent auto-conversion of strings to dates with timestamps
+    const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+    // Explicitly set date format (dd-mmm-yyyy) and strip fractional timestamps on date cells in column C
+    for (const key in ws) {
+      if (key.startsWith('C') && key !== 'C1') {
+        const cell = ws[key];
+        if (cell) {
+          if (cell.t === 'd' || cell.v instanceof Date) {
+            cell.z = 'dd-mmm-yyyy';
+          } else if (cell.t === 'n' && typeof cell.v === 'number' && cell.v > 30000 && cell.v < 60000) {
+            cell.v = Math.floor(cell.v); // Ensure strictly whole number serial (date only, no time part)
+            cell.z = 'dd-mmm-yyyy';
+          }
+        }
+      }
+    }
+
+    ws['!cols'] = [
+      { wch: 15 }, // VoucherType
+      { wch: 20 }, // VoucherNo
+      { wch: 15 }, // Date
+      { wch: 45 }, // LedgerName
+      { wch: 12 }, // EntryType
+      { wch: 15 }, // Amount
+      { wch: 60 }  // Narration
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, "Vouchers");
+
+    const cleanDate = (data.tradeDate || "").trim().replace(/[\s\/\\]/g, "_") || new Date().toISOString().split('T')[0];
+    const cleanBroker = (data.brokerName || broker || "broker").toLowerCase().trim();
+    XLSX.writeFile(wb, `voucher_${cleanBroker}_${cleanDate}.xlsx`);
+  };
+
+  const downloadVoucherXML = () => {
+    if (!data) return;
+
+    const parseDateToYYYYMMDD = (dateStr: string): string => {
+      if (!dateStr) return "";
+      const cleaned = dateStr.trim();
+      let dObj: Date | null = null;
+      
+      const dmy = cleaned.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+      if (dmy) {
+        const day = parseInt(dmy[1], 10);
+        const month = parseInt(dmy[2], 10) - 1;
+        const year = parseInt(dmy[3], 10);
+        dObj = new Date(Date.UTC(year, month, day));
+      } else {
+        const ymd = cleaned.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+        if (ymd) {
+          const year = parseInt(ymd[1], 10);
+          const month = parseInt(ymd[2], 10) - 1;
+          const day = parseInt(ymd[3], 10);
+          dObj = new Date(Date.UTC(year, month, day));
+        } else {
+          const ts = Date.parse(cleaned);
+          if (!isNaN(ts)) {
+            const parsedD = new Date(ts);
+            dObj = new Date(Date.UTC(parsedD.getFullYear(), parsedD.getMonth(), parsedD.getDate()));
+          }
+        }
+      }
+
+      if (dObj) {
+        const yyyy = dObj.getUTCFullYear();
+        const mm = String(dObj.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(dObj.getUTCDate()).padStart(2, '0');
+        return `${yyyy}${mm}${dd}`;
+      }
+      return cleaned.replace(/[^0-9]/g, "");
+    };
+
+    const grouped: { [key: string]: typeof data.trades } = {};
+    for (const t of data.trades) {
+      const groupKey = `${t.tradeDate}_${t.securityName}_${t.transactionType}`;
+      if (!grouped[groupKey]) grouped[groupKey] = [];
+      grouped[groupKey].push(t);
+    }
+
+    let xml = `<?xml version="1.0" encoding="utf-8"?>
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Vouchers</REPORTNAME>
+      </REQUESTDESC>
+      <REQUESTDATA>\n`;
+
+    let voucherIndex = 0;
+    const startNum = parseInt(ledgerMappings.VOUCHER_START_NUMBER || "1524", 10);
+    const voucherPrefix = ledgerMappings.VOUCHER_PREFIX || "COMBINED/";
+
+    for (const key of Object.keys(grouped)) {
+      const group = grouped[key];
+      const first = group[0];
+      const tradeDateStr = first.tradeDate ? first.tradeDate.trim() : "";
+      const tallyDate = parseDateToYYYYMMDD(tradeDateStr);
+      const securityName = first.securityName;
+      const tType = first.transactionType;
+
+      const currentVoucherNo = `${voucherPrefix}${startNum + voucherIndex}`;
+      voucherIndex++;
+
+      const qty = group.reduce((sum, x) => sum + x.quantity, 0);
+      const turnover_val = group.reduce((sum, x) => sum + x.turnover, 0);
+      const avgPrice = turnover_val / qty;
+      const stt_val = group.reduce((sum, x) => sum + x.stt, 0);
+      const etc_val = group.reduce((sum, x) => sum + x.etc, 0);
+      const sebi_val = group.reduce((sum, x) => sum + x.sebiFees, 0);
+      const ipf_val = group.reduce((sum, x) => sum + x.ipf, 0);
+      const gst_val = group.reduce((sum, x) => sum + x.gst, 0);
+      const brokerage_val = group.reduce((sum, x) => sum + x.brokerage, 0);
+      const stamp_val = group.reduce((sum, x) => sum + x.stampDuty, 0);
+      const clearing_val = group.reduce((sum, x) => sum + x.clearingCharges, 0);
+
+      const round = (num: number) => Math.round(num * 100) / 100;
+
+      const drStt = round(stt_val);
+      const drEtc = round(etc_val);
+      const drSebi = round(sebi_val);
+      const drIpf = round(ipf_val);
+      const drGst = round(gst_val);
+      const drBrokerage = round(brokerage_val);
+      const drStamp = round(stamp_val);
+      const drClearing = round(clearing_val);
+
+      const getSharesLedgerName = (name: string): string => {
+        const overridesStr = ledgerMappings.SECURITIES_MAPPINGS || "";
+        const lines = overridesStr.split('\n');
+        for (const line of lines) {
+          const parts = line.split('=');
+          if (parts.length === 2) {
+            const parsedKey = parts[0].trim().toLowerCase();
+            const targetValue = parts[1].trim();
+            if (parsedKey && (name.toLowerCase().includes(parsedKey) || name.toLowerCase() === parsedKey)) {
+              return targetValue;
+            }
+          }
+        }
+        const template = ledgerMappings.SHARES_TEMPLATE || "{securityName} (Shares)";
+        return template.replace("{securityName}", name);
+      };
+
+      const sharesLedgerName = getSharesLedgerName(securityName);
+      const narration = `${securityName} ${qty} Nos @ ${avgPrice.toFixed(2)}`;
+
+      const brokerLedger = ledgerMappings.BROKER || "Broker Ledger";
+
+      // Represent entries. For Tally, Debits are negative, Credits are positive amounts.
+      const entries: { ledgerName: string; isDebit: boolean; amount: number }[] = [];
+
+      const addEntry = (ledgerName: string, isDebit: boolean, amt: number) => {
+        if (amt <= 0) return;
+        entries.push({ ledgerName, isDebit, amount: round(amt) });
+      };
+
+      if (tType === "Sell") {
+        // Correct Sell direction according to successful Tally setup (Share = Debit, Broker = Credit)
+        // Share Ledger (Debit) is gross turnover
+        // Broker Ledger (Credit) is net receivable/payable plus expenses (turnover_val + expTotal)
+        const expTotal = stt_val + etc_val + sebi_val + ipf_val + gst_val + brokerage_val + stamp_val + clearing_val;
+        const netBrokerVal = round(turnover_val + expTotal);
+        const drSharesVal = round(turnover_val);
+
+        addEntry(sharesLedgerName, true, drSharesVal); // Debit
+        addEntry(brokerLedger, false, netBrokerVal);  // Credit
+        addEntry(ledgerMappings.STT || "STT Ledger", true, drStt);
+        addEntry(ledgerMappings.EXCHANGE || "Exchange Charges", true, drEtc);
+        addEntry(ledgerMappings.SEBI || "SEBI Ledger", true, drSebi);
+        addEntry(ledgerMappings.IPF || "IPF Ledger", true, drIpf);
+        addEntry(ledgerMappings.GST || "GST Ledger", true, drGst);
+        addEntry(ledgerMappings.BROKERAGE || "Brokerage", true, drBrokerage);
+        addEntry(ledgerMappings.STAMP_DUTY || "Stamp Duty", true, drStamp);
+        addEntry(ledgerMappings.CLEARING || "Clearing", true, drClearing);
+      } else {
+        // Correct Buy direction according to successful Tally setup (Broker = Debit, Share = Credit)
+        // Broker Ledger (Debit) is net Broker payment (turnover_val - expTotal)
+        // Share Ledger (Credit) is gross turnover
+        const expTotal = stt_val + etc_val + sebi_val + ipf_val + gst_val + brokerage_val + stamp_val + clearing_val;
+        const netBrokerVal = round(turnover_val - expTotal);
+        const crSharesVal = round(turnover_val);
+
+        addEntry(brokerLedger, true, netBrokerVal);   // Debit
+        addEntry(sharesLedgerName, false, crSharesVal); // Credit
+        addEntry(ledgerMappings.STT || "STT Ledger", true, drStt);
+        addEntry(ledgerMappings.EXCHANGE || "Exchange Charges", true, drEtc);
+        addEntry(ledgerMappings.SEBI || "SEBI Ledger", true, drSebi);
+        addEntry(ledgerMappings.IPF || "IPF Ledger", true, drIpf);
+        addEntry(ledgerMappings.GST || "GST Ledger", true, drGst);
+        addEntry(ledgerMappings.BROKERAGE || "Brokerage", true, drBrokerage);
+        addEntry(ledgerMappings.STAMP_DUTY || "Stamp Duty", true, drStamp);
+        addEntry(ledgerMappings.CLEARING || "Clearing", true, drClearing);
+      }
+
+      // Compute Dr and Cr sums, then balance precisely with Rounded Off
+      const sumDr = entries.filter(e => e.isDebit).reduce((s, e) => s + e.amount, 0);
+      const sumCr = entries.filter(e => !e.isDebit).reduce((s, e) => s + e.amount, 0);
+      const diff = round(sumDr - sumCr);
+
+      if (Math.abs(diff) >= 0.005) {
+        if (diff < 0) {
+          // Dr is less than Cr, so we Debit Rounded Off to balance
+          addEntry(ledgerMappings.ROUNDED_OFF || "Rounded Off", true, Math.abs(diff));
+        } else {
+          // Dr is more than Cr, so we Credit Rounded Off to balance
+          addEntry(ledgerMappings.ROUNDED_OFF || "Rounded Off", false, Math.abs(diff));
+        }
+      }
+
+      // Safeguard escape xml strings
+      const escapeXml = (str: string) => {
+        return str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      };
+
+      xml += `        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+          <VOUCHER DATE="${escapeXml(tallyDate)}" VCHTYPE="Journal" ACTION="Create">
+            <DATE>${escapeXml(tallyDate)}</DATE>
+            <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+            <VOUCHERNUMBER>${escapeXml(currentVoucherNo)}</VOUCHERNUMBER>
+            <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+            <ISINVOICE>No</ISINVOICE>
+            <ISOPTIONAL>No</ISOPTIONAL>
+            <EFFECTIVEDATE>${escapeXml(tallyDate)}</EFFECTIVEDATE>
+            <NARRATION>${escapeXml(narration)}</NARRATION>\n`;
+
+      for (const ent of entries) {
+        // In Tally XML, Debit amount is negative and ISDEEMEDPOSITIVE is Yes
+        // Credit amount is positive and ISDEEMEDPOSITIVE is No
+        const isDeemedPositive = ent.isDebit ? "Yes" : "No";
+        const tallyAmtStr = ent.isDebit ? `-${ent.amount.toFixed(2)}` : ent.amount.toFixed(2);
+
+        xml += `            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>${escapeXml(ent.ledgerName)}</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>${isDeemedPositive}</ISDEEMEDPOSITIVE>
+              <LEDGERFROMITEM>No</LEDGERFROMITEM>
+              <AMOUNT>${tallyAmtStr}</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>\n`;
+      }
+
+      xml += `          </VOUCHER>
+        </TALLYMESSAGE>\n`;
+    }
+
+    xml += `      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+
+    const blob = new Blob([xml], { type: 'application/xml;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    const cleanDate = (data.tradeDate || "").trim().replace(/[\s\/\\]/g, "_") || new Date().toISOString().split('T')[0];
+    const cleanBroker = (data.brokerName || broker || "broker").toLowerCase().trim();
+    link.setAttribute("download", `tally_vouchers_${cleanBroker}_${cleanDate}.xml`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleExportClick = () => {
@@ -269,19 +818,360 @@ export default function App() {
             <FileText className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-lg font-black text-slate-800 tracking-tight leading-tight">Contract Note Analyzer & Auditor</h1>
+            <h1 className="text-lg font-black text-slate-800 tracking-tight leading-tight">Contract Note Analyzer</h1>
           </div>
         </div>
 
-
+        <button
+          id="btn-open-menu"
+          onClick={() => setIsDrawerOpen(true)}
+          className="p-2 hover:bg-slate-100 rounded-xl transition-all text-slate-600 hover:text-slate-950 flex items-center justify-center border border-transparent hover:border-slate-200"
+          title="Calculation logic details"
+        >
+          <Menu className="w-5 h-5 font-bold" />
+        </button>
       </header>
+
+      {/* Reference Side Drawer / Dynamic Math & Logic reference */}
+      <AnimatePresence>
+        {isDrawerOpen && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setIsDrawerOpen(false);
+                setSelectedLogicBroker(null);
+                setIsLogicOpen(false);
+              }}
+              className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-[90]"
+            />
+
+            {/* Slide-out Panel */}
+            <motion.div
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="fixed right-0 top-0 h-full w-[440px] max-w-full bg-white shadow-2xl z-[100] border-l border-slate-200 flex flex-col"
+            >
+              <div className="p-5 border-b border-slate-150 flex items-center justify-between bg-slate-50">
+                <div className="flex items-center gap-2">
+                  <Calculator className="w-5 h-5 text-indigo-600" />
+                  <h2 className="text-sm font-black text-slate-800 uppercase tracking-wider">Calculation & Logic Summary</h2>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsDrawerOpen(false);
+                    setSelectedLogicBroker(null);
+                    setIsLogicOpen(false);
+                  }}
+                  className="p-1 px-1.5 hover:bg-slate-200 rounded-md transition-colors text-slate-500 hover:text-slate-850"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                {selectedLogicBroker === null ? (
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-500 font-medium">
+                      Select an option below to inspect the mathematical logic and formulas implemented in the parsing engine.
+                    </p>
+
+                    {/* Accordion List */}
+                    <div className="border border-slate-200 rounded-xl overflow-hidden bg-white shadow-xs">
+                      {/* First Option: Logic */}
+                      <button
+                        onClick={() => setIsLogicOpen(!isLogicOpen)}
+                        className="w-full flex items-center justify-between p-4 bg-white hover:bg-slate-50 transition-colors text-left"
+                      >
+                        <div className="flex items-center gap-3">
+                          <BookOpen className="w-5 h-5 text-indigo-500" />
+                          <div>
+                            <p className="text-sm font-bold text-slate-800">Calculation Logic</p>
+                            <p className="text-xs text-slate-450">View formulas, pricing allocations, taxes & STT</p>
+                          </div>
+                        </div>
+                        <ChevronDown 
+                          className={`w-4 h-4 text-slate-400 transition-transform duration-250 ${isLogicOpen ? 'rotate-180 font-bold' : ''}`} 
+                        />
+                      </button>
+
+                      {/* Dropdown nested options */}
+                      <AnimatePresence initial={false}>
+                        {isLogicOpen && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="bg-slate-50 border-t border-slate-150 overflow-hidden"
+                          >
+                            <div className="p-2 space-y-1">
+                              <button
+                                onClick={() => setSelectedLogicBroker('zerodha')}
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                              >
+                                <span className="flex items-center gap-2">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-[#12b8f1]" />
+                                  Zerodha Logic Model
+                                </span>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                              </button>
+                              
+                              <button
+                                onClick={() => setSelectedLogicBroker('shareindia')}
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                              >
+                                <span className="flex items-center gap-2">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                                  Share India Logic Model
+                                </span>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                              </button>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Back header */}
+                    <button
+                      onClick={() => setSelectedLogicBroker(null)}
+                      className="text-xs font-black text-indigo-600 hover:text-indigo-800 transition-colors flex items-center gap-1.5 mb-2 group"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5 rotate-180 group-hover:-translate-x-0.5 transition-transform font-bold" />
+                      Back to options
+                    </button>
+
+                    {selectedLogicBroker === 'zerodha' ? (
+                      <div className="space-y-4 animate-fadeIn">
+                        <div className="p-4 rounded-xl bg-slate-900 text-white shadow-md">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="w-2 h-2 rounded-full bg-[#12b8f1] animate-pulse" />
+                            <h3 className="text-xs font-black tracking-wider uppercase text-[#12b8f1]">Zerodha Mathematical Engine</h3>
+                          </div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+                            High-precision formulas and validation boundaries designed specifically for Zerodha contract notes.
+                          </p>
+                        </div>
+
+                        {/* Calculations summary */}
+                        <div className="space-y-3.5 text-xs text-slate-700 leading-relaxed">
+                          
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>1. Turnovers & Net Rates</span>
+                              <span className="text-[10px] uppercase font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">Core Formula</span>
+                            </h4>
+                            <p className="mb-1 text-slate-650">The primary calculation handles raw trades:</p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-indigo-700 leading-normal">
+                              Turnover = Quantity × Average Price
+                            </code>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>2. High-Precision Proration</span>
+                              <span className="text-[10px] uppercase font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">Proration</span>
+                            </h4>
+                            <p className="mb-1.5 text-slate-655 font-sans">
+                              For composite contract fee lines (e.g., total GST, exchange charges, clearing charges), expenses are distributed proportionally based on trade value share:
+                            </p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-emerald-800 leading-normal mb-1">
+                              Ratio = Trade Turnover / Total Turnover
+                            </code>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-emerald-800 leading-normal">
+                              Allocated Charge = Total Charge × Ratio
+                            </code>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1.5">
+                              <span>3. STT (Securities Transaction Tax)</span>
+                              <span className="text-[10px] uppercase font-mono text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Taxation</span>
+                            </h4>
+                            <p className="text-slate-655 mb-2">STT is computed programmatically by trade class:</p>
+                            <div className="bg-white rounded border border-slate-250 overflow-hidden text-[10px]">
+                              <table className="w-full text-left border-collapse">
+                                <thead className="bg-slate-50 border-b border-slate-200">
+                                  <tr>
+                                    <th className="p-1 px-2 font-black text-slate-700 text-[9px] uppercase">Class</th>
+                                    <th className="p-1 px-2 font-black text-slate-700 text-[9px] uppercase">Buy side</th>
+                                    <th className="p-1 px-2 font-black text-slate-700 text-[9px] uppercase">Sell side</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  <tr className="border-b border-slate-100">
+                                    <td className="p-1 px-2 font-semibold text-slate-755">Equity Delivery</td>
+                                    <td className="p-1 px-2 text-indigo-700 font-mono font-medium">0.10% (0.001)</td>
+                                    <td className="p-1 px-2 text-indigo-700 font-mono font-medium">0.10% (0.001)</td>
+                                  </tr>
+                                  <tr className="border-b border-slate-100">
+                                    <td className="p-1 px-2 font-semibold text-slate-755">Equity Intraday</td>
+                                    <td className="p-1 px-2 text-slate-400 font-mono">0.00%</td>
+                                    <td className="p-1 px-2 text-indigo-700 font-mono font-medium">0.025% (0.00025)</td>
+                                  </tr>
+                                  <tr>
+                                    <td className="p-1 px-2 font-semibold text-slate-755">ETFs (All)</td>
+                                    <td className="p-1 px-2 text-slate-400 font-mono">0.00%</td>
+                                    <td className="p-1 px-2 text-slate-400 font-mono">0.00%</td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>4. Stamp Duty Allocation</span>
+                              <span className="text-[10px] uppercase font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">Levies</span>
+                            </h4>
+                            <p className="mb-1.5 text-slate-655 font-sans">
+                              Stamp Duty is legally charged strictly on <strong>BUY</strong> transactions:
+                            </p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-purple-800 leading-normal">
+                              Buy_Ratio = Buy Turnover / Total Buy Turnover
+                              {"\n"}
+                              Stamp_Duty_Alloc = Total Stamp Duty × Buy_Ratio
+                            </code>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>5. Goods & Services Tax (GST)</span>
+                              <span className="text-[10px] uppercase font-mono text-blue-605 bg-blue-50 px-1.5 py-0.5 rounded">GST</span>
+                            </h4>
+                            <p className="mb-1 text-slate-655">
+                              GST is calculated at 18% of sum of services values:
+                            </p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-blue-800 leading-normal">
+                              GST Base = Brokerage + ETC + SEBI Fee + Clearing Charges
+                              {"\n"}
+                              Calculated GST = GST Base × 18%
+                            </code>
+                          </div>
+                          
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 animate-fadeIn">
+                        <div className="p-4 rounded-xl bg-slate-900 text-white shadow-md">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                            <h3 className="text-xs font-black tracking-wider uppercase text-red-400">Share India Calculation Model</h3>
+                          </div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+                            Mathematical rules used dynamically by the Share India extension of the Standard note layout engine.
+                          </p>
+                        </div>
+
+                        {/* Share India details */}
+                        <div className="space-y-3.5 text-xs text-slate-700 leading-relaxed">
+                          
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>1. Taxable Value & Services</span>
+                              <span className="text-[10px] uppercase font-mono text-slate-600 bg-slate-200 px-1.5 py-0.5 rounded">Source</span>
+                            </h4>
+                            <p className="text-slate-655">
+                              Extracts the precise taxable values lines directly from the HTML/PDF summary block. If the CGST/SGST/IGST coordinates are not matching perfectly, the engine triggers a local 18% GST recalculation safety checker.
+                            </p>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>2. STT Classification & Logic</span>
+                              <span className="text-[10px] uppercase font-mono text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Classification</span>
+                            </h4>
+                            <p className="mb-2 text-slate-655">
+                              Classifies trades automatically based on same-day round-tripping or explicit keywords (<em>CNC, MIS, Intraday</em>):
+                            </p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-amber-800 leading-normal">
+                              If Intraday Buy: STT = 0% {"\n"}
+                              If Intraday Sell: STT = 0.025% × Turnover {"\n"}
+                              If Delivery (Buy or Sell): STT = 0.1% × Turnover
+                            </code>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>3. Allocations Framework</span>
+                              <span className="text-[10px] uppercase font-mono text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded font-bold">Proration Math</span>
+                            </h4>
+                            <p className="mb-1 text-slate-655">The proration ensures exact totals balance:</p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-rose-800 leading-normal">
+                              Trade Brokerage = Summary Taxable Value × Ratio{"\n"}
+                              Trade ETC = Summary ETC × Ratio{"\n"}
+                              GST = (Allocated Brokerage + Allocated ETC) × 18%
+                            </code>
+                          </div>
+
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>4. Stamp Duty Allocation</span>
+                              <span className="text-[10px] uppercase font-mono text-purple-650 bg-purple-50 px-1.5 py-0.5 rounded">Rules</span>
+                            </h4>
+                            <p className="text-slate-655">
+                              Like the Zerodha engine, Share India allocates stamp duty exclusively back to buying actions. Intraday or delivery buys share total stamp duty based on buy share volume metrics.
+                            </p>
+                          </div>
+
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 border-t border-slate-150 bg-slate-50 text-[11px] text-slate-450 leading-relaxed font-sans">
+                Need to fine-tune the mathematical ratios or add customized rates? Open a file change request directly in the editor under <code className="bg-slate-200 px-1.5 py-0.5 rounded text-slate-705">/src/lib/brokers</code>.
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         {activeTab === 'analyse' && (
           <div className="space-y-6">
             {!data && !isLoading && (
               <div className="text-center max-w-3xl mx-auto mt-6">
-
+                {/* Broker Selection Tabs / Segmented Control */}
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Choose Broker</h3>
+                <div className="inline-flex items-center justify-center p-1.5 bg-slate-200/80 rounded-2xl border border-slate-300/40 shadow-sm mb-6 max-w-full flex-wrap gap-1">
+                  <button
+                    id="btn-broker-zerodha"
+                    type="button"
+                    onClick={() => setBroker('zerodha')}
+                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black transition-all ${broker === 'zerodha' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
+                  >
+                    Zerodha
+                  </button>
+                  <button
+                    id="btn-broker-shareindia"
+                    type="button"
+                    onClick={() => setBroker('shareindia')}
+                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black transition-all ${broker === 'shareindia' ? 'bg-white shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
+                  >
+                    <span className="flex items-center gap-1">
+                      <span className={broker === 'shareindia' ? 'text-[#12b8f1]' : 'text-inherit'}>Share</span>
+                      <span className={broker === 'shareindia' ? 'text-red-500' : 'text-inherit'}>India</span>
+                    </span>
+                  </button>
+                  <button
+                    id="btn-broker-integrated"
+                    type="button"
+                    onClick={() => setBroker('integrated')}
+                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black transition-all ${broker === 'integrated' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
+                  >
+                    Integrated
+                  </button>
+                </div>
 
                 <div 
                   className={`relative flex flex-col items-center justify-center h-64 border-2 border-dashed rounded-2xl transition-all ${dragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-300 bg-white shadow-sm hover:border-indigo-400'}`}
@@ -290,11 +1180,31 @@ export default function App() {
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={onDrop}
                 >
-                  <input ref={fileInputRef} type="file" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => e.target.files && handleFileUpload(e.target.files)} accept=".pdf,.html,.htm" multiple disabled={isLoading} />
+                  <input 
+                    ref={fileInputRef} 
+                    type="file" 
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
+                    onChange={(e) => e.target.files && handleFileUpload(e.target.files)} 
+                    accept={broker === 'zerodha' ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'} 
+                    multiple 
+                    disabled={isLoading} 
+                  />
                   <div className="text-center px-4">
                     <Upload className="mx-auto w-10 h-10 text-indigo-400 mb-4" />
-                    <p className="text-lg font-bold text-slate-800">Upload PDF or HTML Contract Notes</p>
-                    <p className="text-xs text-slate-500 mt-1">Supports batch processing of up to {MAX_FILES} files. Drag or select.</p>
+                    <p className="text-lg font-bold text-slate-800">
+                      {broker === 'zerodha' && "Upload Zerodha Contract Notes"}
+                      {broker === 'shareindia' && "Upload Share India Contract Notes"}
+                      {broker === 'integrated' && "Upload Integrated Contract Notes"}
+                      {broker !== 'zerodha' && broker !== 'shareindia' && broker !== 'integrated' && "Upload PDF or HTML Contract Notes"}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {broker === 'zerodha' 
+                        ? `Only PDF files are supported. Max ${MAX_FILES} files.` 
+                        : broker === 'integrated'
+                          ? `Only HTM/HTML files are supported. Max ${MAX_FILES} files. Drag or select.`
+                          : `Supports batch processing of up to ${MAX_FILES} files. Drag or select.`
+                      }
+                    </p>
                   </div>
                 </div>
               </div>
@@ -445,8 +1355,33 @@ export default function App() {
                   </div>
                   
                   <div className="flex flex-col sm:flex-row gap-3">
+                    <button 
+                      onClick={() => setShowLedgerConfig(!showLedgerConfig)} 
+                      className={`px-4 py-2.5 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 border ${showLedgerConfig ? 'bg-indigo-100 text-indigo-700 border-indigo-300' : 'bg-indigo-50/50 hover:bg-indigo-50 text-indigo-600 border-indigo-200'}`}
+                      title="Configure ledger names for accounting import"
+                    >
+                      <Calculator className="w-3.5 h-3.5" />
+                      Ledger Mappings
+                    </button>
+
                     <button onClick={() => setData(null)} className="px-4 py-2.5 text-xs font-bold text-slate-600 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 transition-all">Clear Note</button>
                     
+                    <button
+                      onClick={downloadVoucherXML}
+                      className="px-5 py-2.5 text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow shadow-emerald-200 rounded-xl transition-all flex items-center gap-1.5 ring-2 ring-emerald-500/10 active:scale-[0.98]"
+                    >
+                      <Download className="w-4 h-4" />
+                      Export Tally XML
+                    </button>
+
+                    <button
+                      onClick={downloadVoucherExcel}
+                      className="px-4 py-2.5 text-xs font-bold text-slate-755 bg-white border border-slate-300 hover:bg-slate-50 transition-all flex items-center gap-1.5 rounded-xl"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-slate-500" />
+                      Export Excel
+                    </button>
+
                     <div className="relative">
                       <button 
                         onClick={handleExportClick} 
@@ -475,6 +1410,167 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Collapsible Ledger Mapping Content */}
+                {showLedgerConfig && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 animate-fadeIn space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
+                      <div>
+                        <h4 className="text-xs font-black tracking-wider uppercase text-slate-700 flex items-center gap-1.5">
+                          <Calculator className="w-4 h-4 text-indigo-600" />
+                          Tally Ledger Name Mappings
+                        </h4>
+                        <p className="text-[10px] text-slate-500 mt-0.5 leading-relaxed font-sans">
+                          Enter the exact Ledger Name used in your accounting system. The voucher exporter matches these fields dynamically.
+                        </p>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          setLedgerMappings(DEFAULT_LEDGER_MAPPINGS);
+                          localStorage.setItem('accounting_ledger_mappings', JSON.stringify(DEFAULT_LEDGER_MAPPINGS));
+                        }}
+                        className="text-[10px] font-bold text-indigo-600 bg-white border border-slate-200 px-3 py-1 rounded-lg hover:bg-slate-100 transition-all self-start sm:self-auto"
+                      >
+                        Reset Defaults
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Broker Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.BROKER || ""}
+                          onChange={(e) => updateLedgerMapping('BROKER', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">STT Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.STT || ""}
+                          onChange={(e) => updateLedgerMapping('STT', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Exchange Charges (ETC)</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.EXCHANGE || ""}
+                          onChange={(e) => updateLedgerMapping('EXCHANGE', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">SEBI Charges Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.SEBI || ""}
+                          onChange={(e) => updateLedgerMapping('SEBI', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">IPF Charges Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.IPF || ""}
+                          onChange={(e) => updateLedgerMapping('IPF', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">GST Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.GST || ""}
+                          onChange={(e) => updateLedgerMapping('GST', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Brokerage Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.BROKERAGE || ""}
+                          onChange={(e) => updateLedgerMapping('BROKERAGE', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Stamp Duty Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.STAMP_DUTY || ""}
+                          onChange={(e) => updateLedgerMapping('STAMP_DUTY', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Clearing Charges Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.CLEARING || ""}
+                          onChange={(e) => updateLedgerMapping('CLEARING', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Rounded Off Ledger</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.ROUNDED_OFF || ""}
+                          onChange={(e) => updateLedgerMapping('ROUNDED_OFF', e.target.value)}
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Voucher Prefix</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.VOUCHER_PREFIX || ""}
+                          onChange={(e) => updateLedgerMapping('VOUCHER_PREFIX', e.target.value)}
+                          placeholder="COMBINED/"
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Starting Voucher No</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.VOUCHER_START_NUMBER || ""}
+                          onChange={(e) => updateLedgerMapping('VOUCHER_START_NUMBER', e.target.value)}
+                          placeholder="1524"
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                      </div>
+                      <div className="space-y-1 md:col-span-2">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Shares Name Format Template</label>
+                        <input
+                          type="text"
+                          value={ledgerMappings.SHARES_TEMPLATE || ""}
+                          onChange={(e) => updateLedgerMapping('SHARES_TEMPLATE', e.target.value)}
+                          placeholder="{securityName} (Shares)"
+                          className="w-full bg-white px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                        <span className="text-[9px] text-slate-400 font-sans block block-inline mt-0.5">Use <code>{`{securityName}`}</code> as a dynamic placeholder.</span>
+                      </div>
+                      <div className="space-y-1 md:col-span-2">
+                        <label className="block text-[10px] uppercase font-bold text-slate-500">Securities Mapping Overrides (One per line: Key=Tally Ledger Name)</label>
+                        <textarea
+                          rows={3}
+                          value={ledgerMappings.SECURITIES_MAPPINGS || ""}
+                          onChange={(e) => updateLedgerMapping('SECURITIES_MAPPINGS', e.target.value)}
+                          placeholder="GOODLUCK=Goodluck India Ltd (Shares)&#10;LIQUIDCASE=LIQUIDCASE"
+                          className="w-full bg-white px-3 py-1.5 border border-slate-150 rounded-lg text-xs font-mono outline-indigo-500"
+                        />
+                        <span className="text-[9px] text-slate-400 font-sans block block-inline mt-0.5">Define custom mapping rules (e.g. <code>LIQUIDCASE=LIQUIDCASE</code>). Unmatched securities default to the format template above.</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
 
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
@@ -485,7 +1581,11 @@ export default function App() {
                   <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} />
                   <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} />
                   <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} />
-                  <SummaryCard label="IGST" value={calculatedTotals.clearingCharges} />
+                  {data?.brokerName === 'integrated' ? (
+                    <SummaryCard label="Total GST" value={calculatedTotals.gst} />
+                  ) : (
+                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} />
+                  )}
                   <SummaryCard label="SEBI Fees & Other" value={calculatedTotals.sebiFeesAndOther} />
                 </div>
 
@@ -502,7 +1602,11 @@ export default function App() {
                         <th className="px-6 py-4 text-center bg-indigo-50/50 text-indigo-700">Class</th>
                         <th className="px-6 py-4 text-right">Brokerage</th>
                         <th className="px-6 py-4 text-right text-rose-700 bg-rose-50/30">STT</th>
-                        <th className="px-6 py-4 text-right font-semibold text-indigo-700 bg-indigo-50/10">IGST</th>
+                        {data?.brokerName === 'integrated' ? (
+                          <th className="px-6 py-4 text-right font-semibold text-indigo-700 bg-indigo-50/10">Total GST</th>
+                        ) : (
+                          <th className="px-6 py-4 text-right font-semibold text-indigo-700 bg-indigo-50/10">IGST</th>
+                        )}
                         <th className="px-6 py-4 text-right">ETC</th>
                         <th className="px-6 py-4 text-right">Stamp Duty</th>
                         <th className="px-6 py-4 text-right">Other Levies</th>
@@ -537,7 +1641,11 @@ export default function App() {
                             </td>
                             <td className="px-6 py-4 text-right text-slate-600">₹{t.brokerage.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right font-semibold text-rose-700 bg-rose-50/10">₹{t.stt.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{t.clearingCharges.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            {data?.brokerName === 'integrated' ? (
+                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{t.gst.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            ) : (
+                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{(t.igst || t.gst).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                            )}
                             <td className="px-6 py-4 text-right text-slate-600">₹{t.etc.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-600">₹{t.stampDuty.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-slate-600">₹{(t.sebiFees + t.ipf).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
