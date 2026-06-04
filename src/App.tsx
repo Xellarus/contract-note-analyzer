@@ -4,7 +4,7 @@ import {
   Upload, X, Download, FileText, Info, CheckCircle2, AlertCircle, 
   ArrowRightLeft, ListChecks, Play, Trash2, PlusCircle, AlertTriangle, 
   RefreshCw, Check, ShieldAlert, Award, ChevronRight, Gauge,
-  Menu, ChevronDown, BookOpen, Calculator
+  Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ContractNoteResult, ReconciliationStatus } from './types';
@@ -26,6 +26,95 @@ const MAX_FILES = 25;
 export default function App() {
   const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
   const [data, setData] = useState<ContractNoteResult | null>(null);
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
+
+  const requestSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'desc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'desc') {
+      direction = 'asc';
+    } else if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      setSortConfig(null);
+      return;
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortedTrades = () => {
+    if (!data) return [];
+    if (!sortConfig) return data.trades;
+
+    return [...data.trades].sort((a, b) => {
+      let aVal: any = (a as any)[sortConfig.key];
+      let bVal: any = (b as any)[sortConfig.key];
+
+      if (sortConfig.key === 'totalInclSTT') {
+        aVal = a.transactionType === "Buy" ? a.turnover + a.totalExpensesInclSTT : a.turnover - a.totalExpensesInclSTT;
+        bVal = b.transactionType === "Buy" ? b.turnover + b.totalExpensesInclSTT : b.turnover - b.totalExpensesInclSTT;
+      } else if (sortConfig.key === 'totalExclSTT') {
+        aVal = a.transactionType === "Buy" ? a.turnover + a.totalExpensesExclSTT : a.turnover - a.totalExpensesExclSTT;
+        bVal = b.transactionType === "Buy" ? b.turnover + b.totalExpensesExclSTT : b.turnover - b.totalExpensesExclSTT;
+      } else if (sortConfig.key === 'gstOrIgst') {
+        aVal = broker === 'integrated' ? a.gst : (a.igst || a.gst);
+        bVal = broker === 'integrated' ? b.gst : (b.igst || b.gst);
+      } else if (sortConfig.key === 'sebiAndIpf') {
+        aVal = a.sebiFees + a.ipf;
+        bVal = b.sebiFees + b.ipf;
+      } else if (sortConfig.key === 'tradeDate') {
+        const parseDate = (d: string) => {
+          const parts = d.split(/[-/]/);
+          if (parts.length === 3) {
+            // Assume DD/MM/YYYY or DD-MMM-YYYY
+            const monthStr = parts[1];
+            const month = isNaN(Number(monthStr)) 
+              ? new Date(Date.parse(monthStr +" 1, 2012")).getMonth() 
+              : parseInt(monthStr) - 1;
+            return new Date(parseInt(parts[2]), month, parseInt(parts[0])).getTime();
+          }
+          return new Date(d).getTime();
+        };
+        aVal = parseDate(a.tradeDate);
+        bVal = parseDate(b.tradeDate);
+      }
+
+      if (aVal === bVal) return 0;
+      
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortConfig.direction === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      
+      const aNum = Number(aVal);
+      const bNum = Number(bVal);
+      if (isNaN(aNum) || isNaN(bNum)) {
+         if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+         if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+         return 0;
+      }
+
+      return sortConfig.direction === 'asc' ? aNum - bNum : bNum - aNum;
+    });
+  };
+
+  const SortableHeader = ({ label, sortKey, align = 'left', className = '' }: { label: string, sortKey: string, align?: 'left' | 'center' | 'right', className?: string }) => {
+    const isActive = sortConfig?.key === sortKey;
+    return (
+      <th 
+        className={`px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors select-none ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'} ${className}`}
+        onClick={() => requestSort(sortKey)}
+      >
+        <div className={`flex items-center gap-1 inline-flex ${align === 'right' ? 'flex-row-reverse justify-start' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+          <span>{label}</span>
+          <div className="flex items-center justify-center text-slate-400">
+            {isActive ? (
+              sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
+            ) : (
+              <ArrowUpDown className="w-3 h-3 opacity-30 hover:opacity-100 transition-opacity" />
+            )}
+          </div>
+        </div>
+      </th>
+    );
+  };
+
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileCount, setFileCount] = useState({ total: 0, processed: 0 });
@@ -37,7 +126,7 @@ export default function App() {
   const [showExportConfirmation, setShowExportConfirmation] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isLogicOpen, setIsLogicOpen] = useState(false);
-  const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | null>(null);
+  const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | 'integrated' | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const DEFAULT_LEDGER_MAPPINGS = React.useMemo(() => ({
@@ -811,25 +900,83 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20">
-      <header className="bg-white border-b border-slate-250 sticky top-0 z-50 px-6 h-16 flex items-center justify-between shadow-sm">
-        <div className="flex items-center space-x-3">
-          <div className="bg-indigo-600 text-white p-2.5 rounded-xl shadow shadow-indigo-150">
-            <FileText className="w-5 h-5" />
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20" style={{ backgroundColor: '#d8d8ff' }}>
+      <header className="bg-white border-b border-slate-250 sticky top-0 z-50 px-6 h-16 shadow-sm flex items-center">
+        <div className="flex-1 flex items-center space-x-2 sm:space-x-3">
+          <div className="bg-indigo-600 text-white p-2 sm:p-2.5 rounded-xl shadow shadow-indigo-150 flex-shrink-0">
+            <FileText className="w-4 h-4 sm:w-5 sm:h-5" />
           </div>
           <div>
-            <h1 className="text-lg font-black text-slate-800 tracking-tight leading-tight">Contract Note Analyzer</h1>
+            <h1 className="text-xs sm:text-lg font-black text-slate-800 tracking-tight leading-none">Contract Note Analyzer</h1>
           </div>
         </div>
 
-        <button
-          id="btn-open-menu"
-          onClick={() => setIsDrawerOpen(true)}
-          className="p-2 hover:bg-slate-100 rounded-xl transition-all text-slate-600 hover:text-slate-950 flex items-center justify-center border border-transparent hover:border-slate-200"
-          title="Calculation logic details"
-        >
-          <Menu className="w-5 h-5 font-bold" />
-        </button>
+        <div className="flex-1 flex justify-center">
+          <div className="inline-flex items-center justify-center p-1 bg-slate-100 rounded-xl border border-slate-200/60 shadow-inner overflow-hidden max-w-full">
+            {(!data || broker === 'zerodha') && (
+              <button
+                id="btn-broker-zerodha"
+                type="button"
+                onClick={() => setBroker('zerodha')}
+                disabled={!!data}
+                className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all min-w-[120px] ${broker === 'zerodha' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
+              >
+                <img 
+                  src="/zerodha-logo.png" 
+                  alt="Zerodha Logo" 
+                  className={`h-5 w-auto object-contain transition-all duration-300 mix-blend-multiply ${broker === 'zerodha' ? 'grayscale-0 opacity-100' : 'grayscale opacity-60'}`} 
+                />
+                <span>Zerodha</span>
+              </button>
+            )}
+            {(!data || broker === 'shareindia') && (
+              <button
+                id="btn-broker-shareindia"
+                type="button"
+                onClick={() => setBroker('shareindia')}
+                disabled={!!data}
+                className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all min-w-[120px] ${broker === 'shareindia' ? 'bg-white shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
+              >
+                <img 
+                  src="/shareindia-logo.png" 
+                  alt="Share India Logo" 
+                  className={`h-5 w-auto object-contain transition-all duration-300 mix-blend-multiply ${broker === 'shareindia' ? 'grayscale-0 opacity-100' : 'grayscale opacity-60'}`} 
+                />
+                <span className="flex items-center gap-1 font-bold">
+                  <span className={broker === 'shareindia' ? 'text-[#12b8f1]' : 'text-inherit'}>Share</span>
+                  <span className={broker === 'shareindia' ? 'text-[#ef233c]' : 'text-inherit'}>India</span>
+                </span>
+              </button>
+            )}
+            {(!data || broker === 'integrated') && (
+              <button
+                id="btn-broker-integrated"
+                type="button"
+                onClick={() => setBroker('integrated')}
+                disabled={!!data}
+                className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all min-w-[120px] ${broker === 'integrated' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
+              >
+                <img 
+                  src="/integrated-logo.png" 
+                  alt="Integrated Logo" 
+                  className={`h-5 w-auto object-contain transition-all duration-300 mix-blend-multiply ${broker === 'integrated' ? 'grayscale-0 opacity-100' : 'grayscale opacity-60'}`} 
+                />
+                <span className={broker === 'integrated' ? 'bg-white text-[#1285f1]' : ''}>Integrated</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex-1 flex justify-end">
+          <button
+            id="btn-open-menu"
+            onClick={() => setIsDrawerOpen(true)}
+            className="p-2 hover:bg-slate-100 rounded-xl transition-all text-slate-600 hover:text-slate-950 flex items-center justify-center border border-transparent hover:border-slate-200"
+            title="Calculation logic details"
+          >
+            <Menu className="w-5 h-5 font-bold" />
+          </button>
+        </div>
       </header>
 
       {/* Reference Side Drawer / Dynamic Math & Logic reference */}
@@ -928,6 +1075,17 @@ export default function App() {
                                 <span className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                                   Share India Logic Model
+                                </span>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                              </button>
+                              
+                              <button
+                                onClick={() => setSelectedLogicBroker('integrated')}
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                              >
+                                <span className="flex items-center gap-2">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                                  Integrated Logic Model
                                 </span>
                                 <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
                               </button>
@@ -1058,7 +1216,7 @@ export default function App() {
                           
                         </div>
                       </div>
-                    ) : (
+                    ) : selectedLogicBroker === 'shareindia' ? (
                       <div className="space-y-4 animate-fadeIn">
                         <div className="p-4 rounded-xl bg-slate-900 text-white shadow-md">
                           <div className="flex items-center gap-2 mb-1.5">
@@ -1123,7 +1281,40 @@ export default function App() {
 
                         </div>
                       </div>
-                    )}
+                    ) : selectedLogicBroker === 'integrated' ? (
+                      <div className="space-y-4 animate-fadeIn">
+                        <div className="p-4 rounded-xl bg-slate-900 text-white shadow-md">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+                            <h3 className="text-xs font-black tracking-wider uppercase text-indigo-400">Integrated Calculation Model</h3>
+                          </div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+                            Mathematical rules used dynamically by the Integrated Master Securities parser.
+                          </p>
+                        </div>
+
+                        <div className="space-y-3.5 text-xs text-slate-700 leading-relaxed">
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>1. Direct Allocation</span>
+                              <span className="text-[10px] uppercase font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">Source</span>
+                            </h4>
+                            <p className="text-slate-655">
+                              Extracts the values directly per row instead of pro-rating the final total from the summary page like Zerodha and Share India.
+                            </p>
+                          </div>
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>2. High-Precision Check</span>
+                              <span className="text-[10px] uppercase font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">Summing</span>
+                            </h4>
+                            <p className="mb-1.5 text-slate-655 font-sans">
+                              Verifies that the sum of the rows equals exactly the grand total shown on the summary page.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 )}
               </div>
@@ -1136,42 +1327,12 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="max-w-7xl mx-auto px-4 py-8">
+      <main className="max-w-7xl mx-auto px-4 py-8" style={{ backgroundColor: '#d8d8ff' }}>
         {activeTab === 'analyse' && (
           <div className="space-y-6">
             {!data && !isLoading && (
               <div className="text-center max-w-3xl mx-auto mt-6">
-                {/* Broker Selection Tabs / Segmented Control */}
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Choose Broker</h3>
-                <div className="inline-flex items-center justify-center p-1.5 bg-slate-200/80 rounded-2xl border border-slate-300/40 shadow-sm mb-6 max-w-full flex-wrap gap-1">
-                  <button
-                    id="btn-broker-zerodha"
-                    type="button"
-                    onClick={() => setBroker('zerodha')}
-                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black transition-all ${broker === 'zerodha' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
-                  >
-                    Zerodha
-                  </button>
-                  <button
-                    id="btn-broker-shareindia"
-                    type="button"
-                    onClick={() => setBroker('shareindia')}
-                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black transition-all ${broker === 'shareindia' ? 'bg-white shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
-                  >
-                    <span className="flex items-center gap-1">
-                      <span className={broker === 'shareindia' ? 'text-[#12b8f1]' : 'text-inherit'}>Share</span>
-                      <span className={broker === 'shareindia' ? 'text-red-500' : 'text-inherit'}>India</span>
-                    </span>
-                  </button>
-                  <button
-                    id="btn-broker-integrated"
-                    type="button"
-                    onClick={() => setBroker('integrated')}
-                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black transition-all ${broker === 'integrated' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
-                  >
-                    Integrated
-                  </button>
-                </div>
+                {/* Broker Selection is now in Header */}
 
                 <div 
                   className={`relative flex flex-col items-center justify-center h-64 border-2 border-dashed rounded-2xl transition-all ${dragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-300 bg-white shadow-sm hover:border-indigo-400'}`}
@@ -1189,20 +1350,26 @@ export default function App() {
                     multiple 
                     disabled={isLoading} 
                   />
-                  <div className="text-center px-4">
-                    <Upload className="mx-auto w-10 h-10 text-indigo-400 mb-4" />
-                    <p className="text-lg font-bold text-slate-800">
-                      {broker === 'zerodha' && "Upload Zerodha Contract Notes"}
-                      {broker === 'shareindia' && "Upload Share India Contract Notes"}
-                      {broker === 'integrated' && "Upload Integrated Contract Notes"}
-                      {broker !== 'zerodha' && broker !== 'shareindia' && broker !== 'integrated' && "Upload PDF or HTML Contract Notes"}
+                  <div className="text-center px-4 pointer-events-none">
+                    <div className="relative inline-block mb-4">
+                      {broker === 'zerodha' && <img src="/zerodha-logo.png" alt="Zerodha" className="h-12 w-auto object-contain mx-auto mix-blend-multiply" />}
+                      {broker === 'shareindia' && <img src="/shareindia-logo.png" alt="Share India" className="h-14 w-auto object-contain mx-auto mix-blend-multiply" />}
+                      {broker === 'integrated' && <img src="/integrated-logo.png" alt="Integrated" className="h-10 w-auto object-contain mx-auto mix-blend-multiply" />}
+                      {broker !== 'zerodha' && broker !== 'shareindia' && broker !== 'integrated' && <Upload className="mx-auto w-12 h-12 text-indigo-400" />}
+                    </div>
+                    
+                    <p className="text-xl md:text-2xl font-black text-slate-800 tracking-tight leading-tight">
+                      Drop {broker === 'shareindia' ? "Share India" : broker === 'zerodha' ? "Zerodha" : broker === 'integrated' ? "Integrated" : "your"} contract notes here
                     </p>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <div className="flex items-center justify-center gap-2 mt-3">
+                      <span className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-bold shadow-sm pointer-events-auto">Browse Files</span>
+                    </div>
+                    <p className="text-xs font-semibold text-slate-500 mt-3">
                       {broker === 'zerodha' 
-                        ? `Only PDF files are supported. Max ${MAX_FILES} files.` 
+                        ? `PDFs Contract Note valid only` 
                         : broker === 'integrated'
-                          ? `Only HTM/HTML files are supported. Max ${MAX_FILES} files. Drag or select.`
-                          : `Supports batch processing of up to ${MAX_FILES} files. Drag or select.`
+                          ? `Only HTM/HTML files.`
+                          : `PDFs Contract Note valid only`
                       }
                     </p>
                   </div>
@@ -1347,28 +1514,113 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Main panel card */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div>
-                    <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Contract Note Summary Table</h2>
-                    <p className="text-xs text-slate-500 font-medium">Extracted with {data.trades.length} processed trades • Trade Date: {data.tradeDate || 'N/A'}</p>
+                {/* Main panel header card */}
+                <div 
+                  className="relative flex flex-col md:flex-row justify-between items-start md:items-center gap-6 bg-white overflow-hidden rounded-xl border border-slate-200 mb-6"
+                  style={{ 
+                    boxShadow: '0 1px 2px rgba(15,23,42,0.06), 0 8px 24px rgba(15,23,42,0.08)'
+                  }}
+                >
+                  {/* Subtle top gradient accent */}
+                  <div className="absolute top-0 left-0 right-0 h-[4px] bg-gradient-to-r from-blue-600 via-indigo-650 to-violet-600"></div>
+                  
+                  {/* Subtle glow / noise background effect */}
+                  <div className="absolute top-0 left-0 w-full h-full pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle at top left, rgba(59,130,246,0.08), transparent 45%), url("data:image/svg+xml,%3Csvg viewBox=%220 0 200 200%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noiseFilter%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.65%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noiseFilter)%22 opacity=%220.02%22/%3E%3C/svg%3E")' }}></div>
+
+                  {/* Subtle abstract trading graph watermark in the middle background */}
+                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-48 hidden lg:flex items-center justify-center opacity-[0.04] pointer-events-none select-none">
+                    <svg viewBox="0 0 100 40" className="w-full h-12 text-slate-900 fill-none stroke-current" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="10" y1="30" x2="10" y2="10" />
+                      <rect x="7" y="15" width="6" height="10" fill="currentColor" />
+                      <line x1="25" y1="35" x2="25" y2="15" />
+                      <rect x="22" y="20" width="6" height="12" fill="currentColor" />
+                      <line x1="40" y1="20" x2="40" y2="5" strokeWidth="1" />
+                      <rect x="37" y="8" width="6" height="8" fill="none" />
+                      <line x1="55" y1="28" x2="55" y2="12" strokeWidth="1" />
+                      <rect x="52" y="15" width="6" height="10" fill="currentColor" />
+                      <line x1="70" y1="18" x2="70" y2="32" strokeWidth="1" />
+                      <rect x="67" y="20" width="6" height="8" fill="none" />
+                      <line x1="85" y1="15" x2="85" y2="35" />
+                      <rect x="82" y="22" width="6" height="10" fill="currentColor" />
+                    </svg>
+                  </div>
+
+                  <div className="relative flex flex-col z-10 p-6 sm:p-10">
+                    <div className="flex items-center gap-4">
+                      <div className="p-3 bg-blue-50/80 text-blue-600 rounded-xl border border-blue-100 flex items-center justify-center">
+                        <BarChart3 className="w-7 h-7 stroke-[2.25px]" />
+                      </div>
+                      <div className="flex flex-col">
+                        <h2 className="text-[32px] sm:text-[36px] font-bold text-slate-900 leading-[1.1]" style={{ letterSpacing: '-0.03em', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                          Trade Summary
+                        </h2>
+                        <span className="text-sm font-medium text-slate-600 mt-1.5 opacity-90">
+                          Extracted from <span className="font-extrabold text-slate-800">{data.trades.length}</span> processed trades
+                        </span>
+                      </div>
+                    </div>
                   </div>
                   
-                  <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="relative z-10 p-6 sm:p-10 w-full md:w-auto flex items-center justify-start md:justify-end">
+                    {data.tradeDate && (
+                      <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 hover:shadow-2xl transition-all relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
+                        {/* Subtle highlight in the date card */}
+                        <div className="absolute inset-x-0 top-0 h-px bg-slate-600 opacity-40"></div>
+                        <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-0.5 leading-none">Trade Date</span>
+                        <span className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white leading-none mt-1">{(() => {
+                          const parts = data.tradeDate.split(/[-/]/);
+                          if (parts.length === 3) {
+                            const isMonthNum = !isNaN(Number(parts[1]));
+                            if (isMonthNum) {
+                              const d = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]));
+                              if (!isNaN(d.getTime())) {
+                                const day = d.getDate().toString().padStart(2, '0');
+                                const month = d.toLocaleString('en-US', { month: 'short' });
+                                const year = d.getFullYear();
+                                return `${day} ${month} ${year}`;
+                              }
+                            } else {
+                              return data.tradeDate;
+                            }
+                          }
+                          return data.tradeDate;
+                        })()}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-start sm:justify-end gap-3 mb-4">
                     <button 
                       onClick={() => setShowLedgerConfig(!showLedgerConfig)} 
-                      className={`px-4 py-2.5 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 border ${showLedgerConfig ? 'bg-indigo-100 text-indigo-700 border-indigo-300' : 'bg-indigo-50/50 hover:bg-indigo-50 text-indigo-600 border-indigo-200'}`}
+                      className={`px-4 py-2.5 text-xs font-bold rounded-xl flex items-center gap-1.5 border transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] ${
+                        showLedgerConfig 
+                          ? 'bg-indigo-50 text-indigo-750 border-indigo-200' 
+                          : 'bg-white hover:bg-slate-50 text-slate-755 border-slate-200'
+                      }`}
+                      style={{ boxShadow: '0 1px 2px rgba(15,23,42,0.05)' }}
                       title="Configure ledger names for accounting import"
                     >
-                      <Calculator className="w-3.5 h-3.5" />
+                      <Calculator className="w-3.5 h-3.5 text-slate-500" />
                       Ledger Mappings
                     </button>
 
-                    <button onClick={() => setData(null)} className="px-4 py-2.5 text-xs font-bold text-slate-600 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 transition-all">Clear Note</button>
+                    <button 
+                      onClick={() => setData(null)} 
+                      className="px-4 py-2.5 text-xs font-bold rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] border border-red-900"
+                      style={{ 
+                        boxShadow: '0 1px 2px rgba(15,23,42,0.05)',
+                        backgroundColor: '#7f0000',
+                        color: '#ffffff'
+                      }}
+                    >
+                      Clear Note
+                    </button>
                     
                     <button
                       onClick={downloadVoucherXML}
-                      className="px-5 py-2.5 text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow shadow-emerald-200 rounded-xl transition-all flex items-center gap-1.5 ring-2 ring-emerald-500/10 active:scale-[0.98]"
+                      className="px-5 py-2.5 text-xs font-black text-white bg-[#0f766e] hover:bg-[#0d5c56] rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] flex items-center gap-1.5"
+                      style={{ boxShadow: '0 1px 2px rgba(15,118,110,0.06), 0 6px 16px rgba(15,118,110,0.1)' }}
                     >
                       <Download className="w-4 h-4" />
                       Export Tally XML
@@ -1376,16 +1628,26 @@ export default function App() {
 
                     <button
                       onClick={downloadVoucherExcel}
-                      className="px-4 py-2.5 text-xs font-bold text-slate-755 bg-white border border-slate-300 hover:bg-slate-50 transition-all flex items-center gap-1.5 rounded-xl"
+                      className="px-4 py-2.5 text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] flex items-center gap-1.5 rounded-xl"
+                      style={{ boxShadow: '0 1px 2px rgba(15,23,42,0.05)' }}
                     >
                       <FileText className="w-3.5 h-3.5 text-slate-500" />
-                      Export Excel
+                      Export Tally Excel
                     </button>
 
                     <div className="relative">
                       <button 
                         onClick={handleExportClick} 
-                        className={`px-5 py-2.5 text-xs font-black text-white rounded-xl transition-all flex items-center gap-1.5 ${data.reconciliation && !data.reconciliation.isValid ? 'bg-amber-500 hover:bg-amber-600 shadow-md shadow-amber-200' : 'bg-indigo-600 hover:bg-indigo-700 shadow shadow-indigo-200'}`}
+                        className={`px-5 py-2.5 text-xs font-black text-white rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] flex items-center gap-1.5 ${
+                          data.reconciliation && !data.reconciliation.isValid 
+                            ? 'bg-amber-600 hover:bg-amber-700' 
+                            : 'bg-[#0f172a] hover:bg-slate-800'
+                        }`}
+                        style={{ 
+                          boxShadow: data.reconciliation && !data.reconciliation.isValid 
+                            ? '0 1px 2px rgba(217,119,6,0.06), 0 6px 16px rgba(217,119,6,0.1)' 
+                            : '0 1px 2px rgba(15,23,42,0.06), 0 8px 18px rgba(15,23,42,0.1)' 
+                        }}
                       >
                         {data.reconciliation && !data.reconciliation.isValid ? <AlertTriangle className="w-4 h-4" /> : <Download className="w-4 h-4" />}
                         {data.reconciliation && !data.reconciliation.isValid ? "Export (Mismatch Warning)" : "Export CSV File"}
@@ -1401,14 +1663,13 @@ export default function App() {
                             The parser is mathematically uncertain on this note (Discrepancy: ₹${data.reconciliation?.difference}). Do you still wish to silently export?
                           </p>
                           <div className="flex justify-end gap-2 pt-1">
-                            <button onClick={() => setShowExportConfirmation(false)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">Cancel</button>
-                            <button onClick={downloadCSV} className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm">Yes, Export Anyway</button>
+                            <button onClick={() => setShowExportConfirmation(false)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-750 font-bold rounded-lg">Cancel</button>
+                            <button onClick={downloadCSV} className="px-3 py-1.5 bg-red-655 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm">Yes, Export Anyway</button>
                           </div>
                         </div>
                       )}
                     </div>
                   </div>
-                </div>
 
                 {/* Collapsible Ledger Mapping Content */}
                 {showLedgerConfig && (
@@ -1591,34 +1852,34 @@ export default function App() {
 
                 <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
                   <table className="w-full text-sm text-left">
-                    <thead className="bg-slate-50 text-slate-500 text-[10px] font-bold uppercase tracking-wider">
+                    <thead className="bg-slate-50 text-slate-600 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200">
                       <tr>
-                        <th className="px-6 py-4">Date</th>
-                        <th className="px-6 py-4">Security</th>
-                        <th className="px-6 py-4 text-center">Type</th>
-                        <th className="px-6 py-4 text-right">Shares</th>
-                        <th className="px-6 py-4 text-right">Price</th>
-                        <th className="px-6 py-4 text-right">Turnover</th>
-                        <th className="px-6 py-4 text-center bg-indigo-50/50 text-indigo-700">Class</th>
-                        <th className="px-6 py-4 text-right">Brokerage</th>
-                        <th className="px-6 py-4 text-right text-rose-700 bg-rose-50/30">STT</th>
+                        <SortableHeader label="Date" sortKey="tradeDate" className="bg-slate-100/50 text-slate-700" />
+                        <SortableHeader label="Security" sortKey="securityName" className="bg-slate-100/50 text-slate-700" />
+                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="bg-slate-100/50 text-slate-705" />
+                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="bg-slate-100/50 text-slate-710" />
+                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="bg-slate-100/50 text-slate-720 border-r border-slate-200" />
+                        <SortableHeader label="Turnover" sortKey="turnover" align="right" className="bg-emerald-50 text-emerald-850 font-black border-r border-emerald-100" />
+                        <SortableHeader label="Brokerage" sortKey="brokerage" align="right" className="bg-blue-50 text-blue-850 font-black border-r border-blue-100" />
+                        <SortableHeader label="STT" sortKey="stt" align="right" className="text-rose-850 bg-rose-50 font-black border-r border-rose-100" />
                         {data?.brokerName === 'integrated' ? (
-                          <th className="px-6 py-4 text-right font-semibold text-indigo-700 bg-indigo-50/10">Total GST</th>
+                          <SortableHeader label="Total GST" sortKey="gstOrIgst" align="right" className="font-extrabold text-violet-850 bg-violet-50 border-r border-violet-100" />
                         ) : (
-                          <th className="px-6 py-4 text-right font-semibold text-indigo-700 bg-indigo-50/10">IGST</th>
+                          <SortableHeader label="IGST" sortKey="gstOrIgst" align="right" className="font-extrabold text-violet-850 bg-violet-50 border-r border-violet-100" />
                         )}
-                        <th className="px-6 py-4 text-right">ETC</th>
-                        <th className="px-6 py-4 text-right">Stamp Duty</th>
-                        <th className="px-6 py-4 text-right">SEBI Turnover Fees</th>
-                        <th className="px-6 py-4 text-right">Expenses (Incl STT)</th>
-                        <th className="px-6 py-4 text-right">Expenses (Excl STT)</th>
-                        <th className="px-6 py-4 text-right text-indigo-700 font-bold">Net Amount (Incl STT)</th>
-                        <th className="px-6 py-4 text-right text-indigo-700 font-bold">Net Amount (Excl STT)</th>
-                        <th className="px-6 py-4 text-right font-bold text-slate-900 border-l border-slate-100">Trade Obligation</th>
+                        <SortableHeader label="ETC" sortKey="etc" align="right" className="text-amber-850 bg-amber-50 font-bold border-r border-amber-100" />
+                        <SortableHeader label="Stamp Duty" sortKey="stampDuty" align="right" className="text-teal-850 bg-teal-50 font-bold border-r border-teal-100" />
+                        <SortableHeader label="SEBI Fees" sortKey="sebiAndIpf" align="right" className="text-purple-850 bg-purple-50 font-bold border-r border-purple-100" />
+                        <SortableHeader label="Exp (Incl STT)" sortKey="totalExpensesInclSTT" align="right" className="text-orange-950 bg-orange-50 font-extrabold border-r border-orange-150" />
+                        <SortableHeader label="Exp (Excl STT)" sortKey="totalExpensesExclSTT" align="right" className="text-stone-850 bg-stone-50 font-semibold border-r border-stone-150" />
+                        <SortableHeader label="Net (Incl STT)" sortKey="totalInclSTT" align="right" className="bg-indigo-600 text-white font-extrabold hover:text-indigo-100 border-r border-indigo-700" />
+                        <SortableHeader label="Net (Excl STT)" sortKey="totalExclSTT" align="right" className="bg-sky-600 text-white font-extrabold hover:text-sky-100 border-r border-sky-700" />
+                        <SortableHeader label="Obligation" sortKey="netTotalBeforeLevies" align="right" className="font-extrabold text-slate-100 bg-slate-900 border-r border-slate-700" />
+                        <SortableHeader label="Class" sortKey="tradeType" align="center" className="bg-violet-100 text-violet-900 font-bold" />
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100 font-mono text-xs">
-                      {data.trades.map(t => {
+                    <tbody className="divide-y divide-slate-150 font-mono text-xs">
+                      {getSortedTrades().map(t => {
                         const totalInclSTT = t.transactionType === "Buy" 
                           ? t.turnover + t.totalExpensesInclSTT 
                           : t.turnover - t.totalExpensesInclSTT;
@@ -1627,34 +1888,34 @@ export default function App() {
                           : t.turnover - t.totalExpensesExclSTT;
 
                         return (
-                           <tr key={t.id} className="hover:bg-slate-50">
-                            <td className="px-6 py-4 text-slate-400">{t.tradeDate}</td>
-                            <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic">{t.securityName}</td>
-                            <td className="px-6 py-4 text-center">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
+                           <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="px-6 py-4 text-slate-400 bg-slate-50/10">{t.tradeDate}</td>
+                            <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic bg-slate-50/10">{t.securityName}</td>
+                            <td className="px-6 py-4 text-center bg-slate-50/10">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
                             </td>
-                            <td className="px-6 py-4 text-right font-semibold">{t.quantity}</td>
-                            <td className="px-6 py-4 text-right">₹{t.avgPrice.toFixed(2)}</td>
-                            <td className="px-6 py-4 text-right">₹{t.turnover.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-center bg-indigo-50/20">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-700'}`}>{t.tradeType}</span>
-                            </td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.brokerage.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right font-semibold text-rose-700 bg-rose-50/10">₹{t.stt.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right font-semibold text-slate-700 bg-slate-50/10">{t.quantity}</td>
+                            <td className="px-6 py-4 text-right text-slate-700 bg-slate-50/10 border-r border-slate-200">₹{t.avgPrice.toFixed(2)}</td>
+                            <td className="px-6 py-4 text-right font-bold text-emerald-900 bg-emerald-50/15 border-r border-emerald-100/30">₹{t.turnover.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right font-semibold text-blue-800 bg-blue-50/15 border-r border-blue-100/30">₹{t.brokerage.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right font-bold text-rose-700 bg-rose-50/20 border-r border-rose-100/30">₹{t.stt.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             {data?.brokerName === 'integrated' ? (
-                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{t.gst.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right font-bold text-violet-800 bg-violet-50/15 border-r border-violet-100/30">₹{t.gst.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             ) : (
-                              <td className="px-6 py-4 text-right font-semibold text-indigo-900 bg-indigo-50/10">₹{(t.igst || t.gst).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right font-bold text-violet-800 bg-violet-50/15 border-r border-violet-100/30">₹{(t.igst || t.gst).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             )}
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.etc.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{t.stampDuty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-600">₹{(t.sebiFees + t.ipf).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-500 font-semibold">₹{t.totalExpensesExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-slate-900 font-bold bg-slate-50/50">₹{totalExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className={`px-6 py-4 text-right font-black border-l border-slate-100 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            <td className="px-6 py-4 text-right text-amber-900 font-semibold bg-amber-50/15 border-r border-amber-100/30">₹{t.etc.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-teal-900 bg-teal-50/15 border-r border-teal-100/30">₹{t.stampDuty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-purple-950 bg-purple-50/15 border-r border-purple-100/30">₹{(t.sebiFees + t.ipf).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-orange-950 font-bold bg-orange-50/15 border-r border-orange-100/30">₹{t.totalExpensesInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-stone-900 bg-stone-50/15 border-r border-stone-100/30">₹{t.totalExpensesExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-indigo-950 font-extrabold bg-indigo-50/25 border-r border-indigo-100/40">₹{totalInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-sky-950 font-bold bg-sky-50/20 border-r border-sky-100/40">₹{totalExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className={`px-6 py-4 text-right font-black border-r border-slate-200 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700 bg-emerald-50/10' : 'text-rose-700 bg-rose-50/10'}`}>
                               {t.netTotalBeforeLevies >= 0 ? '+' : ''}{t.netTotalBeforeLevies.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-6 py-4 text-center bg-violet-50/10">
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-150 text-indigo-800' : 'bg-amber-150 text-amber-800'}`}>{t.tradeType}</span>
                             </td>
                           </tr>
                         );
