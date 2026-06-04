@@ -4,6 +4,7 @@ export type TradeType = 'Delivery' | 'Intraday';
 export interface Trade {
   id: string;
   tradeDate: string;
+  isin?: string;
   securityName: string;
   transactionType: TransactionType;
   quantity: number;

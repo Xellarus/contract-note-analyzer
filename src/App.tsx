@@ -333,10 +333,10 @@ export default function App() {
     if (!data) return;
     const isIntegrated = data.brokerName === 'integrated';
     const headers = [
-      "Trade Date", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
+      "Trade Date", "ISIN", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
       "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT", 
       "Exchange Turnover Charges", "SEBI Turnover Fees", isIntegrated ? "Total GST" : "IGST", 
-      "Stamp Duty", "IPF", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
+      "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
     
@@ -351,6 +351,7 @@ export default function App() {
 
       return [
         `"${t.tradeDate}"`, 
+        `"${(t.isin || "").replace(/"/g, '""')}"`,
         `"${t.securityName.replace(/"/g, '""')}"`, 
         `"${t.transactionType}"`, 
         t.quantity, 
@@ -360,10 +361,9 @@ export default function App() {
         t.brokerage.toFixed(2),
         t.stt.toFixed(2),
         t.etc.toFixed(2),
-        t.sebiFees.toFixed(2),
+        (t.sebiFees + t.ipf).toFixed(2),
         isIntegrated ? t.gst.toFixed(2) : (t.igst || t.gst).toFixed(2),
         t.stampDuty.toFixed(2),
-        t.ipf.toFixed(2),
         t.totalExpensesInclSTT.toFixed(2),
         t.totalExpensesExclSTT.toFixed(2),
         totalWithExpenseInclSTT.toFixed(2),
@@ -1855,6 +1855,7 @@ export default function App() {
                     <thead className="bg-slate-50 text-slate-600 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200">
                       <tr>
                         <SortableHeader label="Date" sortKey="tradeDate" className="bg-slate-100/50 text-slate-700" />
+                        <SortableHeader label="ISIN" sortKey="isin" className="bg-slate-100/50 text-slate-700" />
                         <SortableHeader label="Security" sortKey="securityName" className="bg-slate-100/50 text-slate-700" />
                         <SortableHeader label="Type" sortKey="transactionType" align="center" className="bg-slate-100/50 text-slate-705" />
                         <SortableHeader label="Shares" sortKey="quantity" align="right" className="bg-slate-100/50 text-slate-710" />
@@ -1890,6 +1891,7 @@ export default function App() {
                         return (
                            <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                             <td className="px-6 py-4 text-slate-400 bg-slate-50/10">{t.tradeDate}</td>
+                            <td className="px-6 py-4 text-slate-500 font-semibold bg-slate-50/10 font-mono tracking-wider">{t.isin || "—"}</td>
                             <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic bg-slate-50/10">{t.securityName}</td>
                             <td className="px-6 py-4 text-center bg-slate-50/10">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>

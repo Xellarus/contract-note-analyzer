@@ -84,8 +84,19 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             const cells = Array.from(rows[j].querySelectorAll('td'));
             if (cells.length < 5) continue;
             
-            const name = cells[colMap.security]?.textContent?.trim();
-            if (!name || cleanText(name).includes("total") || cleanText(name).includes("sub-total")) continue;
+            const originalName = cells[colMap.security]?.textContent?.trim() || "";
+            if (!originalName || cleanText(originalName).includes("total") || cleanText(originalName).includes("sub-total")) continue;
+
+            let isin = "";
+            const isinMatch = originalName.match(/(INE[A-Z0-9]{9})/i);
+            if (isinMatch) {
+              isin = isinMatch[1].toUpperCase();
+            }
+
+            let name = originalName;
+            if (name.includes("-")) {
+              name = name.split("-")[0].trim();
+            }
 
             const typeStr = cleanText(cells[colMap.type]?.textContent);
             const side = typeStr.includes('b') ? 'Buy' : typeStr.includes('s') ? 'Sell' : null;
@@ -94,7 +105,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             if (side && qty > 0) {
               const price = parseNumber(cells[colMap.price]?.textContent);
               const brok = colMap.brokerage !== -1 ? parseNumber(cells[colMap.brokerage]?.textContent) : 0;
-              rawTrades.push({ securityName: name, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: cells.map(c => c.textContent).join(" ") });
+              rawTrades.push({ securityName: name, isin: isin, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: cells.map(c => c.textContent).join(" ") });
             }
           }
         }
@@ -167,12 +178,22 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             security = nameTokens.join(" ").trim();
           }
           
+          let isin = "";
+          const isinMatch = security.match(/(INE[A-Z0-9]{9})/i);
+          if (isinMatch) {
+            isin = isinMatch[1].toUpperCase();
+          }
+
+          if (security.includes("-")) {
+            security = security.split("-")[0].trim();
+          }
+          
           const qty = Math.abs(parseNumber(tokens[sideIdx + 2]));
           const brok = parseNumber(tokens[sideIdx + 3]);
           const price = parseNumber(tokens[sideIdx + 4]);
           
           if (qty > 0 && price > 0) {
-            rawTrades.push({ securityName: security, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: line });
+            rawTrades.push({ securityName: security, isin: isin, quantity: qty, price, brokeragePerShare: brok, type: side, contextText: line });
           }
           continue;
         }
@@ -429,9 +450,11 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
         const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
         
         const mergedContext = items.map((x: any) => x.contextText || "").join(" ");
+        const isin = items[0]?.isin || "";
         
         tradesToProcess.push({
           securityName: name,
+          isin: isin,
           type: type,
           quantity: totalQty,
           price: avgPrice,
@@ -547,6 +570,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       return { 
           id: `tx-${prefix}-${idx}`, 
           tradeDate, 
+          isin: t.isin || "",
           securityName: t.securityName, 
           transactionType: t.type as TransactionType, 
           quantity: t.quantity, 
