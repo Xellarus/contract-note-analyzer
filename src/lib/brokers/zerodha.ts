@@ -75,7 +75,6 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
           else if (text.includes("securities transaction tax") || text.includes("stt")) summary.stt = absVal;
           else if (text.includes("taxable value")) summary.taxableValue = absVal;
           else if (text.includes("exchange transaction charges") || (text.includes("exchange") && text.includes("transaction") && text.includes("charge"))) summary.etc = absVal;
-          else if (text.includes("clearing charges")) summary.clearingCharges = absVal;
           else if (text.includes("sebi turnover fees") || text.includes("sebi turnover fee")) summary.sebiFees = absVal;
           else if (text.includes("stamp duty")) summary.stampDuty = absVal;
           else if (text.includes("net amount receivable") || text.includes("net amount payable")) summary.netSettlement = val;
@@ -294,8 +293,6 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       key = "taxableValue";
     } else if (l.includes("exchange transaction charges") || (l.includes("exchange") && l.includes("transaction") && l.includes("charge"))) {
       key = "etc";
-    } else if (l.includes("clearing charges") || l.includes("clearing charge")) {
-      key = "clearingCharges";
     } else if (l.includes("sebi turnover fees") || l.includes("sebi turnover fee") || l.includes("sebi turnover") || l.includes("sebi fees")) {
       key = "sebiFees";
     } else if (l.includes("stamp duty")) {
@@ -456,8 +453,13 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
   private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
     const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+    // Hardcode nominal brokerage for Zerodha if evaluating to 0
+    if (summary.taxableValue === 0) {
+      summary.taxableValue = 0.01;
+    }
+
     // Step 1: Compute taxable service base
-    const gstBase = summary.taxableValue + summary.etc + summary.sebiFees + summary.clearingCharges;
+    const gstBase = summary.taxableValue + summary.etc + summary.sebiFees;
     // Step 2: Calculate GST
     const calculatedGST = rt(gstBase * 0.18);
     
@@ -562,7 +564,23 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       return "EQUITY";
     };
 
+    let remainingAmount = {
+      brokerage: summary.taxableValue,
+      etc: summary.etc,
+      sebiFees: summary.sebiFees,
+      clearingCharges: summary.clearingCharges,
+      stampDuty: summary.stampDuty,
+      ipf: summary.ipf,
+      cgst: summary.cgst,
+      sgst: summary.sgst,
+      igst: summary.igst,
+      gst: summary.gst
+    };
+
+    const numTrades = tradesToProcess.length;
+
     const trades: Trade[] = tradesToProcess.map((t, idx) => {
+      const isLast = idx === numTrades - 1;
       const s = securityStats.get(t.securityName);
       
       let isIntraday = false;
@@ -598,7 +616,14 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       const buyRatio = totalBuyTurnover > 0 && t.type === "Buy" ? grossTotal / totalBuyTurnover : 0;
       const sellRatio = totalSellTurnover > 0 && t.type === "Sell" ? grossTotal / totalSellTurnover : 0;
 
-      const brokerage = rt(summary.taxableValue * ratio);
+      const allocateExpense = (totalVal: number, key: keyof typeof remainingAmount, r: number) => {
+        if (isLast) return rt(remainingAmount[key]);
+        const val = rt(totalVal * r);
+        remainingAmount[key] -= val;
+        return val;
+      };
+
+      const brokerage = allocateExpense(summary.taxableValue, 'brokerage', ratio);
       
       const tradeType = isIntraday ? "Intraday" : "Delivery";
       const instrumentType = classifyInstrument(t.securityName);
@@ -607,15 +632,15 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       const rate = INSTRUMENT_RULES[instrumentType][tradeTypeKey][sideKey];
       const stt = Math.round(grossTotal * rate);
 
-      const etc = rt(summary.etc * ratio);
-      const sebiFees = rt(summary.sebiFees * ratio);
-      const clearingCharges = rt(summary.clearingCharges * ratio);
-      const stampDuty = rt(summary.stampDuty * buyRatio);
-      const ipf = rt(summary.ipf * ratio);
-      const cgst = rt(summary.cgst * ratio);
-      const sgst = rt(summary.sgst * ratio);
-      const igst = rt(summary.igst * ratio);
-      const gst = rt(summary.gst * ratio);
+      const etc = allocateExpense(summary.etc, 'etc', ratio);
+      const sebiFees = allocateExpense(summary.sebiFees, 'sebiFees', ratio);
+      const clearingCharges = allocateExpense(summary.clearingCharges, 'clearingCharges', ratio);
+      const stampDuty = allocateExpense(summary.stampDuty, 'stampDuty', buyRatio);
+      const ipf = allocateExpense(summary.ipf, 'ipf', ratio);
+      const cgst = allocateExpense(summary.cgst, 'cgst', ratio);
+      const sgst = allocateExpense(summary.sgst, 'sgst', ratio);
+      const igst = allocateExpense(summary.igst, 'igst', ratio);
+      const gst = allocateExpense(summary.gst, 'gst', ratio);
 
       const totalExclSTT = brokerage + etc + sebiFees + clearingCharges + stampDuty + ipf + gst;
       const totalInclSTT = totalExclSTT + stt;

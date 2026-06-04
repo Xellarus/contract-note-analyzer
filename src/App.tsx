@@ -282,6 +282,20 @@ export default function App() {
     const totalExpensesInclSTT = data.trades.reduce((sum, t) => sum + t.totalExpensesInclSTT, 0);
     const totalExpensesExclSTT = data.trades.reduce((sum, t) => sum + t.totalExpensesExclSTT, 0);
 
+    const totalAmountWithExpenseInclSTT = data.trades.reduce((sum, t) => {
+      const val = t.transactionType === "Buy" 
+        ? t.turnover + t.totalExpensesInclSTT 
+        : t.turnover - t.totalExpensesInclSTT;
+      return sum + val;
+    }, 0);
+
+    const totalAmountWithExpenseExclSTT = data.trades.reduce((sum, t) => {
+      const val = t.transactionType === "Buy" 
+        ? t.turnover + t.totalExpensesExclSTT 
+        : t.turnover - t.totalExpensesExclSTT;
+      return sum + val;
+    }, 0);
+
     const netSettlementInclSTT = data.trades.reduce((sum, t) => {
       // Sells are positive proceeds (+), Buys are negative costs (-)
       const val = t.transactionType === "Buy" 
@@ -314,6 +328,8 @@ export default function App() {
       sebiFeesAndOther,
       totalExpensesInclSTT,
       totalExpensesExclSTT,
+      totalAmountWithExpenseInclSTT,
+      totalAmountWithExpenseExclSTT,
       netSettlementInclSTT,
       netSettlementExclSTT,
       obligation
@@ -372,7 +388,29 @@ export default function App() {
       ];
     });
 
-    const csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+    const totalRow = [
+      '', // Trade Date
+      '', // ISIN
+      '', // Stock Name
+      '', // Transaction Type
+      '', // Number of Shares
+      '', // Avg Price
+      calculatedTotals.gross.toFixed(2), // Total Amount (Turnover)
+      '', // Brokerage Per Share
+      calculatedTotals.brokerage.toFixed(2), // Total Brokerage
+      calculatedTotals.stt.toFixed(2), // STT
+      calculatedTotals.etc.toFixed(2), // Exchange Turnover Charges
+      calculatedTotals.sebiFeesAndOther.toFixed(2), // SEBI Turnover Fees
+      isIntegrated ? calculatedTotals.gst.toFixed(2) : calculatedTotals.igst.toFixed(2), // IGST / GST
+      calculatedTotals.stampDuty.toFixed(2), // Stamp Duty
+      calculatedTotals.totalExpensesInclSTT.toFixed(2), // Total Expenses (incl STT)
+      calculatedTotals.totalExpensesExclSTT.toFixed(2), // Total Expenses (excl STT)
+      calculatedTotals.totalAmountWithExpenseInclSTT.toFixed(2), // Total Amount with Expense (Incl STT)
+      calculatedTotals.totalAmountWithExpenseExclSTT.toFixed(2), // Total Amount with Expense (Excl STT)
+      '', // Trade Class
+    ];
+
+    const csvContent = [headers.join(","), ...rows.map(r => r.join(",")), totalRow.join(",")].join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1835,10 +1873,10 @@ export default function App() {
 
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                  <SummaryCard label="Obligation (Buy/Sell)" value={calculatedTotals.obligation} highlight />
+                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight />
                   <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight />
                   <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight />
-                  <SummaryCard label="Brokerage/Taxable" value={calculatedTotals.brokerage} />
+                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} />
                   <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} />
                   <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} />
                   <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} />
