@@ -23,7 +23,40 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     const summary: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
     const tradeDate = getTradeDate(doc);
     
+    const isinMap = new Map<string, string>();
     const tables = Array.from(doc.querySelectorAll('table'));
+    
+    // Extract ISIN mapping
+    for (const table of tables) {
+      const rows = Array.from(table.querySelectorAll('tr'));
+      const headerIndex = rows.findIndex(r => cleanText(r.textContent).includes("isin") && (cleanText(r.textContent).includes("security") || cleanText(r.textContent).includes("symbol")));
+      
+      if (headerIndex !== -1) {
+        const headerCells = Array.from(rows[headerIndex].querySelectorAll('td, th'));
+        let isinIdx = -1, symIdx = -1;
+        headerCells.forEach((c, idx) => {
+          const t = cleanText(c.textContent);
+          if (t === "isin") isinIdx = idx;
+          else if (t.includes("security") || t.includes("symbol")) symIdx = idx;
+        });
+        
+        if (isinIdx !== -1 && symIdx !== -1) {
+          for (let j = headerIndex + 1; j < rows.length; j++) {
+            const cells = Array.from(rows[j].querySelectorAll('td'));
+            if (cells.length > Math.max(isinIdx, symIdx)) {
+              let isinVal = cells[isinIdx].textContent?.trim() || "";
+              let symVal = cells[symIdx].textContent?.trim() || "";
+              
+              if (symVal.includes("-")) symVal = symVal.split("-")[0].trim();
+              
+              if (isinVal.startsWith("INE") && symVal) {
+                isinMap.set(symVal.toUpperCase(), isinVal.toUpperCase());
+              }
+            }
+          }
+        }
+      }
+    }
     
     // 1. Extract Summary
     for (const table of tables) {
@@ -87,8 +120,10 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             const originalName = cells[colMap.security]?.textContent?.trim() || "";
             if (!originalName || cleanText(originalName).includes("total") || cleanText(originalName).includes("sub-total")) continue;
 
+            const rowText = cells.map(c => c.textContent).join(" ");
+            
             let isin = "";
-            const isinMatch = originalName.match(/(INE[A-Z0-9]{9})/i);
+            const isinMatch = rowText.match(/(INE[A-Z0-9]{9})/i);
             if (isinMatch) {
               isin = isinMatch[1].toUpperCase();
             }
@@ -96,6 +131,10 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             let name = originalName;
             if (name.includes("-")) {
               name = name.split("-")[0].trim();
+            }
+            
+            if (!isin && name) {
+               isin = isinMap.get(name.toUpperCase()) || "";
             }
 
             const typeStr = cleanText(cells[colMap.type]?.textContent);
@@ -133,6 +172,16 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     const summary = this.extractSummaryFromText(text);
     const tradeDate = getTradeDate(text);
     const rawTrades: any[] = [];
+    
+    // Extract ISIN mapping from the entire text
+    const isinMap = new Map<string, string>();
+    const isinRegex = /(INE[A-Z0-9]{9})\s+([A-Z0-9\-]+)/gi;
+    let match;
+    while ((match = isinRegex.exec(text)) !== null) {
+      let sym = match[2];
+      if (sym.includes("-")) sym = sym.split("-")[0].trim();
+      if (sym) isinMap.set(sym.toUpperCase(), match[1].toUpperCase());
+    }
     
     const lines = text.split('\n');
     let inAnnexure = false;
@@ -179,13 +228,17 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
           }
           
           let isin = "";
-          const isinMatch = security.match(/(INE[A-Z0-9]{9})/i);
+          const isinMatch = line.match(/(INE[A-Z0-9]{9})/i);
           if (isinMatch) {
             isin = isinMatch[1].toUpperCase();
           }
 
           if (security.includes("-")) {
             security = security.split("-")[0].trim();
+          }
+          
+          if (!isin && security) {
+             isin = isinMap.get(security.toUpperCase()) || "";
           }
           
           const qty = Math.abs(parseNumber(tokens[sideIdx + 2]));
