@@ -361,7 +361,7 @@ export default function App() {
         t.stt.toFixed(2),
         t.etc.toFixed(2),
         t.sebiFees.toFixed(2),
-        isIntegrated ? t.gst.toFixed(2) : t.igst.toFixed(2),
+        isIntegrated ? t.gst.toFixed(2) : (t.igst || t.gst).toFixed(2),
         t.stampDuty.toFixed(2),
         t.ipf.toFixed(2),
         t.totalExpensesInclSTT.toFixed(2),

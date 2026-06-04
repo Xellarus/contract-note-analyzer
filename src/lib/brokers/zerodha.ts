@@ -232,7 +232,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       key = "netSettlement";
     } else if (l.includes("sgst") || l.includes("utgst")) {
       key = "sgst";
-    } else if (l.includes("igst")) {
+    } else if (l.includes("igst") || l.includes("integrated tax") || l.includes("integrated gst")) {
       key = "igst";
     } else if (l.includes("cgst") || (l.includes("gst") && !l.includes("gstin"))) {
       key = "cgst";
