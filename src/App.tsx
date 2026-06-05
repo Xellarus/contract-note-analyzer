@@ -12,9 +12,14 @@ import { processFile, mergeResults, calculateReconciliation } from './lib/parser
 import CsvAuditor from './components/CsvAuditor';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
-const SummaryCard = ({ label, value, highlight = false, alertState = false }: { label: string, value: number, highlight?: boolean, alertState?: boolean }) => (
+const SummaryCard = ({ label, value, highlight = false, alertState = false, labelStyle = {} }: { label: string, value: number, highlight?: boolean, alertState?: boolean, labelStyle?: React.CSSProperties }) => (
   <div className={`p-4 rounded-xl border transition-all ${alertState ? 'bg-rose-50 border-rose-200' : highlight ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'} shadow-sm`}>
-    <p className={`text-xs font-semibold uppercase tracking-wider ${alertState ? 'text-rose-600' : highlight ? 'text-indigo-600' : 'text-slate-500'}`}>{label}</p>
+    <p 
+      style={labelStyle}
+      className={`text-xs font-semibold uppercase tracking-wider ${alertState ? 'text-rose-600' : highlight ? 'text-indigo-600' : 'text-slate-500'}`}
+    >
+      {label}
+    </p>
     <p className={`text-lg font-bold mt-1 font-mono ${alertState ? 'text-rose-900' : highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
       {value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
     </p>
@@ -94,14 +99,15 @@ export default function App() {
     });
   };
 
-  const SortableHeader = ({ label, sortKey, align = 'left', className = '' }: { label: string, sortKey: string, align?: 'left' | 'center' | 'right', className?: string }) => {
+  const SortableHeader = ({ label, sortKey, align = 'left', className = '', style = {} }: { label: string, sortKey: string, align?: 'left' | 'center' | 'right', className?: string, style?: React.CSSProperties }) => {
     const isActive = sortConfig?.key === sortKey;
     return (
       <th 
+        style={style}
         className={`px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors select-none ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'} ${className}`}
         onClick={() => requestSort(sortKey)}
       >
-        <div className={`flex items-center gap-1 inline-flex ${align === 'right' ? 'flex-row-reverse justify-start' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+        <div className={`flex items-center gap-1 inline-flex ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
           <span>{label}</span>
           <div className="flex items-center justify-center text-slate-400">
             {isActive ? (
@@ -237,8 +243,8 @@ export default function App() {
         setData(merged);
         setPendingFiles(null);
       }
-    } catch (err) {
-      setError("Failed to parse the files. Please check if they are valid contract notes.");
+    } catch (err: any) {
+      setError(err?.message || "Failed to parse the files. Please check if they are valid contract notes.");
     } finally {
       setIsLoading(false);
     }
@@ -1881,18 +1887,18 @@ export default function App() {
                   <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight />
                   <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight />
                   <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight />
-                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} />
-                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} />
-                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} />
-                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} />
+                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} />
+                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} />
+                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} />
+                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} />
                   {data?.brokerName === 'integrated' ? (
-                    <SummaryCard label="Total GST" value={calculatedTotals.gst} />
+                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} />
                   ) : (
-                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} />
+                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} />
                   )}
-                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} />
+                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} />
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} />
+                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} />
                   )}
                 </div>
 
@@ -1900,32 +1906,32 @@ export default function App() {
                   <table className="w-full text-sm text-left">
                     <thead className="bg-slate-50 text-slate-600 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200">
                       <tr>
-                        <SortableHeader label="Date" sortKey="tradeDate" className="bg-slate-100/50 text-slate-700" />
-                        <SortableHeader label="ISIN" sortKey="isin" className="bg-slate-100/50 text-slate-700" />
-                        <SortableHeader label="Security" sortKey="securityName" className="bg-slate-100/50 text-slate-700" />
-                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="bg-slate-100/50 text-slate-705" />
-                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="bg-slate-100/50 text-slate-710" />
-                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="bg-slate-100/50 text-slate-720 border-r border-slate-200" />
-                        <SortableHeader label="Turnover" sortKey="turnover" align="right" className="bg-emerald-50 text-emerald-850 font-black border-r border-emerald-100" />
-                        <SortableHeader label="Brokerage" sortKey="brokerage" align="right" className="bg-blue-50 text-blue-850 font-black border-r border-blue-100" />
-                        <SortableHeader label="STT" sortKey="stt" align="right" className="text-rose-850 bg-rose-50 font-black border-r border-rose-100" />
+                        <SortableHeader label="Date" sortKey="tradeDate" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="ISIN" sortKey="isin" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Security" sortKey="securityName" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="text-slate-710" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="text-slate-720 border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Turnover" sortKey="turnover" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Brokerage" sortKey="brokerage" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="STT" sortKey="stt" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
                         {data?.brokerName === 'integrated' ? (
-                          <SortableHeader label="Total GST" sortKey="gstOrIgst" align="right" className="font-extrabold text-violet-850 bg-violet-50 border-r border-violet-100" />
+                          <SortableHeader label="Total GST" sortKey="gstOrIgst" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
                         ) : (
-                          <SortableHeader label="IGST" sortKey="gstOrIgst" align="right" className="font-extrabold text-violet-850 bg-violet-50 border-r border-violet-100" />
+                          <SortableHeader label="IGST" sortKey="gstOrIgst" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
                         )}
-                        <SortableHeader label="ETC" sortKey="etc" align="right" className="text-amber-850 bg-amber-50 font-bold border-r border-amber-100" />
-                        <SortableHeader label="Stamp Duty" sortKey="stampDuty" align="right" className="text-teal-850 bg-teal-50 font-bold border-r border-teal-100" />
-                        <SortableHeader label="SEBI Fees" sortKey="sebiFees" align="right" className="text-purple-850 bg-purple-50 font-bold border-r border-purple-100" />
+                        <SortableHeader label="ETC" sortKey="etc" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Stamp Duty" sortKey="stampDuty" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="SEBI Fees" sortKey="sebiFees" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
                         {data?.brokerName === 'integrated' && (
-                          <SortableHeader label="IPF" sortKey="ipf" align="right" className="text-fuchsia-850 bg-fuchsia-50 font-bold border-r border-fuchsia-100" />
+                          <SortableHeader label="IPF" sortKey="ipf" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
                         )}
-                        <SortableHeader label="Exp (Incl STT)" sortKey="totalExpensesInclSTT" align="right" className="text-orange-950 bg-orange-50 font-extrabold border-r border-orange-150" />
-                        <SortableHeader label="Exp (Excl STT)" sortKey="totalExpensesExclSTT" align="right" className="text-stone-850 bg-stone-50 font-semibold border-r border-stone-150" />
-                        <SortableHeader label="Net (Incl STT)" sortKey="totalInclSTT" align="right" className="bg-indigo-600 text-white font-extrabold hover:text-indigo-100 border-r border-indigo-700" />
-                        <SortableHeader label="Net (Excl STT)" sortKey="totalExclSTT" align="right" className="bg-sky-600 text-white font-extrabold hover:text-sky-100 border-r border-sky-700" />
-                        <SortableHeader label="Obligation" sortKey="netTotalBeforeLevies" align="right" className="font-extrabold text-slate-100 bg-slate-900 border-r border-slate-700" />
-                        <SortableHeader label="Class" sortKey="tradeType" align="center" className="bg-violet-100 text-violet-900 font-bold" />
+                        <SortableHeader label="Exp (Incl STT)" sortKey="totalExpensesInclSTT" align="right" className="text-slate-700 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Exp (Excl STT)" sortKey="totalExpensesExclSTT" align="right" className="text-slate-700 font-semibold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Net (Incl STT)" sortKey="totalInclSTT" align="right" className="text-indigo-900 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Net (Excl STT)" sortKey="totalExclSTT" align="right" className="text-sky-900 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Obligation" sortKey="netTotalBeforeLevies" align="right" className="text-slate-900 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Class" sortKey="tradeType" align="center" className="text-slate-700 font-bold" style={{ backgroundColor: '#ecfdf5' }} />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-150 font-mono text-xs">

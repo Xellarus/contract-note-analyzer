@@ -25,7 +25,13 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     const tradeDate = getTradeDate(doc);
     const rawTrades = this.extractTrades(doc);
 
-    if (rawTrades.length === 0) return null;
+    if (rawTrades.length === 0) {
+      const lowerHtml = html.toLowerCase();
+      if (lowerHtml.includes("fno") || lowerHtml.includes("f&o") || lowerHtml.includes("f & o") || lowerHtml.includes("future") || lowerHtml.includes("option") || lowerHtml.includes("derivative")) {
+        throw new Error("This contract note only has FnO Transactions");
+      }
+      return null;
+    }
 
     // Merge identical consecutive trades for consistency
     const merged: any[] = [];
@@ -48,7 +54,13 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     const tradeDate = getTradeDate(text);
     const rawTrades = this.extractTradesFromText(text);
 
-    if (rawTrades.length === 0) return null;
+    if (rawTrades.length === 0) {
+      const lowerText = text.toLowerCase();
+      if (lowerText.includes("fno") || lowerText.includes("f&o") || lowerText.includes("f & o") || lowerText.includes("future") || lowerText.includes("option") || lowerText.includes("derivative")) {
+        throw new Error("This contract note only has FnO Transactions");
+      }
+      return null;
+    }
 
     // Merge identical consecutive trades
     const merged: any[] = [];
@@ -542,8 +554,13 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       const cleanName = t.securityName.trim().toUpperCase();
       if (exchangeNames.includes(cleanName)) return false;
       if (t.quantity >= 10000000) return false;
+      if (!t.isin || t.isin.length < 12) return false;
       return t.quantity > 0 && t.price > 0;
     });
+
+    if (validatedTrades.length === 0) {
+      throw new Error("This contract note only has FnO Transactions");
+    }
 
     let tradesToProcess = validatedTrades;
     const groupMap = new Map<string, Map<string, any[]>>();

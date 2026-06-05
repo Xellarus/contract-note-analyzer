@@ -43,7 +43,7 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
         setError("Could not extract trade data from this contract note. Make sure it is a valid Zerodha PDF or HTML file.");
       }
     } catch (err: any) {
-      setError("Failed to parse Contract Note PDF or HTML. (Check PDF passwords if applicable)");
+      setError(err?.message || "Failed to parse Contract Note PDF or HTML. (Check PDF passwords if applicable)");
     } finally {
       setCnIsLoading(false);
     }

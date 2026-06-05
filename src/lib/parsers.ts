@@ -54,7 +54,7 @@ export const processFile = async (
     
     return null;
   } catch (e: any) {
-    if (e.message === "PDF_PASSWORD_REQUIRED") {
+    if (e.message === "PDF_PASSWORD_REQUIRED" || (e.message && (e.message.startsWith("Invalid Contract Note") || e.message.includes("FnO")))) {
       throw e;
     }
     console.error("Error processing file:", e);
