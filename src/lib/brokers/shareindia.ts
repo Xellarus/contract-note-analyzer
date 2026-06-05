@@ -412,7 +412,13 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
             const fullName = cells[colMap.security]?.textContent?.trim() || "";
             if (!fullName || cleanText(fullName).toLowerCase().startsWith("total") || cleanText(fullName).toLowerCase().startsWith("subtotal")) continue;
 
-            const name = fullName.replace(/-\(INE[A-Z0-9]{10}\)/i, "").replace(/-INE[A-Z0-9]{10}/i, "").trim();
+            let isin = "";
+            const isinMatch = fullName.match(/(IN[A-Z0-9]{10})/i);
+            if (isinMatch) {
+              isin = isinMatch[1].toUpperCase();
+            }
+
+            const name = fullName.replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "").trim();
 
             const typeStr = cleanText(cells[colMap.type]?.textContent).toLowerCase();
             const side = (typeStr.includes("buy") || typeStr === "b") ? "Buy" : (typeStr.includes("sell") || typeStr === "s") ? "Sell" : null;
@@ -423,6 +429,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
             if (side && qty > 0 && price > 0) {
               trades.push({
                 securityName: name,
+                isin: isin,
                 quantity: qty,
                 price: price,
                 brokeragePerShare: brok,
@@ -483,11 +490,17 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       // Strip leading numbers e.g. trade numbers
       securityPart = securityPart.replace(/^[\d\s\-\,\.\/]+/, "").trim();
 
+      let isin = "";
+      const isinMatch = securityPart.match(/(IN[A-Z0-9]{10})/i);
+      if (isinMatch) {
+         isin = isinMatch[1].toUpperCase();
+      }
+
       // Clean ISIN suffix variations
       const name = securityPart
-        .replace(/\s*-\s*\(?INE[A-Z0-9]{12}\)?/i, "")
-        .replace(/\s*-\s*\(?INE[A-Z0-9]{10}\)?/i, "")
-        .replace(/\s*\(?INE[A-Z0-9]{10,12}\)?/i, "")
+        .replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "")
+        .replace(/\s*-?\s*\(?IN[A-Z0-9]{11}\)?/i, "")
+        .replace(/\s*-?\s*\(?IN[A-Z0-9]{13}\)?/i, "")
         .trim();
 
       const lowerName = name.toLowerCase();
@@ -499,6 +512,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
 
       trades.push({
         securityName: name,
+        isin: isin,
         quantity: qty,
         price: price,
         brokeragePerShare: brok,
@@ -554,9 +568,11 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
         const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
         
         const mergedContext = items.map((x: any) => x.contextText || "").join(" ");
+        const isin = items[0]?.isin || "";
         
         tradesToProcess.push({
           securityName: name,
+          isin: isin,
           type: type,
           quantity: totalQty,
           price: avgPrice,
@@ -695,6 +711,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
           id: `tx-${prefix}-${idx}`, 
           tradeDate, 
           securityName: t.securityName, 
+          isin: t.isin || "",
           transactionType: t.type as TransactionType, 
           quantity: t.quantity, 
           avgPrice: t.price, 

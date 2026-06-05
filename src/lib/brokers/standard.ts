@@ -43,7 +43,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
 
       const lDown = line.toLowerCase();
       const tokens = line.split(/\s+/);
-      const isinMatch = tokens.findIndex(t => t.match(/INE[A-Z0-9]{9}\d/));
+      const isinMatch = tokens.findIndex(t => t.match(/IN[a-zA-Z0-9]{10}/));
       
       const cleanL = lDown.replace(/[^a-z]/g, '');
       if (cleanL.includes("annexurea") || lDown.includes("annexure-a") || lDown.includes("annexure a")) {
@@ -74,7 +74,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
               const nameTokens = tokens.slice(0, sideIdx).filter(t => {
                 return !t.match(/^\d{7,}$/) && 
                        !t.match(/^\d{2}:\d{2}:\d{2}$/) && 
-                       !t.match(/INE[A-Z0-9]{9}\d/) && 
+                       !t.match(/IN[a-zA-Z0-9]{10}/) && 
                        !t.match(/^\d+$/);
               });
               const security = nameTokens.join(" ").trim();
@@ -107,7 +107,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
 
       // ISIN / Aggregate Table fallback
       if (isinMatch !== -1) {
-        const isin = tokens[isinMatch].match(/INE[A-Z0-9]{9}\d/)?.[0];
+        const isin = tokens[isinMatch].match(/IN[a-zA-Z0-9]{10}/)?.[0];
         let numStartIdx = isinMatch + 1;
         while (numStartIdx < tokens.length && !tokens[numStartIdx].match(/^\(?[0-9,.-−]+\)?$/)) {
           numStartIdx++;

@@ -266,9 +266,9 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       securityPart = securityPart.replace(/^[\d\s\-\,\.\/]+/, "").trim();
 
       const name = securityPart
-        .replace(/\s*-\s*\(?INE[A-Z0-9]{12}\)?/i, "")
-        .replace(/\s*-\s*\(?INE[A-Z0-9]{10}\)?/i, "")
-        .replace(/\s*\(?INE[A-Z0-9]{10,12}\)?/i, "")
+        .replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "")
+        .replace(/\s*-?\s*\(?IN[A-Z0-9]{11}\)?/i, "")
+        .replace(/\s*-?\s*\(?IN[A-Z0-9]{13}\)?/i, "")
         .trim();
 
       const lowerName = name.toLowerCase();
@@ -515,7 +515,17 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
 
     // --- End Stamp Duty Pre-calculation ---
 
+    let remainingAmount = {
+      etc: summary.etc,
+      sebiFees: summary.sebiFees,
+      clearingCharges: summary.clearingCharges,
+      ipf: summary.ipf
+    };
+
+    const numTrades = tradesToProcess.length;
+
     const trades: Trade[] = tradesToProcess.map((t, idx) => {
+      const isLast = idx === numTrades - 1;
       const s = securityStats.get(t.securityName);
       let isIntraday = false;
       const textToCheck = ((t.contextText || "") + " " + t.securityName).toLowerCase();
@@ -563,10 +573,24 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       };
       const stt = getStt();
 
-      const etc = rt(summary.etc * ratio);
-      const sebiFees = rt(summary.sebiFees * ratio);
-      const clearingCharges = rt(summary.clearingCharges * ratio);
-      const ipf = rt(summary.ipf * ratio);
+      const allocateExpense = (totalVal: number, key: keyof typeof remainingAmount, r: number) => {
+        if (isLast) return rt(remainingAmount[key]);
+        const val = rt(totalVal * r);
+        remainingAmount[key] -= val;
+        return val;
+      };
+
+      const etc = allocateExpense(summary.etc, 'etc', ratio);
+      const sebiFees = allocateExpense(summary.sebiFees, 'sebiFees', ratio);
+      const clearingCharges = allocateExpense(summary.clearingCharges, 'clearingCharges', ratio);
+      
+      let ipf = 0;
+      if (summary.ipf > 0) {
+        ipf = allocateExpense(summary.ipf, 'ipf', ratio);
+      } else {
+        // Calculate IPF at default NSE rate: ₹10 per crore (0.0001% of turnover)
+        ipf = rt(grossTotal * 0.000001);
+      }
 
       // Stamp Duty pre-calculated
       let stampDuty = 0;
@@ -630,6 +654,11 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       summary.cgst = rt(sumGst / 2);
       summary.sgst = rt(sumGst / 2);
       summary.igst = 0;
+    }
+
+    const sumIpf = rt(trades.reduce((sum, tr) => sum + tr.ipf, 0));
+    if (summary.ipf === 0 || Math.abs(summary.ipf - sumIpf) > 0.05) {
+      summary.ipf = sumIpf;
     }
 
     const reconciliation = calculateReconciliation(summary, trades);

@@ -49,7 +49,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
               
               if (symVal.includes("-")) symVal = symVal.split("-")[0].trim();
               
-              if (isinVal.startsWith("INE") && symVal) {
+              if (isinVal.startsWith("IN") && symVal) {
                 isinMap.set(symVal.toUpperCase(), isinVal.toUpperCase());
               }
             }
@@ -122,7 +122,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             const rowText = cells.map(c => c.textContent).join(" ");
             
             let isin = "";
-            const isinMatch = rowText.match(/(INE[A-Z0-9]{9})/i);
+            const isinMatch = rowText.match(/(IN[A-Z0-9]{10})/i);
             if (isinMatch) {
               isin = isinMatch[1].toUpperCase();
             }
@@ -174,7 +174,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     
     // Extract ISIN mapping from the entire text
     const isinMap = new Map<string, string>();
-    const isinRegex = /(INE[A-Z0-9]{9})\s+([A-Z0-9\-]+)/gi;
+    const isinRegex = /(IN[A-Z0-9]{10})\s+([A-Z0-9\-]+)/gi;
     let match;
     while ((match = isinRegex.exec(text)) !== null) {
       let sym = match[2];
@@ -227,7 +227,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
           }
           
           let isin = "";
-          const isinMatch = line.match(/(INE[A-Z0-9]{9})/i);
+          const isinMatch = line.match(/(IN[A-Z0-9]{10})/i);
           if (isinMatch) {
             isin = isinMatch[1].toUpperCase();
           }
