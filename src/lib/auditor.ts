@@ -552,7 +552,8 @@ export const runAudit = (cnData: ContractNoteResult, csvText: string, cnFileName
 
   // Calculate Net Settlement for Contract Note: Net Obligation + Net Payout/Charges adjustments.
   // Note: Buy trades add charges, Sell trades subtract charges.
-  const cnChargesTotal = cnSummary.stt + cnSummary.stampDuty + cnSummary.etc + cnSummary.sebiFees + cnSummary.clearingCharges + cnSummary.ipf + cnTotalGST;
+  const cnIpf = cnData.brokerName === 'integrated' ? cnSummary.ipf : 0;
+  const cnChargesTotal = cnSummary.stt + cnSummary.stampDuty + cnSummary.etc + cnSummary.sebiFees + cnSummary.clearingCharges + cnIpf + cnTotalGST;
   
   // Actually, standard contract note specifies netSettlement directly:
   const cnNetSettlement = cnSummary.netSettlement;

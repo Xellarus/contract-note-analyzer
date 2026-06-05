@@ -350,10 +350,11 @@ export default function App() {
   const downloadCSV = () => {
     if (!data) return;
     const isIntegrated = data.brokerName === 'integrated';
+    const showIpf = data.brokerName === 'integrated';
     const headers = [
       "Trade Date", "ISIN", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
       "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT", 
-      "Exchange Turnover Charges", "SEBI Turnover Fees", "IPF Charges", isIntegrated ? "Total GST" : "IGST", 
+      "Exchange Turnover Charges", "SEBI Turnover Fees", ...(showIpf ? ["IPF Charges"] : []), isIntegrated ? "Total GST" : "IGST", 
       "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
@@ -380,7 +381,7 @@ export default function App() {
         t.stt.toFixed(2),
         t.etc.toFixed(2),
         t.sebiFees.toFixed(2),
-        t.ipf.toFixed(2),
+        ...(showIpf ? [t.ipf.toFixed(2)] : []),
         isIntegrated ? t.gst.toFixed(2) : (t.igst || t.gst).toFixed(2),
         t.stampDuty.toFixed(2),
         t.totalExpensesInclSTT.toFixed(2),
@@ -404,7 +405,7 @@ export default function App() {
       calculatedTotals.stt.toFixed(2), // STT
       calculatedTotals.etc.toFixed(2), // Exchange Turnover Charges
       calculatedTotals.sebiFees.toFixed(2), // SEBI Turnover Fees
-      calculatedTotals.ipf.toFixed(2), // IPF Charges
+      ...(showIpf ? [calculatedTotals.ipf.toFixed(2)] : []), // IPF Charges
       isIntegrated ? calculatedTotals.gst.toFixed(2) : calculatedTotals.igst.toFixed(2), // IGST / GST
       calculatedTotals.stampDuty.toFixed(2), // Stamp Duty
       calculatedTotals.totalExpensesInclSTT.toFixed(2), // Total Expenses (incl STT)
@@ -1890,7 +1891,9 @@ export default function App() {
                     <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} />
                   )}
                   <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} />
-                  <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} />
+                  {data?.brokerName === 'integrated' && (
+                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} />
+                  )}
                 </div>
 
                 <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
@@ -1914,7 +1917,9 @@ export default function App() {
                         <SortableHeader label="ETC" sortKey="etc" align="right" className="text-amber-850 bg-amber-50 font-bold border-r border-amber-100" />
                         <SortableHeader label="Stamp Duty" sortKey="stampDuty" align="right" className="text-teal-850 bg-teal-50 font-bold border-r border-teal-100" />
                         <SortableHeader label="SEBI Fees" sortKey="sebiFees" align="right" className="text-purple-850 bg-purple-50 font-bold border-r border-purple-100" />
-                        <SortableHeader label="IPF" sortKey="ipf" align="right" className="text-fuchsia-850 bg-fuchsia-50 font-bold border-r border-fuchsia-100" />
+                        {data?.brokerName === 'integrated' && (
+                          <SortableHeader label="IPF" sortKey="ipf" align="right" className="text-fuchsia-850 bg-fuchsia-50 font-bold border-r border-fuchsia-100" />
+                        )}
                         <SortableHeader label="Exp (Incl STT)" sortKey="totalExpensesInclSTT" align="right" className="text-orange-950 bg-orange-50 font-extrabold border-r border-orange-150" />
                         <SortableHeader label="Exp (Excl STT)" sortKey="totalExpensesExclSTT" align="right" className="text-stone-850 bg-stone-50 font-semibold border-r border-stone-150" />
                         <SortableHeader label="Net (Incl STT)" sortKey="totalInclSTT" align="right" className="bg-indigo-600 text-white font-extrabold hover:text-indigo-100 border-r border-indigo-700" />
@@ -1938,7 +1943,7 @@ export default function App() {
                             <td className="px-6 py-4 text-slate-500 font-semibold bg-slate-50/10 font-mono tracking-wider">{t.isin || "—"}</td>
                             <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic bg-slate-50/10">{t.securityName}</td>
                             <td className="px-6 py-4 text-center bg-slate-50/10">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
+                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
                             </td>
                             <td className="px-6 py-4 text-right font-semibold text-slate-700 bg-slate-50/10">{t.quantity}</td>
                             <td className="px-6 py-4 text-right text-slate-700 bg-slate-50/10 border-r border-slate-200">₹{t.avgPrice.toFixed(2)}</td>
@@ -1953,7 +1958,9 @@ export default function App() {
                             <td className="px-6 py-4 text-right text-amber-900 font-semibold bg-amber-50/15 border-r border-amber-100/30">₹{t.etc.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-teal-900 bg-teal-50/15 border-r border-teal-100/30">₹{t.stampDuty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-purple-950 bg-purple-50/15 border-r border-purple-100/30">₹{t.sebiFees.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-fuchsia-950 bg-fuchsia-50/15 border-r border-fuchsia-100/30">₹{t.ipf.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            {data?.brokerName === 'integrated' && (
+                              <td className="px-6 py-4 text-right text-fuchsia-950 bg-fuchsia-50/15 border-r border-fuchsia-100/30">₹{t.ipf.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            )}
                             <td className="px-6 py-4 text-right text-orange-950 font-bold bg-orange-50/15 border-r border-orange-100/30">₹{t.totalExpensesInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-stone-900 bg-stone-50/15 border-r border-stone-100/30">₹{t.totalExpensesExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
                             <td className="px-6 py-4 text-right text-indigo-950 font-extrabold bg-indigo-50/25 border-r border-indigo-100/40">₹{totalInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>

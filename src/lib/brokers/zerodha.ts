@@ -453,6 +453,9 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
   private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
     const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+    // Zero out IPF for Zerodha broker
+    summary.ipf = 0;
+
     // Hardcode nominal brokerage for Zerodha if evaluating to 0
     if (summary.taxableValue === 0) {
       summary.taxableValue = 0.01;

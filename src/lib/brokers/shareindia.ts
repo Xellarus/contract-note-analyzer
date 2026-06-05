@@ -527,6 +527,9 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
   private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
     const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+    // Zero out IPF for Share India broker
+    summary.ipf = 0;
+
     let providedGst = rt(summary.igst) + rt(summary.cgst) + rt(summary.sgst);
     if (providedGst === 0 && summary.taxableValue > 0) {
       providedGst = rt(summary.taxableValue * 0.18);
