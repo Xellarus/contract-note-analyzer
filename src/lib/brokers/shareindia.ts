@@ -45,10 +45,9 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate ?? "26-05-2026", "s");
+    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "sh");
   }
 
-  // parsePdfText handles extracting summary and trades from plain text
   async parsePdfText(text: string): Promise<ContractNoteResult | null> {
     const summary = this.extractSummaryFromText(text);
     const tradeDate = getTradeDate(text);
@@ -62,7 +61,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       return null;
     }
 
-    // Merge identical consecutive trades
+    // Merge identical consecutive trades for consistency
     const merged: any[] = [];
     rawTrades.forEach(t => {
       const last = merged[merged.length - 1];
@@ -74,10 +73,80 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate ?? "26-05-2026", "s");
+    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "s");
   }
 
-  private extractSummary(doc: Document): Summary {
+  private mergeSummaries(main: Summary, fallback: Summary): Summary {
+    const keys = Object.keys(main) as Array<keyof Summary>;
+    keys.forEach(key => {
+      if (main[key] === 0 && fallback[key] !== 0) {
+        (main[key] as any) = fallback[key];
+      }
+    });
+    return main;
+  }
+
+  private extractSummaryRobustly(text: string): Summary {
+    const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
+    const lines = text.split('\n');
+
+    for (const line of lines) {
+      if (isFootnoteOrDisclaimer(line)) continue;
+      const lowerLine = line.toLowerCase();
+      if (lowerLine.includes("security name") || lowerLine.includes("isin") || lowerLine.includes("symbol")) continue;
+      if (lowerLine.includes("registration") || lowerLine.includes("regn") || lowerLine.includes("regno") || lowerLine.includes("reg.")) continue;
+
+      const tokens = line.trim().split(/\s+/);
+      if (tokens.length < 2) continue;
+
+      let valCandidate = NaN;
+      let rawToken = "";
+      for (let j = tokens.length - 1; j >= 0; j--) {
+        const token = tokens[j].trim();
+        if (/[\d]/.test(token)) {
+          const val = parseNumber(token);
+          if (!isNaN(val)) {
+            valCandidate = val;
+            rawToken = token;
+            break;
+          }
+        }
+      }
+
+      if (isNaN(valCandidate) || Math.abs(valCandidate) === 0) continue;
+      const absVal = Math.abs(valCandidate);
+
+      if (lowerLine.includes("pay in/pay out obligation") || lowerLine.includes("pay in / pay out obligation") || lowerLine.includes("pay-in/pay-out obligation") || lowerLine.includes("net obligation")) {
+        s.payinObligation = absVal;
+      } else if (lowerLine.includes("securities transaction") || (lowerLine.includes("stt") && !lowerLine.includes("gst") && !lowerLine.includes("cgst") && !lowerLine.includes("sgst") && !lowerLine.includes("igst"))) {
+        s.stt = absVal;
+      } else if (lowerLine.includes("taxable value of supply") || lowerLine.includes("taxable value") || lowerLine.includes("taxable value of services") || lowerLine.includes("taxable value of supply (brokerage)")) {
+        s.taxableValue = absVal;
+      } else if (lowerLine.includes("exchange transaction charge") || lowerLine.includes("exchange transaction charges") || (lowerLine.includes("exchange") && lowerLine.includes("charge")) || lowerLine.includes("exchange charges") || /\betc\b/.test(lowerLine) || lowerLine.includes("exch trans")) {
+        s.etc = absVal;
+      } else if (lowerLine.includes("sebi turnover") || lowerLine.includes("sebi fee") || lowerLine.includes("sebi turnover fee") || lowerLine.includes("sebi turnover fees") || /\bsebi\b/.test(lowerLine)) {
+        s.sebiFees = absVal;
+      } else if (lowerLine.includes("clearing charge") || lowerLine.includes("clearing charges")) {
+        s.clearingCharges = absVal;
+      } else if (lowerLine.includes("stamp duty") || lowerLine.includes("stamp charges")) {
+        s.stampDuty = absVal;
+      } else if (lowerLine.includes("ipf") || lowerLine.includes("investor protection")) {
+        s.ipf = absVal;
+      } else if (lowerLine.includes("cgst")) {
+        s.cgst = absVal;
+      } else if (lowerLine.includes("sgst") || lowerLine.includes("utgst")) {
+        s.sgst = absVal;
+      } else if (lowerLine.includes("igst")) {
+        s.igst = absVal;
+      } else if (lowerLine.includes("net amount receivable") || lowerLine.includes("net amount payable") || lowerLine.includes("receivable by client") || lowerLine.includes("payable by client") || lowerLine.includes("net settlement") || lowerLine.includes("net amount receivable/(payable)")) {
+        const isNegative = rawToken.includes('(') || rawToken.includes(')') || rawToken.includes('-');
+        s.netSettlement = isNegative ? -absVal : valCandidate;
+      }
+    }
+    return s;
+  }
+
+  private extractSummaryOld(doc: Document): Summary {
     const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
 
     const tables = Array.from(doc.querySelectorAll("table"));
@@ -114,7 +183,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
                    s.payinObligation = absVal;
                  } else if (header.includes("transaction tax") || header.includes("stt")) {
                    s.stt = absVal;
-                 } else if (header.includes("taxable value")) {
+                 } else if (header.includes("taxable value") || header.includes("services")) {
                    s.taxableValue = absVal;
                  } else if (header.includes("cgst")) {
                    s.cgst = absVal;
@@ -122,13 +191,13 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
                    s.sgst = absVal;
                  } else if (header.includes("igst")) {
                    s.igst = absVal;
-                 } else if (header.includes("exchange transaction") || header.includes("etc") || header.includes("exchange charge")) {
+                 } else if (header.includes("exchange") || header.includes("etc") || header.includes("exch") || header.includes("turnover charge")) {
                    s.etc = absVal;
-                 } else if (header.includes("sebi turnover") || header.includes("sebi fee") || header.includes("sebi turnover fee")) {
+                 } else if (header.includes("sebi") || header.includes("turnover fee")) {
                    s.sebiFees = absVal;
-                 } else if (header.includes("stamp duty")) {
+                 } else if (header.includes("stamp") || header.includes("duty")) {
                    s.stampDuty = absVal;
-                 } else if (header.includes("receivable") || header.includes("payable")) {
+                 } else if (header.includes("receivable") || header.includes("payable") || header.includes("settlement") || header.includes("net amt")) {
                    s.netSettlement = cellVal;
                  }
                });
@@ -144,6 +213,8 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
                      const offset = numbers.length - 12;
                      s.igst = Math.abs(numbers[offset + 6]);
                    } else if (numbers.length === 11) {
+                     s.igst = Math.abs(numbers[5]);
+                   } else if (numbers.length === 10) {
                      s.igst = Math.abs(numbers[5]);
                    }
                  }
@@ -166,7 +237,19 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
                }
              });
 
-             if (numbers.length === 11) {
+             if (numbers.length === 10) {
+               s.payinObligation = Math.abs(numbers[0]);
+               s.stt = Math.abs(numbers[1]);
+               s.taxableValue = Math.abs(numbers[2]);
+               s.cgst = Math.abs(numbers[3]);
+               s.sgst = Math.abs(numbers[4]);
+               s.igst = Math.abs(numbers[5]);
+               s.etc = Math.abs(numbers[6]);
+               s.sebiFees = Math.abs(numbers[7]);
+               s.stampDuty = Math.abs(numbers[8]);
+               s.netSettlement = numbers[9];
+               return s;
+             } else if (numbers.length === 11) {
                s.payinObligation = Math.abs(numbers[0]);
                s.stt = Math.abs(numbers[1]);
                s.taxableValue = Math.abs(numbers[2]);
@@ -238,13 +321,21 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     return s;
   }
 
-  private extractSummaryFromText(text: string): Summary {
+  private extractSummary(doc: Document): Summary {
+    const fullText = doc.body?.textContent || doc.documentElement?.textContent || "";
+    const mainSummary = this.extractSummaryRobustly(fullText);
+    const fallbackSummary = this.extractSummaryOld(doc);
+    return this.mergeSummaries(mainSummary, fallbackSummary);
+  }
+
+  private extractSummaryFromTextOld(text: string): Summary {
     const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
     const lines = text.split('\n');
 
     for (const line of lines) {
       const cleanLine = cleanText(line);
       const lowerLine = cleanLine.toLowerCase();
+      if (lowerLine.includes("registration") || lowerLine.includes("regn") || lowerLine.includes("regno") || lowerLine.includes("reg.")) continue;
 
       if (lowerLine.startsWith("ncl cm") || lowerLine.startsWith("total (net)") || lowerLine.startsWith("total(net)")) {
         const tokens = line.trim().split(/\s+/);
@@ -272,57 +363,72 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
         if (headerLine) {
           const normalizedHeader = headerLine.replace(/\(@\d+%\)/g, "");
           const headerTokens = normalizedHeader.trim().split(/\s{2,}/);
-          const cleanHeaders = (headerTokens.length >= 5 ? headerTokens : normalizedHeader.trim().split(/\s+/)).map(h => h.toLowerCase());
-          
-          const firstNumIdx = tokens.findIndex((t) => !isNaN(parseFloat(t.replace(/,/g, ''))));
-          if (firstNumIdx !== -1) {
-            const dataNumbers = tokens.slice(firstNumIdx).map(t => parseNumber(t));
-            
-            cleanHeaders.forEach((header, idx) => {
-              if (idx >= dataNumbers.length) return;
-              const val = dataNumbers[idx];
-              if (isNaN(val)) return;
-              const absVal = Math.abs(val);
+          if (headerTokens.length >= 5) {
+            const cleanHeaders = headerTokens.map(h => h.toLowerCase());
+            const firstNumIdx = tokens.findIndex((t) => !isNaN(parseFloat(t.replace(/,/g, ''))));
+            if (firstNumIdx !== -1) {
+              const dataNumbers = tokens.slice(firstNumIdx).map(t => parseNumber(t));
+              
+              cleanHeaders.forEach((header, idx) => {
+                if (idx >= dataNumbers.length) return;
+                const val = dataNumbers[idx];
+                if (isNaN(val)) return;
+                const absVal = Math.abs(val);
 
-              if (header.includes("pay in") || header.includes("net obligation") || header.includes("obligation")) {
-                s.payinObligation = absVal;
-              } else if (header.includes("transaction tax") || header.includes("stt")) {
-                s.stt = absVal;
-              } else if (header.includes("taxable value")) {
-                s.taxableValue = absVal;
-              } else if (header.includes("cgst")) {
-                s.cgst = absVal;
-              } else if (header.includes("sgst")) {
-                s.sgst = absVal;
-              } else if (header.includes("igst")) {
-                s.igst = absVal;
-              } else if (header.includes("exchange transaction") || header.includes("etc")) {
-                s.etc = absVal;
-              } else if (header.includes("sebi turnover") || header.includes("sebi fee")) {
-                s.sebiFees = absVal;
-              } else if (header.includes("stamp duty")) {
-                s.stampDuty = absVal;
-              } else if (header.includes("receivable") || header.includes("payable")) {
-                s.netSettlement = val;
-              }
-            });
-
-            if (s.taxableValue > 0 || s.stt > 0 || Math.abs(s.netSettlement) > 0) {
-              if (s.igst === 0) {
-                if (numbers.length >= 12) {
-                  const offset = numbers.length - 12;
-                  s.igst = Math.abs(numbers[offset + 6]);
-                } else if (numbers.length === 11) {
-                  s.igst = Math.abs(numbers[5]);
+                if (header.includes("pay in") || header.includes("net obligation") || header.includes("obligation")) {
+                  s.payinObligation = absVal;
+                } else if (header.includes("transaction tax") || header.includes("stt")) {
+                  s.stt = absVal;
+                } else if (header.includes("taxable value") || header.includes("services")) {
+                  s.taxableValue = absVal;
+                } else if (header.includes("cgst")) {
+                  s.cgst = absVal;
+                } else if (header.includes("sgst")) {
+                  s.sgst = absVal;
+                } else if (header.includes("igst")) {
+                  s.igst = absVal;
+                } else if (header.includes("exchange") || header.includes("etc") || header.includes("exch") || header.includes("turnover charge")) {
+                  s.etc = absVal;
+                } else if (header.includes("sebi") || header.includes("turnover fee")) {
+                  s.sebiFees = absVal;
+                } else if (header.includes("stamp") || header.includes("duty")) {
+                  s.stampDuty = absVal;
+                } else if (header.includes("receivable") || header.includes("payable") || header.includes("settlement") || header.includes("net amt")) {
+                  s.netSettlement = val;
                 }
+              });
+
+              if (s.taxableValue > 0 || s.stt > 0 || Math.abs(s.netSettlement) > 0) {
+                if (s.igst === 0) {
+                  if (numbers.length >= 12) {
+                    const offset = numbers.length - 12;
+                    s.igst = Math.abs(numbers[offset + 6]);
+                  } else if (numbers.length === 11) {
+                    s.igst = Math.abs(numbers[5]);
+                  } else if (numbers.length === 10) {
+                    s.igst = Math.abs(numbers[5]);
+                  }
+                }
+                return s;
               }
-              return s;
             }
           }
         }
 
         // Static fallback
-        if (numbers.length === 11) {
+        if (numbers.length === 10) {
+          s.payinObligation = Math.abs(numbers[0]);
+          s.stt = Math.abs(numbers[1]);
+          s.taxableValue = Math.abs(numbers[2]);
+          s.cgst = Math.abs(numbers[3]);
+          s.sgst = Math.abs(numbers[4]);
+          s.igst = Math.abs(numbers[5]);
+          s.etc = Math.abs(numbers[6]);
+          s.sebiFees = Math.abs(numbers[7]);
+          s.stampDuty = Math.abs(numbers[8]);
+          s.netSettlement = numbers[9];
+          return s;
+        } else if (numbers.length === 11) {
           s.payinObligation = Math.abs(numbers[0]);
           s.stt = Math.abs(numbers[1]);
           s.taxableValue = Math.abs(numbers[2]);
@@ -356,6 +462,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     for (const line of lines) {
       const l = cleanText(line);
       const lowerLine = l.toLowerCase();
+      if (lowerLine.includes("registration") || lowerLine.includes("regn") || lowerLine.includes("regno") || lowerLine.includes("reg.")) continue;
 
       if (lowerLine.includes("obligation details") || lowerLine.includes("pay in/ pay out obligation")) {
         insideObligations = true;
@@ -378,9 +485,9 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
             if (lowerLine.includes("pay in/pay out obligation") || lowerLine.includes("pay in / pay out obligation")) s.payinObligation = absVal;
             else if (lowerLine.includes("securities transaction") || lowerLine.includes("stt")) s.stt = absVal;
             else if (lowerLine.includes("taxable value")) s.taxableValue = absVal;
-            else if (lowerLine.includes("exchange transaction")) s.etc = absVal;
+            else if (lowerLine.includes("exchange transaction") || lowerLine.includes("exchange charge") || lowerLine.includes("etc")) s.etc = absVal;
             else if (lowerLine.includes("clearing charges")) s.clearingCharges = absVal;
-            else if (lowerLine.includes("sebi turnover") || lowerLine.includes("sebi fee")) s.sebiFees = absVal;
+            else if (lowerLine.includes("sebi turnover") || lowerLine.includes("sebi fee") || lowerLine.includes("sebi")) s.sebiFees = absVal;
             else if (lowerLine.includes("stamp duty")) s.stampDuty = absVal;
             else if (lowerLine.includes("net amount receivable") || lowerLine.includes("receivable by client")) s.netSettlement = val;
             else if (lowerLine.includes("igst")) s.igst = absVal;
@@ -392,6 +499,12 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     }
 
     return s;
+  }
+
+  private extractSummaryFromText(text: string): Summary {
+    const mainSummary = this.extractSummaryRobustly(text);
+    const fallbackSummary = this.extractSummaryFromTextOld(text);
+    return this.mergeSummaries(mainSummary, fallbackSummary);
   }
 
   private extractTrades(doc: Document): any[] {
