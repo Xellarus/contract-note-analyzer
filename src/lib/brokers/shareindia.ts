@@ -650,7 +650,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
   }
 
   private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
-    const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const rt = (n: number) => Math.round((n + Number.EPSILON) * 10000) / 10000;
 
     // Zero out IPF for Share India broker
     summary.ipf = 0;
@@ -825,7 +825,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       const tradeTypeKey = isIntraday ? "intraday" : "delivery";
       const sideKey = t.type === "Buy" ? "buy" : "sell";
       const rate = INSTRUMENT_RULES[instrumentType][tradeTypeKey][sideKey];
-      const stt = Math.round(grossTotal * rate);
+      const stt = rt(grossTotal * rate);
 
       const etc = isMutualFund ? 0 : isSingleTrade ? rt(summary.etc) : rt(summary.etc * ratio);
       const sebiFees = isMutualFund ? 0 : isSingleTrade ? rt(summary.sebiFees) : rt(summary.sebiFees * ratio);

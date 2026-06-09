@@ -12,7 +12,7 @@ import { processFile, mergeResults, calculateReconciliation } from './lib/parser
 import CsvAuditor from './components/CsvAuditor';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
-const SummaryCard = ({ label, value, highlight = false, alertState = false, labelStyle = {} }: { label: string, value: number, highlight?: boolean, alertState?: boolean, labelStyle?: React.CSSProperties }) => (
+const SummaryCard = ({ label, value, highlight = false, alertState = false, labelStyle = {}, fractionDigits = 2 }: { label: string, value: number, highlight?: boolean, alertState?: boolean, labelStyle?: React.CSSProperties, fractionDigits?: number }) => (
   <div className={`p-4 rounded-xl border transition-all ${alertState ? 'bg-rose-50 border-rose-200' : highlight ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'} shadow-sm`}>
     <p 
       style={labelStyle}
@@ -21,7 +21,7 @@ const SummaryCard = ({ label, value, highlight = false, alertState = false, labe
       {label}
     </p>
     <p className={`text-lg font-bold mt-1 font-mono ${alertState ? 'text-rose-900' : highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
-      {value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      {value.toLocaleString('en-IN', { minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits })}
     </p>
   </div>
 );
@@ -32,6 +32,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
   const [data, setData] = useState<ContractNoteResult | null>(null);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
+  const isShareIndia = data?.brokerName === 'shareindia';
 
   const requestSort = (key: string) => {
     let direction: 'asc' | 'desc' = 'desc';
@@ -365,6 +366,7 @@ export default function App() {
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
     
+    const numDecimals = data.brokerName === 'shareindia' ? 4 : 2;
     const rows = data.trades.map(t => {
       const brokeragePerShare = t.quantity > 0 ? (t.brokerage / t.quantity).toFixed(4) : "0.0000";
       const totalWithExpenseInclSTT = t.transactionType === "Buy" 
@@ -380,20 +382,20 @@ export default function App() {
         `"${t.securityName.replace(/"/g, '""')}"`, 
         `"${t.transactionType}"`, 
         t.quantity, 
-        t.avgPrice.toFixed(2),
-        t.turnover.toFixed(2),
+        t.avgPrice.toFixed(numDecimals),
+        t.turnover.toFixed(numDecimals),
         brokeragePerShare,
-        t.brokerage.toFixed(2),
-        t.stt.toFixed(2),
-        t.etc.toFixed(2),
-        t.sebiFees.toFixed(2),
-        ...(showIpf ? [t.ipf.toFixed(2)] : []),
-        isIntegrated ? t.gst.toFixed(2) : (t.igst || t.gst).toFixed(2),
-        t.stampDuty.toFixed(2),
-        t.totalExpensesInclSTT.toFixed(2),
-        t.totalExpensesExclSTT.toFixed(2),
-        totalWithExpenseInclSTT.toFixed(2),
-        totalWithExpenseExclSTT.toFixed(2),
+        t.brokerage.toFixed(numDecimals),
+        t.stt.toFixed(numDecimals),
+        t.etc.toFixed(numDecimals),
+        t.sebiFees.toFixed(numDecimals),
+        ...(showIpf ? [t.ipf.toFixed(numDecimals)] : []),
+        isIntegrated ? t.gst.toFixed(numDecimals) : (t.igst || t.gst).toFixed(numDecimals),
+        t.stampDuty.toFixed(numDecimals),
+        t.totalExpensesInclSTT.toFixed(numDecimals),
+        t.totalExpensesExclSTT.toFixed(numDecimals),
+        totalWithExpenseInclSTT.toFixed(numDecimals),
+        totalWithExpenseExclSTT.toFixed(numDecimals),
         `"${t.tradeType}"`
       ];
     });
@@ -405,19 +407,19 @@ export default function App() {
       '', // Transaction Type
       '', // Number of Shares
       '', // Avg Price
-      calculatedTotals.gross.toFixed(2), // Total Amount (Turnover)
+      calculatedTotals.gross.toFixed(numDecimals), // Total Amount (Turnover)
       '', // Brokerage Per Share
-      calculatedTotals.brokerage.toFixed(2), // Total Brokerage
-      calculatedTotals.stt.toFixed(2), // STT
-      calculatedTotals.etc.toFixed(2), // Exchange Turnover Charges
-      calculatedTotals.sebiFees.toFixed(2), // SEBI Turnover Fees
-      ...(showIpf ? [calculatedTotals.ipf.toFixed(2)] : []), // IPF Charges
-      isIntegrated ? calculatedTotals.gst.toFixed(2) : calculatedTotals.igst.toFixed(2), // IGST / GST
-      calculatedTotals.stampDuty.toFixed(2), // Stamp Duty
-      calculatedTotals.totalExpensesInclSTT.toFixed(2), // Total Expenses (incl STT)
-      calculatedTotals.totalExpensesExclSTT.toFixed(2), // Total Expenses (excl STT)
-      calculatedTotals.totalAmountWithExpenseInclSTT.toFixed(2), // Total Amount with Expense (Incl STT)
-      calculatedTotals.totalAmountWithExpenseExclSTT.toFixed(2), // Total Amount with Expense (Excl STT)
+      calculatedTotals.brokerage.toFixed(numDecimals), // Total Brokerage
+      calculatedTotals.stt.toFixed(numDecimals), // STT
+      calculatedTotals.etc.toFixed(numDecimals), // Exchange Turnover Charges
+      calculatedTotals.sebiFees.toFixed(numDecimals), // SEBI Turnover Fees
+      ...(showIpf ? [calculatedTotals.ipf.toFixed(numDecimals)] : []), // IPF Charges
+      isIntegrated ? calculatedTotals.gst.toFixed(numDecimals) : calculatedTotals.igst.toFixed(numDecimals), // IGST / GST
+      calculatedTotals.stampDuty.toFixed(numDecimals), // Stamp Duty
+      calculatedTotals.totalExpensesInclSTT.toFixed(numDecimals), // Total Expenses (incl STT)
+      calculatedTotals.totalExpensesExclSTT.toFixed(numDecimals), // Total Expenses (excl STT)
+      calculatedTotals.totalAmountWithExpenseInclSTT.toFixed(numDecimals), // Total Amount with Expense (Incl STT)
+      calculatedTotals.totalAmountWithExpenseExclSTT.toFixed(numDecimals), // Total Amount with Expense (Excl STT)
       '', // Trade Class
     ];
 
@@ -550,7 +552,7 @@ export default function App() {
 
       const sharesLedgerName = getSharesLedgerName(securityName);
 
-      const narration = `${securityName} ${qty} Nos @ ${avgPrice.toFixed(2)}`;
+      const narration = `${securityName} ${qty} Nos @ ${data.brokerName === 'shareindia' ? avgPrice.toFixed(4) : avgPrice.toFixed(2)}`;
 
       const addRow = (ledgerName: string, entryType: "Debit" | "Credit", amount: number, rowNarration: string = "") => {
         sheetData.push([
@@ -783,7 +785,7 @@ export default function App() {
       };
 
       const sharesLedgerName = getSharesLedgerName(securityName);
-      const narration = `${securityName} ${qty} Nos @ ${avgPrice.toFixed(2)}`;
+      const narration = `${securityName} ${qty} Nos @ ${data.brokerName === 'shareindia' ? avgPrice.toFixed(4) : avgPrice.toFixed(2)}`;
 
       const brokerLedger = ledgerMappings.BROKER || "Broker Ledger";
 
@@ -1441,7 +1443,6 @@ export default function App() {
                     <AlertCircle className="w-5 h-5 text-indigo-700" />
                     <p className="text-sm text-indigo-900 font-black uppercase tracking-wide">Enter PDF Password</p>
                   </div>
-                  <p className="text-xs text-indigo-750/80 mb-4">Your contract note is encrypted (Zerodha passwords are usually your PAN card number in uppercase).</p>
                   <div className="flex gap-2">
                     <input type="password" placeholder="e.g. ABCDE1234F" value={pdfPassword} onChange={(e) => setPdfPassword(e.target.value)} className="flex-1 px-4 py-2 text-xs font-mono uppercase rounded-xl border border-indigo-200 outline-none max-w-[200px]" />
                     <button onClick={() => handleFileUpload(pendingFiles)} className="bg-indigo-600 text-white px-5 py-2 rounded-xl text-xs font-bold shadow shadow-indigo-200">Unlock PDF</button>
@@ -1881,24 +1882,22 @@ export default function App() {
                   </div>
                 )}
 
-
-
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight />
-                  <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight />
-                  <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight />
-                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} />
-                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} />
-                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} />
-                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} />
+                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
                   {data?.brokerName === 'integrated' ? (
-                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} />
+                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
                   ) : (
-                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} />
+                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
                   )}
-                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} />
+                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} />
+                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
                   )}
                 </div>
 
@@ -1943,6 +1942,9 @@ export default function App() {
                           ? t.turnover + t.totalExpensesExclSTT 
                           : t.turnover - t.totalExpensesExclSTT;
 
+                        const numDigits = isShareIndia ? 4 : 2;
+                        const fmt = (val: number) => val.toLocaleString('en-IN', { minimumFractionDigits: numDigits, maximumFractionDigits: numDigits });
+
                         return (
                            <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                             <td className="px-6 py-4 text-slate-400 bg-slate-50/10">{t.tradeDate}</td>
@@ -1952,27 +1954,27 @@ export default function App() {
                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
                             </td>
                             <td className="px-6 py-4 text-right font-semibold text-slate-700 bg-slate-50/10">{t.quantity}</td>
-                            <td className="px-6 py-4 text-right text-slate-700 bg-slate-50/10 border-r border-slate-200">₹{t.avgPrice.toFixed(2)}</td>
-                            <td className="px-6 py-4 text-right font-bold text-emerald-900 bg-emerald-50/15 border-r border-emerald-100/30">₹{t.turnover.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right font-semibold text-blue-800 bg-blue-50/15 border-r border-blue-100/30">₹{t.brokerage.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right font-bold text-rose-700 bg-rose-50/20 border-r border-rose-100/30">₹{t.stt.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-slate-700 bg-slate-50/10 border-r border-slate-200">₹{t.avgPrice.toFixed(numDigits)}</td>
+                            <td className="px-6 py-4 text-right font-bold text-emerald-950 bg-emerald-50/15 border-r border-emerald-100/30">₹{fmt(t.turnover)}</td>
+                            <td className="px-6 py-4 text-right font-semibold text-blue-800 bg-blue-50/15 border-r border-blue-100/30">₹{fmt(t.brokerage)}</td>
+                            <td className="px-6 py-4 text-right font-bold text-rose-700 bg-rose-50/20 border-r border-rose-100/30">₹{fmt(t.stt)}</td>
                             {data?.brokerName === 'integrated' ? (
-                              <td className="px-6 py-4 text-right font-bold text-violet-800 bg-violet-50/15 border-r border-violet-100/30">₹{t.gst.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right font-bold text-violet-800 bg-violet-50/15 border-r border-violet-100/30">₹{fmt(t.gst)}</td>
                             ) : (
-                              <td className="px-6 py-4 text-right font-bold text-violet-800 bg-violet-50/15 border-r border-violet-100/30">₹{(t.igst || t.gst).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right font-bold text-violet-800 bg-violet-50/15 border-r border-violet-100/30">₹{fmt(t.igst || t.gst)}</td>
                             )}
-                            <td className="px-6 py-4 text-right text-amber-900 font-semibold bg-amber-50/15 border-r border-amber-100/30">₹{t.etc.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-teal-900 bg-teal-50/15 border-r border-teal-100/30">₹{t.stampDuty.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-purple-950 bg-purple-50/15 border-r border-purple-100/30">₹{t.sebiFees.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-amber-900 font-semibold bg-amber-50/15 border-r border-amber-100/30">₹{fmt(t.etc)}</td>
+                            <td className="px-6 py-4 text-right text-teal-900 bg-teal-50/15 border-r border-teal-100/30">₹{fmt(t.stampDuty)}</td>
+                            <td className="px-6 py-4 text-right text-purple-950 bg-purple-50/15 border-r border-purple-100/30">₹{fmt(t.sebiFees)}</td>
                             {data?.brokerName === 'integrated' && (
-                              <td className="px-6 py-4 text-right text-fuchsia-950 bg-fuchsia-50/15 border-r border-fuchsia-100/30">₹{t.ipf.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4 text-right text-fuchsia-950 bg-fuchsia-50/15 border-r border-fuchsia-100/30">₹{fmt(t.ipf)}</td>
                             )}
-                            <td className="px-6 py-4 text-right text-orange-950 font-bold bg-orange-50/15 border-r border-orange-100/30">₹{t.totalExpensesInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-stone-900 bg-stone-50/15 border-r border-stone-100/30">₹{t.totalExpensesExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-indigo-950 font-extrabold bg-indigo-50/25 border-r border-indigo-100/40">₹{totalInclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-6 py-4 text-right text-sky-950 font-bold bg-sky-50/20 border-r border-sky-100/40">₹{totalExclSTT.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-6 py-4 text-right text-orange-950 font-bold bg-orange-50/15 border-r border-orange-100/30">₹{fmt(t.totalExpensesInclSTT)}</td>
+                            <td className="px-6 py-4 text-right text-stone-900 bg-stone-50/15 border-r border-stone-100/30">₹{fmt(t.totalExpensesExclSTT)}</td>
+                            <td className="px-6 py-4 text-right text-indigo-950 font-extrabold bg-indigo-50/25 border-r border-indigo-100/40">₹{fmt(totalInclSTT)}</td>
+                            <td className="px-6 py-4 text-right text-sky-950 font-bold bg-sky-50/20 border-r border-sky-100/40">₹{fmt(totalExclSTT)}</td>
                             <td className={`px-6 py-4 text-right font-black border-r border-slate-200 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700 bg-emerald-50/10' : 'text-rose-700 bg-rose-50/10'}`}>
-                              {t.netTotalBeforeLevies >= 0 ? '+' : ''}{t.netTotalBeforeLevies.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                              {t.netTotalBeforeLevies >= 0 ? '+' : ''}{t.netTotalBeforeLevies.toLocaleString('en-IN', { minimumFractionDigits: numDigits, maximumFractionDigits: numDigits })}
                             </td>
                             <td className="px-6 py-4 text-center bg-violet-50/10">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-150 text-indigo-800' : 'bg-amber-150 text-amber-800'}`}>{t.tradeType}</span>
