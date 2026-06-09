@@ -12,7 +12,23 @@ import { processFile, mergeResults, calculateReconciliation } from './lib/parser
 import CsvAuditor from './components/CsvAuditor';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
-const SummaryCard = ({ label, value, highlight = false, alertState = false, labelStyle = {}, fractionDigits = 2 }: { label: string, value: number, highlight?: boolean, alertState?: boolean, labelStyle?: React.CSSProperties, fractionDigits?: number }) => (
+const SummaryCard = ({ 
+  label, 
+  value, 
+  highlight = false, 
+  alertState = false, 
+  labelStyle = {}, 
+  minFractionDigits = 2, 
+  maxFractionDigits = 2 
+}: { 
+  label: string, 
+  value: number, 
+  highlight?: boolean, 
+  alertState?: boolean, 
+  labelStyle?: React.CSSProperties, 
+  minFractionDigits?: number, 
+  maxFractionDigits?: number 
+}) => (
   <div className={`p-4 rounded-xl border transition-all ${alertState ? 'bg-rose-50 border-rose-200' : highlight ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'} shadow-sm`}>
     <p 
       style={labelStyle}
@@ -21,7 +37,7 @@ const SummaryCard = ({ label, value, highlight = false, alertState = false, labe
       {label}
     </p>
     <p className={`text-lg font-bold mt-1 font-mono ${alertState ? 'text-rose-900' : highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
-      {value.toLocaleString('en-IN', { minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits })}
+      {value.toLocaleString('en-IN', { minimumFractionDigits: minFractionDigits, maximumFractionDigits: maxFractionDigits })}
     </p>
   </div>
 );
@@ -367,8 +383,17 @@ export default function App() {
     ];
     
     const numDecimals = data.brokerName === 'shareindia' ? 4 : 2;
+    const formatCSV = (val: number) => {
+      const fixed = val.toFixed(numDecimals);
+      if (numDecimals === 4) {
+        if (fixed.endsWith('00')) return fixed.slice(0, -2);
+        if (fixed.endsWith('0')) return fixed.slice(0, -1);
+      }
+      return fixed;
+    };
+
     const rows = data.trades.map(t => {
-      const brokeragePerShare = t.quantity > 0 ? (t.brokerage / t.quantity).toFixed(4) : "0.0000";
+      const brokeragePerShare = t.quantity > 0 ? formatCSV(t.brokerage / t.quantity) : "0.00";
       const totalWithExpenseInclSTT = t.transactionType === "Buy" 
         ? t.turnover + t.totalExpensesInclSTT 
         : t.turnover - t.totalExpensesInclSTT;
@@ -382,20 +407,20 @@ export default function App() {
         `"${t.securityName.replace(/"/g, '""')}"`, 
         `"${t.transactionType}"`, 
         t.quantity, 
-        t.avgPrice.toFixed(numDecimals),
-        t.turnover.toFixed(numDecimals),
+        formatCSV(t.avgPrice),
+        formatCSV(t.turnover),
         brokeragePerShare,
-        t.brokerage.toFixed(numDecimals),
-        t.stt.toFixed(numDecimals),
-        t.etc.toFixed(numDecimals),
-        t.sebiFees.toFixed(numDecimals),
-        ...(showIpf ? [t.ipf.toFixed(numDecimals)] : []),
-        isIntegrated ? t.gst.toFixed(numDecimals) : (t.igst || t.gst).toFixed(numDecimals),
-        t.stampDuty.toFixed(numDecimals),
-        t.totalExpensesInclSTT.toFixed(numDecimals),
-        t.totalExpensesExclSTT.toFixed(numDecimals),
-        totalWithExpenseInclSTT.toFixed(numDecimals),
-        totalWithExpenseExclSTT.toFixed(numDecimals),
+        formatCSV(t.brokerage),
+        formatCSV(t.stt),
+        formatCSV(t.etc),
+        formatCSV(t.sebiFees),
+        ...(showIpf ? [formatCSV(t.ipf)] : []),
+        isIntegrated ? formatCSV(t.gst) : formatCSV(t.igst || t.gst),
+        formatCSV(t.stampDuty),
+        formatCSV(t.totalExpensesInclSTT),
+        formatCSV(t.totalExpensesExclSTT),
+        formatCSV(totalWithExpenseInclSTT),
+        formatCSV(totalWithExpenseExclSTT),
         `"${t.tradeType}"`
       ];
     });
@@ -407,19 +432,19 @@ export default function App() {
       '', // Transaction Type
       '', // Number of Shares
       '', // Avg Price
-      calculatedTotals.gross.toFixed(numDecimals), // Total Amount (Turnover)
+      formatCSV(calculatedTotals.gross), // Total Amount (Turnover)
       '', // Brokerage Per Share
-      calculatedTotals.brokerage.toFixed(numDecimals), // Total Brokerage
-      calculatedTotals.stt.toFixed(numDecimals), // STT
-      calculatedTotals.etc.toFixed(numDecimals), // Exchange Turnover Charges
-      calculatedTotals.sebiFees.toFixed(numDecimals), // SEBI Turnover Fees
-      ...(showIpf ? [calculatedTotals.ipf.toFixed(numDecimals)] : []), // IPF Charges
-      isIntegrated ? calculatedTotals.gst.toFixed(numDecimals) : calculatedTotals.igst.toFixed(numDecimals), // IGST / GST
-      calculatedTotals.stampDuty.toFixed(numDecimals), // Stamp Duty
-      calculatedTotals.totalExpensesInclSTT.toFixed(numDecimals), // Total Expenses (incl STT)
-      calculatedTotals.totalExpensesExclSTT.toFixed(numDecimals), // Total Expenses (excl STT)
-      calculatedTotals.totalAmountWithExpenseInclSTT.toFixed(numDecimals), // Total Amount with Expense (Incl STT)
-      calculatedTotals.totalAmountWithExpenseExclSTT.toFixed(numDecimals), // Total Amount with Expense (Excl STT)
+      formatCSV(calculatedTotals.brokerage), // Total Brokerage
+      formatCSV(calculatedTotals.stt), // STT
+      formatCSV(calculatedTotals.etc), // Exchange Turnover Charges
+      formatCSV(calculatedTotals.sebiFees), // SEBI Turnover Fees
+      ...(showIpf ? [formatCSV(calculatedTotals.ipf)] : []), // IPF Charges
+      isIntegrated ? formatCSV(calculatedTotals.gst) : formatCSV(calculatedTotals.igst), // IGST / GST
+      formatCSV(calculatedTotals.stampDuty), // Stamp Duty
+      formatCSV(calculatedTotals.totalExpensesInclSTT), // Total Expenses (incl STT)
+      formatCSV(calculatedTotals.totalExpensesExclSTT), // Total Expenses (excl STT)
+      formatCSV(calculatedTotals.totalAmountWithExpenseInclSTT), // Total Amount with Expense (Incl STT)
+      formatCSV(calculatedTotals.totalAmountWithExpenseExclSTT), // Total Amount with Expense (Excl STT)
       '', // Trade Class
     ];
 
@@ -1883,21 +1908,21 @@ export default function App() {
                 )}
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight fractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight fractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight fractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
                   {data?.brokerName === 'integrated' ? (
-                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
                   ) : (
-                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
                   )}
-                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} fractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
                   )}
                 </div>
 
@@ -1943,7 +1968,7 @@ export default function App() {
                           : t.turnover - t.totalExpensesExclSTT;
 
                         const numDigits = isShareIndia ? 4 : 2;
-                        const fmt = (val: number) => val.toLocaleString('en-IN', { minimumFractionDigits: numDigits, maximumFractionDigits: numDigits });
+                        const fmt = (val: number) => val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: isShareIndia ? 4 : 2 });
 
                         return (
                            <tr key={t.id} className="hover:bg-slate-50 transition-colors">
@@ -1954,7 +1979,7 @@ export default function App() {
                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
                             </td>
                             <td className="px-6 py-4 text-right font-semibold text-slate-700 bg-slate-50/10">{t.quantity}</td>
-                            <td className="px-6 py-4 text-right text-slate-700 bg-slate-50/10 border-r border-slate-200">₹{t.avgPrice.toFixed(numDigits)}</td>
+                            <td className="px-6 py-4 text-right text-slate-700 bg-slate-50/10 border-r border-slate-200">₹{fmt(t.avgPrice)}</td>
                             <td className="px-6 py-4 text-right font-bold text-emerald-950 bg-emerald-50/15 border-r border-emerald-100/30">₹{fmt(t.turnover)}</td>
                             <td className="px-6 py-4 text-right font-semibold text-blue-800 bg-blue-50/15 border-r border-blue-100/30">₹{fmt(t.brokerage)}</td>
                             <td className="px-6 py-4 text-right font-bold text-rose-700 bg-rose-50/20 border-r border-rose-100/30">₹{fmt(t.stt)}</td>
@@ -1974,7 +1999,7 @@ export default function App() {
                             <td className="px-6 py-4 text-right text-indigo-950 font-extrabold bg-indigo-50/25 border-r border-indigo-100/40">₹{fmt(totalInclSTT)}</td>
                             <td className="px-6 py-4 text-right text-sky-950 font-bold bg-sky-50/20 border-r border-sky-100/40">₹{fmt(totalExclSTT)}</td>
                             <td className={`px-6 py-4 text-right font-black border-r border-slate-200 ${t.netTotalBeforeLevies >= 0 ? 'text-emerald-700 bg-emerald-50/10' : 'text-rose-700 bg-rose-50/10'}`}>
-                              {t.netTotalBeforeLevies >= 0 ? '+' : ''}{t.netTotalBeforeLevies.toLocaleString('en-IN', { minimumFractionDigits: numDigits, maximumFractionDigits: numDigits })}
+                              {t.netTotalBeforeLevies >= 0 ? '+' : ''}{fmt(t.netTotalBeforeLevies)}
                             </td>
                             <td className="px-6 py-4 text-center bg-violet-50/10">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-150 text-indigo-800' : 'bg-amber-150 text-amber-800'}`}>{t.tradeType}</span>
