@@ -85,6 +85,7 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
   let id = 0;
   let mergedBrokerName = "";
   let mergedTradeDate = "";
+  let mergedUcc = "";
   
   results.forEach(r => {
     summary.payinObligation += r.summary.payinObligation; 
@@ -104,10 +105,11 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
     r.trades.forEach(t => trades.push({ ...t, id: `tx-merged-${id++}` }));
     if (r.brokerName) mergedBrokerName = r.brokerName;
     if (r.tradeDate) mergedTradeDate = r.tradeDate;
+    if (r.ucc) mergedUcc = r.ucc;
   });
   
   trades.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
-  return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate };
+  return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate, ucc: mergedUcc };
 };
 export const detectFormat = (html: string): "integrated" | "standard" | "zerodha" => {
   const broker = detectBroker(html, false);

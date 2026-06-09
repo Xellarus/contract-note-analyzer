@@ -1636,7 +1636,15 @@ export default function App() {
                     </div>
                   </div>
                   
-                  <div className="relative z-10 p-6 sm:p-10 w-full md:w-auto flex items-center justify-start md:justify-end">
+                  <div className="relative z-10 p-6 sm:p-10 w-full md:w-auto flex flex-col sm:flex-row gap-4 items-center justify-start md:justify-end">
+                    {data.brokerName === 'shareindia' && data.ucc && (
+                      <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 hover:shadow-2xl transition-all relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
+                        {/* Subtle highlight in the UCC card */}
+                        <div className="absolute inset-x-0 top-0 h-px bg-slate-600 opacity-40"></div>
+                        <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-0.5 leading-none">UCC</span>
+                        <span className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white leading-none mt-1">{data.ucc}</span>
+                      </div>
+                    )}
                     {data.tradeDate && (
                       <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 hover:shadow-2xl transition-all relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
                         {/* Subtle highlight in the date card */}

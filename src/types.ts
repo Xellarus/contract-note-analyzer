@@ -64,6 +64,7 @@ export interface ContractNoteResult {
   trades: Trade[];
   brokerName?: string;
   tradeDate?: string;
+  ucc?: string;
   reconciliation?: ReconciliationStatus;
   rawText?: string;
 }

@@ -5,6 +5,7 @@ import {
   cleanText,
   isFootnoteOrDisclaimer,
   getTradeDate,
+  getUCC,
   calculateReconciliation
 } from './utils';
 
@@ -23,6 +24,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const summary = this.extractSummary(doc);
     const tradeDate = getTradeDate(doc);
+    const ucc = getUCC(doc);
     const rawTrades = this.extractTrades(doc);
 
     if (rawTrades.length === 0) {
@@ -45,12 +47,13 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "sh");
+    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "sh", ucc);
   }
 
   async parsePdfText(text: string): Promise<ContractNoteResult | null> {
     const summary = this.extractSummaryFromText(text);
     const tradeDate = getTradeDate(text);
+    const ucc = getUCC(text);
     const rawTrades = this.extractTradesFromText(text);
 
     if (rawTrades.length === 0) {
@@ -73,7 +76,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "s");
+    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "s", ucc);
   }
 
   private mergeSummaries(main: Summary, fallback: Summary): Summary {
@@ -649,7 +652,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     return trades;
   }
 
-  private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
+  private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string, ucc?: string): ContractNoteResult {
     const rt = (n: number) => Math.round((n + Number.EPSILON) * 10000) / 10000;
 
     // Zero out IPF for Share India broker
@@ -869,6 +872,6 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
 
     const brokerName = "shareindia";
     const reconciliation = calculateReconciliation(summary, trades);
-    return { summary, trades, brokerName, tradeDate, reconciliation };
+    return { summary, trades, brokerName, tradeDate, ucc, reconciliation };
   }
 }

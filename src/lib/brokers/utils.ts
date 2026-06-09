@@ -82,6 +82,77 @@ export const getTradeDate = (doc: Document | string): string => {
   return "";
 };
 
+export const getUCC = (doc: Document | string): string => {
+  const textContent = typeof doc === 'string' 
+    ? doc 
+    : (doc.body?.textContent || doc.documentElement?.textContent || "");
+
+  if (!textContent) return "";
+
+  // 1. Normalize all spaces, tabs, newlines, and non-breaking spaces (\u00a0) to clean single spaces
+  const normalized = textContent
+    .replace(/[\u00a0\s\t\n\r]+/g, ' ')
+    .trim();
+
+  const blacklist = [
+    "no", "na", "trade", "date", "contract", "client", "code", "pan", "number", "name", 
+    "limited", "pvt", "india", "broker", "member", "sebi", "bse", "nse", "invoice", 
+    "tax", "note", "summary", "page", "for", "the", "and", "with", "from", "oblig", 
+    "charges", "stt", "gst", "total", "sgst", "cgst", "igst", "isin", "symbol", 
+    "qty", "quantity", "price", "net", "gross", "buy", "sell", "segment", "fno", 
+    "derivatives", "sh", "co", "address", "tel", "fax", "email"
+  ];
+
+  // 2. Global search for UCC/Client Code/Client ID using regex capture groups
+  // This matches terms like "Client Code (UCC)", "Client Code(UCC)", "Client Code", "Client ID", "UCC"
+  // followed optional special chars like colons, hyphens, pipes, or spaces, and grabs the alphanumeric token.
+  const regex = /(?:client\s*code\s*\(?\s*ucc\s*\)?|client\s*code|client\s*id|ucc)\s*[:\-\u2014|]*\s*([A-Za-z0-9]{3,15})/gi;
+
+  let match;
+  while ((match = regex.exec(normalized)) !== null) {
+    const val = match[1].trim().toUpperCase();
+    if (val && !blacklist.some(b => val.toLowerCase() === b || val.toLowerCase().includes(b))) {
+      return val;
+    }
+  }
+
+  // Sibling lookup fallback for DOM Document if regex on raw text didn't match
+  if (typeof doc !== 'string') {
+    const elements = Array.from(doc.querySelectorAll("td, th, p, span, div, font, b, strong"));
+    for (const el of elements) {
+      const txt = (el.textContent || "").toLowerCase();
+      if (txt.includes("client code") || txt.includes("ucc")) {
+        // First check inside the element itself if it contains a value
+        const elText = el.textContent || "";
+        const inlineMatch = elText.match(/(?:client\s*code\s*\(?\s*ucc\s*\)?|client\s*code|client\s*id|ucc)\s*[:\-\u2014|]*\s*([A-Za-z0-9]{3,15})/i);
+        if (inlineMatch && inlineMatch[1]) {
+          const val = inlineMatch[1].trim().toUpperCase();
+          if (val && !blacklist.some(b => val.toLowerCase() === b || val.toLowerCase().includes(b))) {
+            return val;
+          }
+        }
+
+        // Try checking sibling components
+        let next = el.nextElementSibling;
+        let count = 0;
+        while (next && count < 4) {
+          const nextTxt = next.textContent || "";
+          if (nextTxt.trim().length > 0) {
+            const cleanToken = nextTxt.trim().split(/\s+/)[0].replace(/[^A-Za-z0-9]/g, '');
+            if (cleanToken && cleanToken.length >= 3 && cleanToken.length <= 15 && !blacklist.some(b => cleanToken.toLowerCase() === b || cleanToken.toLowerCase().includes(b))) {
+              return cleanToken.toUpperCase();
+            }
+            count++;
+          }
+          next = next.nextElementSibling;
+        }
+      }
+    }
+  }
+
+  return "";
+};
+
 export const extractTextFromPDF = async (file: File, password?: string): Promise<string> => {
   const arrayBuffer = await file.arrayBuffer();
   try {
