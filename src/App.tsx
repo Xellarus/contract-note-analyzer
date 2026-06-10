@@ -1,3 +1,4 @@
+import { jwtDecode } from "jwt-decode";
 import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
@@ -7,6 +8,7 @@ import {
   Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { GoogleLogin } from '@react-oauth/google';
 import { ContractNoteResult, ReconciliationStatus } from './types';
 import { processFile, mergeResults, calculateReconciliation } from './lib/parsers';
 import CsvAuditor from './components/CsvAuditor';
@@ -47,6 +49,7 @@ const MAX_FILES = 25;
 export default function App() {
   const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
   const [data, setData] = useState<ContractNoteResult | null>(null);
+  const [showRawText, setShowRawText] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
   const isShareIndia = data?.brokerName === 'shareindia';
 
@@ -1043,7 +1046,23 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex-1 flex justify-end">
+        <div className="flex-1 flex justify-end items-center gap-3">
+     <GoogleLogin
+  onSuccess={(credentialResponse) => {
+    console.log("Login Success:", credentialResponse);
+
+    if (credentialResponse.credential) {
+      const decoded: any = jwtDecode(credentialResponse.credential);
+
+      console.log(decoded);
+
+      alert(`Logged in as ${decoded.email}`);
+    }
+  }}
+  onError={() => {
+    console.log("Login Failed");
+  }}
+/>
           <button
             id="btn-open-menu"
             onClick={() => setIsDrawerOpen(true)}
@@ -2018,6 +2037,45 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+
+                {data.rawText && (
+                  <div className="bg-slate-900 text-slate-100 rounded-3xl border border-slate-800 shadow-xl overflow-hidden p-6 mt-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex items-start gap-3">
+                        <div className="p-2 bg-slate-800 rounded-xl border border-slate-700 text-slate-300">
+                          <FileText className="w-5 h-5 text-indigo-400" />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-base text-white font-sans">Raw PDF/HTML Extracted Text</h3>
+                          <p className="text-xs text-slate-400 font-sans mt-0.5">Below is the literal, whitespace-normalized text extracted from your document, used directly by the parser regex engines.</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setShowRawText(!showRawText)}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shrink-0"
+                      >
+                        {showRawText ? "Hide Parsed Text" : "Show Parsed Text"}
+                      </button>
+                    </div>
+                    {showRawText && (
+                      <div className="mt-4 relative">
+                        <textarea
+                          readOnly
+                          value={data.rawText}
+                          className="w-full h-85 bg-slate-950 text-slate-300 font-mono text-xs p-4 rounded-xl border border-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 leading-relaxed overflow-y-auto resize-y"
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(data.rawText || '');
+                          }}
+                          className="absolute right-4 top-4 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white px-2.5 py-1.5 rounded-md text-[10px] font-mono transition-colors border border-slate-700 cursor-pointer"
+                        >
+                          Copy Text
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

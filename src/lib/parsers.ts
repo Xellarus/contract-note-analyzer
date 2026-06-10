@@ -108,8 +108,10 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
     if (r.ucc) mergedUcc = r.ucc;
   });
   
+  const mergedRawText = results.map(r => r.rawText).filter(Boolean).join("\n\n=== NEXT FILE ===\n\n");
+  
   trades.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
-  return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate, ucc: mergedUcc };
+  return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate, ucc: mergedUcc, rawText: mergedRawText };
 };
 export const detectFormat = (html: string): "integrated" | "standard" | "zerodha" => {
   const broker = detectBroker(html, false);
