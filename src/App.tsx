@@ -526,15 +526,15 @@ export default function App() {
   });
 
   const [currentUser, setCurrentUser] = useState<PortfolioUser | null>(() => {
-    const saved = localStorage.getItem('portfolio_user');
-    if (saved) return JSON.parse(saved);
-    // Auto-login default guest user for premium development bypass
-    return {
-      email: "guest@saguncapital.com",
-      name: "Guest Investor",
-      picture: "https://lh3.googleusercontent.com/a/default-user=s96-c",
-      given_name: "Guest"
-    };
+    // No auto-login bypass: a session is restored only from a previously-saved
+    // Google sign-in. With nothing saved, currentUser stays null and the Login
+    // page is shown — so the deployed app always requires signing in.
+    try {
+      const saved = localStorage.getItem('portfolio_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
   });
 
   const [currentView, setCurrentView] = useState<'dashboard' | 'holdings' | 'imports' | 'reports'>(() => {
