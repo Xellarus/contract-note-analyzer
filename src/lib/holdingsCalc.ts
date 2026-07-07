@@ -1,10 +1,11 @@
 import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
-  normName, loadScripMaster, resolveScrip, ScripMaster, ScripEntry,
+  normName, loadScripMaster, resolveScrip, lookupScrip, ScripMaster, ScripEntry,
   SCRIP_MASTER_SPREADSHEET_ID,
 } from "./scripMaster";
 import { loadScripPrices, makePriceResolver } from "./scripPrices";
+import { loadScripIndustries, makeIndustryResolver } from "./scripIndustries";
 import { loadCorporateActions, CorpAction } from "./corporateActions";
 
 export interface UnresolvedScrip {
@@ -475,6 +476,72 @@ export async function computeAum(portfolios: { id: string; label: string; sheetI
     perPortfolio: per,
     fullyPriced: !anyUnpriced,
   };
+}
+
+export interface IndustrySlice {
+  industry: string;
+  companies: number;   // distinct held companies in this industry (across all portfolios)
+  invested: number;    // Σ cost of those holdings
+  current: number;     // Σ current value (CMP where priced, else cost)
+}
+export interface IndustryAllocationResult {
+  slices: IndustrySlice[];  // sorted: most companies first
+  totalCompanies: number;   // distinct companies across all portfolios
+  classified: number;       // companies with a known (non-"Unclassified") industry
+}
+
+/**
+ * Sector/industry allocation across the given portfolios: reads each "Holding"
+ * tab, maps every distinct held company (deduped by canonical scrip key across
+ * portfolios, so a stock in two portfolios is ONE company) to its industry (from
+ * the screener-imported Industries tab, else "Unclassified"), and counts
+ * companies per industry. Read-only. Slice size is by company COUNT — the more
+ * companies in an industry, the bigger the slice.
+ */
+export async function computeIndustryAllocation(portfolios: { id: string; label: string; sheetId: string }[]): Promise<IndustryAllocationResult> {
+  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null);
+  const prices = await loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).catch(() => []);
+  const industries = await loadScripIndustries(SCRIP_MASTER_SPREADSHEET_ID).catch(() => []);
+  const cmpOf = makePriceResolver(master, prices);
+  const industryOf = makeIndustryResolver(master, industries);
+
+  const toN = (v: any) => { const n = parseFloat((v ?? "").toString().replace(/,/g, "").trim()); return isNaN(n) ? NaN : n; };
+
+  const companies = new Map<string, { industry: string; invested: number; current: number }>();
+  for (const p of portfolios) {
+    try {
+      const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: p.sheetId, range: "Holding!A:E" });
+      const rows: any[][] = res?.result?.values || [];
+      for (let i = 1; i < rows.length; i++) {
+        const r = rows[i]; if (!r) continue;
+        const name = (r[0] || "").toString().trim();
+        if (!name || /^total/i.test(name)) continue;
+        const isin = (r[1] || "").toString().trim();
+        const qty = toN(r[2]); const avg = toN(r[3]); const investedVal = toN(r[4]);
+        if (isNaN(qty) || qty <= 0) continue;
+        let key = (isin || "").trim().toUpperCase() || normName(name);
+        if (master) { const e = lookupScrip(master, isin, name).entry; if (e) key = e.key; }
+        const industry = industryOf(isin, name) || "Unclassified";
+        const cmp = cmpOf(isin, name);
+        const cur = qty * (cmp !== undefined ? cmp : (isNaN(avg) ? 0 : avg));
+        const inv = isNaN(investedVal) ? qty * (isNaN(avg) ? 0 : avg) : investedVal;
+        const prev = companies.get(key);
+        if (prev) { prev.invested += inv; prev.current += cur; }  // same company in another portfolio
+        else companies.set(key, { industry, invested: inv, current: cur });
+      }
+    } catch { /* Holding tab missing/unreadable → contributes nothing */ }
+  }
+
+  const byInd = new Map<string, IndustrySlice>();
+  let classified = 0;
+  for (const c of companies.values()) {
+    if (c.industry !== "Unclassified") classified++;
+    let s = byInd.get(c.industry);
+    if (!s) { s = { industry: c.industry, companies: 0, invested: 0, current: 0 }; byInd.set(c.industry, s); }
+    s.companies++; s.invested += c.invested; s.current += c.current;
+  }
+  const slices = [...byInd.values()].sort((a, b) => (b.companies - a.companies) || (b.current - a.current));
+  return { slices, totalCompanies: companies.size, classified };
 }
 
 export interface CapitalGainsResult {

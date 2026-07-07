@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Wallet, RefreshCw, Loader2, AlertCircle, TrendingUp, TrendingDown, ArrowRight } from 'lucide-react';
+import { Wallet, RefreshCw, Loader2, AlertCircle, TrendingUp, TrendingDown, ArrowRight, PieChart } from 'lucide-react';
 import { PortfolioHolding } from '../types';
-import { computeAum, AumResult } from '../lib/holdingsCalc';
+import { computeAum, AumResult, computeIndustryAllocation, IndustryAllocationResult } from '../lib/holdingsCalc';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
 
@@ -16,8 +16,14 @@ interface DashboardProps {
 const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const cr = (n: number) => (n / 1e7).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' Cr';
 
+// Palette for the sector-allocation donut. "Unclassified" always renders grey.
+const PIE_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#a855f7', '#0ea5e9', '#eab308', '#f43f5e', '#22c55e', '#d946ef'];
+const UNCLASSIFIED_COLOR = '#94a3b8';
+const sliceColor = (industry: string, i: number) => (industry === 'Unclassified' ? UNCLASSIFIED_COLOR : PIE_COLORS[i % PIE_COLORS.length]);
+
 export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
   const [aum, setAum] = useState<AumResult | null>(null);
+  const [alloc, setAlloc] = useState<IndustryAllocationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,11 +34,13 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
     }
     setLoading(true);
     setError(null);
+    const list = PORTFOLIOS.map(p => ({ id: p.id, label: p.label, sheetId: p.sheetId }));
     try {
-      const res = await computeAum(PORTFOLIOS.map(p => ({ id: p.id, label: p.label, sheetId: p.sheetId })));
-      setAum(res);
-    } catch (e: any) {
-      setError(e?.result?.error?.message || e?.message || 'Could not compute AUM.');
+      // Run AUM + sector allocation together; a failure in one doesn't block the other.
+      const [aumRes, allocRes] = await Promise.allSettled([computeAum(list), computeIndustryAllocation(list)]);
+      if (aumRes.status === 'fulfilled') setAum(aumRes.value);
+      else setError(aumRes.reason?.result?.error?.message || aumRes.reason?.message || 'Could not compute AUM.');
+      if (allocRes.status === 'fulfilled') setAlloc(allocRes.value);
     } finally {
       setLoading(false);
     }
@@ -106,6 +114,67 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{error}</span>
         </div>
       )}
+
+      {/* Sector allocation — donut sized by number of companies per industry */}
+      {alloc && alloc.totalCompanies > 0 && (() => {
+        const total = alloc.totalCompanies;
+        const cx = 120, cy = 120, r = 88, w = 40;
+        const circ = 2 * Math.PI * r;
+        const single = alloc.slices.length === 1;
+        let offset = 0;
+        return (
+          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-6">
+            <div className="flex items-center gap-2 mb-1">
+              <PieChart className="w-4 h-4 text-indigo-600" />
+              <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight">Sector Allocation</h3>
+            </div>
+            <p className="text-[11px] text-slate-500 mb-4">
+              {total} distinct compan{total === 1 ? 'y' : 'ies'} across all portfolios · slice size = number of companies in the sector.
+            </p>
+            <div className="flex flex-col sm:flex-row items-center gap-6">
+              {/* Donut */}
+              <div className="relative shrink-0" style={{ width: 240, height: 240 }}>
+                <svg viewBox="0 0 240 240" className="w-full h-full -rotate-90">
+                  {single ? (
+                    <circle cx={cx} cy={cy} r={r} fill="none" stroke={sliceColor(alloc.slices[0].industry, 0)} strokeWidth={w} />
+                  ) : alloc.slices.map((s, i) => {
+                    const len = (s.companies / total) * circ;
+                    const el = (
+                      <circle key={i} cx={cx} cy={cy} r={r} fill="none"
+                        stroke={sliceColor(s.industry, i)} strokeWidth={w}
+                        strokeDasharray={`${len} ${circ - len}`} strokeDashoffset={-offset}>
+                        <title>{`${s.industry}: ${s.companies} (${((s.companies / total) * 100).toFixed(0)}%)`}</title>
+                      </circle>
+                    );
+                    offset += len;
+                    return el;
+                  })}
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <span className="text-3xl font-black text-slate-800 tabular-nums">{total}</span>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">companies</span>
+                </div>
+              </div>
+              {/* Legend */}
+              <div className="flex-1 w-full grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1.5 max-h-[240px] overflow-y-auto">
+                {alloc.slices.map((s, i) => (
+                  <div key={i} className="flex items-center gap-2 text-[12px]">
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sliceColor(s.industry, i) }} />
+                    <span className="text-slate-700 font-medium truncate flex-1" title={s.industry}>{s.industry}</span>
+                    <span className="text-slate-500 font-mono shrink-0">{s.companies}</span>
+                    <span className="text-slate-400 font-mono shrink-0 w-9 text-right">{((s.companies / total) * 100).toFixed(0)}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {alloc.classified < total && (
+              <p className="mt-4 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {total - alloc.classified} compan{total - alloc.classified === 1 ? 'y is' : 'ies are'} unclassified — import a screener.in CSV with an Industry column (Imports → Securities &amp; Prices) to classify them.
+              </p>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Per-portfolio breakdown */}
       {aum && (

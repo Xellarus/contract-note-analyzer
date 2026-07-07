@@ -11,9 +11,10 @@
 export interface ScreenerSecurity {
   isin: string;
   name: string;
-  bse: string;   // numeric BSE scrip code
-  nse: string;   // NSE symbol
-  price: number; // Current Price (0 if absent/unparseable)
+  bse: string;      // numeric BSE scrip code
+  nse: string;      // NSE symbol
+  price: number;    // Current Price (0 if absent/unparseable)
+  industry: string; // Industry / Sector classification ("" if the column is absent)
 }
 
 // 12-char ISIN: 2-letter country + 9 alphanumerics + 1 check digit.
@@ -69,7 +70,7 @@ export function parseScreenerCsv(text: string): ScreenerSecurity[] {
   if (lines.length < 2) return [];
 
   const norm = (s: string) => s.toUpperCase().replace(/[^A-Z]/g, "");
-  let cols: { isin: number; name: number; price: number; bse: number; nse: number } | null = null;
+  let cols: { isin: number; name: number; price: number; bse: number; nse: number; industry: number } | null = null;
   let headerIdx = -1;
   for (let i = 0; i < Math.min(lines.length, 10); i++) {
     const cells = splitCsvLine(lines[i]).map(norm);
@@ -80,7 +81,8 @@ export function parseScreenerCsv(text: string): ScreenerSecurity[] {
     if (price < 0) price = cells.findIndex(c => c.startsWith("CMP") || c.startsWith("CURRENTPRICE"));
     const bse = find("BSECODE", "BSE");
     const nse = find("NSECODE", "NSE", "NSESYMBOL", "SYMBOL");
-    if (isin >= 0 && name >= 0 && price >= 0) { headerIdx = i; cols = { isin, name, price, bse, nse }; break; }
+    const industry = find("INDUSTRY", "SECTOR", "INDUSTRYNAME", "SECTORNAME");
+    if (isin >= 0 && name >= 0 && price >= 0) { headerIdx = i; cols = { isin, name, price, bse, nse, industry }; break; }
   }
   if (!cols || headerIdx < 0) return [];
 
@@ -94,8 +96,9 @@ export function parseScreenerCsv(text: string): ScreenerSecurity[] {
     const name = (f[cols.name] || "").trim();
     const bse = cols.bse >= 0 ? (f[cols.bse] || "").trim() : "";
     const nse = cols.nse >= 0 ? (f[cols.nse] || "").trim().toUpperCase() : "";
+    const industry = cols.industry >= 0 ? (f[cols.industry] || "").trim() : "";
     const price = parseNum(f[cols.price] || "");
-    out.push({ isin, name, bse, nse, price: isNaN(price) ? 0 : price });
+    out.push({ isin, name, bse, nse, price: isNaN(price) ? 0 : price, industry });
   }
   return out;
 }

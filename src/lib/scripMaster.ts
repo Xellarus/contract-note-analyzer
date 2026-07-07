@@ -54,6 +54,7 @@ export interface ScripEntry {
   pendingPersist: boolean;  // a user action created/changed this entry → append it on save
   nse?: string;             // NSE symbol (from the NSE column), for display
   bse?: string;             // BSE scrip code (from the BSE column), for display
+  industry?: string;        // Industry / Sector (from a screener import), for the allocation chart
 }
 
 export interface ScripMaster {
@@ -153,7 +154,7 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
     const tab = await firstSheetTitle(spreadsheetId);
     const res: any = await (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${quoteTab(tab)}!A1:F50000`,  // F tolerates a legacy "BSE Code" column
+      range: `${quoteTab(tab)}!A1:J50000`,  // wide enough for BSE Code / Tally Name / Industry extras
     });
     const rows: any[][] = res?.result?.values || [];
     if (rows.length > 0) {
@@ -168,12 +169,13 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
       // The FIRST name-like column wins: user-added extras like "Tally Name" must
       // not steal ci.name (a hijacked, mostly-blank name column made every entry's
       // canonical name fall back to its ISIN). Any unrecognised column is ignored.
-      const ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: 4, bsecode: -1 };
+      const ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: 4, bsecode: -1, industry: -1 };
       if (hasHeader) {
         let nameSet = false;
         header.forEach((h: string, idx: number) => {
           if (/isin/.test(h)) ci.isin = idx;
           else if (/alias/.test(h)) ci.alias = idx;
+          else if (/industry|sector/.test(h)) ci.industry = idx;
           else if (/code/.test(h)) ci.bsecode = idx;
           else if (/bse/.test(h)) ci.bse = idx;
           else if (/nse/.test(h)) ci.nse = idx;
@@ -209,6 +211,9 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
         // Keep NSE symbol / BSE code for display (separate from the alias index).
         if (nse && !entry.nse) entry.nse = nse;
         if (bseParts.length > 0 && !entry.bse) entry.bse = bseParts.join(", ");
+        // Industry / sector (from a screener import) — for the allocation chart.
+        const industry = ci.industry >= 0 ? (r[ci.industry] || "").toString().trim() : "";
+        if (industry && !entry.industry) entry.industry = industry;
       }
     }
   } catch (e) {
@@ -411,9 +416,9 @@ export async function saveScripMaster(spreadsheetId: string, master: ScripMaster
 export async function appendScreenerSecurities(
   spreadsheetId: string,
   master: ScripMaster,
-  securities: { isin: string; name: string; bse: string; nse: string }[],
+  securities: { isin: string; name: string; bse: string; nse: string; industry?: string }[],
 ): Promise<{ added: number; skipped: number; addedNames: string[] }> {
-  const toAdd: { isin: string; name: string; bse: string; nse: string }[] = [];
+  const toAdd: { isin: string; name: string; bse: string; nse: string; industry: string }[] = [];
   const seen = new Set<string>();
   const seenNames = new Set<string>();
   for (const s of securities) {
@@ -426,10 +431,14 @@ export async function appendScreenerSecurities(
     if (nn && (master.byAliasNorm.has(nn) || seenNames.has(nn))) continue;
     seen.add(isin);
     if (nn) seenNames.add(nn);
-    toAdd.push({ isin, name: s.name, bse: s.bse, nse: s.nse });
+    toAdd.push({ isin, name: s.name, bse: s.bse, nse: s.nse, industry: (s.industry || "").trim() });
   }
   if (toAdd.length === 0) return { added: 0, skipped: securities.length, addedNames: [] };
 
+  // Append new securities as ISIN | Security Name | BSE | NSE | Alias name (A–E).
+  // Industry is NOT stored here — the scrip master is append-only, so it can't
+  // refresh the industry of the (many) securities already present. Industry lives
+  // in its own upsert-by-ISIN "Industries" tab instead (see scripIndustries.ts).
   const tab = await firstSheetTitle(spreadsheetId);
   const values = toAdd.map(s => [s.isin, s.name, s.bse || "", s.nse || "", ""]);
   await (gapi.client as any).sheets.spreadsheets.values.append({
@@ -445,6 +454,7 @@ export async function appendScreenerSecurities(
     const entry = makeEntry(s.name || s.isin, s.isin, [s.bse, s.nse].filter(Boolean), "confirmed");
     if (s.nse) entry.nse = s.nse;
     if (s.bse) entry.bse = s.bse;
+    if (s.industry) entry.industry = s.industry;
     indexEntry(master, entry);
   }
   invalidateScripCache();
