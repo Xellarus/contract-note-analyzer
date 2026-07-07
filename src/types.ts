@@ -20,6 +20,7 @@ export interface Trade {
   clearingCharges: number;
   stampDuty: number;
   ipf: number;
+  dmat?: number;            // Demat/DP charge (Integrated obligation detail); optional — other brokers omit it
   cgst: number;
   sgst: number;
   igst: number;
@@ -41,6 +42,7 @@ export interface Summary {
   clearingCharges: number;
   stampDuty: number;
   ipf: number;
+  dmat?: number;            // Demat/DP charge (Integrated obligation detail); optional — other brokers omit it
   netSettlement: number;
 }
 
@@ -68,3 +70,23 @@ export interface ContractNoteResult {
   reconciliation?: ReconciliationStatus;
   rawText?: string;
 }
+
+export interface PortfolioHolding {
+  id: string;
+  symbol: string;
+  name: string;
+  isin: string;
+  quantity: number;
+  avgCost: number;
+  currentPrice: number;
+  sector: string;
+}
+
+export interface PortfolioUser {
+  email: string;
+  name: string;
+  picture?: string;
+  given_name?: string;
+  family_name?: string;
+}
+

@@ -391,6 +391,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
       clearingCharges: [],
       stampDuty: [],
       ipf: [],
+      dmat: [],
       netSettlement: []
     };
 

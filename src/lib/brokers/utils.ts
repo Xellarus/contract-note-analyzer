@@ -1,8 +1,11 @@
 import { Summary, Trade, ReconciliationStatus } from '../../types';
 import * as pdfjs from 'pdfjs-dist';
+// Bundle the worker locally (Vite emits it as an app-origin asset) so PDF parsing
+// has no runtime dependency on unpkg.com — faster and works offline.
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 // Configure pdfjs worker
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 export const parseNumber = (str: string | null): number => {
   if (!str) return 0;
@@ -97,22 +100,28 @@ export const getUCC = (doc: Document | string): string => {
   const blacklist = [
     "no", "na", "trade", "date", "contract", "client", "code", "pan", "number", "name", 
     "limited", "pvt", "india", "broker", "member", "sebi", "bse", "nse", "invoice", 
-    "tax", "note", "summary", "page", "for", "the", "and", "with", "from", "oblig", 
+    "tax", "note", "summary", "page", "for", "the", "of", "and", "with", "from", "oblig", 
     "charges", "stt", "gst", "total", "sgst", "cgst", "igst", "isin", "symbol", 
     "qty", "quantity", "price", "net", "gross", "buy", "sell", "segment", "fno", 
-    "derivatives", "sh", "co", "address", "tel", "fax", "email"
+    "derivatives", "sh", "co", "address", "tel", "fax", "email", "to"
   ];
 
   // 2. Global search for UCC/Client Code/Client ID using regex capture groups
-  // This matches terms like "Client Code (UCC)", "Client Code(UCC)", "Client Code", "Client ID", "UCC"
+  // This matches terms like "UCC of Client", which is more specific, first.
+  // Then matches terms like "Client Code (UCC)", "Client Code(UCC)", "Client Code", "Client ID", "UCC"
   // followed optional special chars like colons, hyphens, pipes, or spaces, and grabs the alphanumeric token.
-  const regex = /(?:client\s*code\s*\(?\s*ucc\s*\)?|client\s*code|client\s*id|ucc)\s*[:\-\u2014|]*\s*([A-Za-z0-9]{3,15})/gi;
+  const regexes = [
+    /(?:ucc\s*of\s*client)\s*[:\-\u2014|.\s]*([A-Za-z0-9]{3,15})/gi,
+    /(?:client\s*code\s*\(?\s*ucc\s*\)?|client\s*code|client\s*id|ucc)\s*[:\-\u2014|]*\s*([A-Za-z0-9]{3,15})/gi
+  ];
 
-  let match;
-  while ((match = regex.exec(normalized)) !== null) {
-    const val = match[1].trim().toUpperCase();
-    if (val && !blacklist.some(b => val.toLowerCase() === b || val.toLowerCase().includes(b))) {
-      return val;
+  for (const r of regexes) {
+    let match;
+    while ((match = r.exec(normalized)) !== null) {
+      const val = match[1].trim().toUpperCase();
+      if (val && !blacklist.some(b => val.toLowerCase() === b || val.toLowerCase().includes(b))) {
+        return val;
+      }
     }
   }
 
@@ -124,7 +133,8 @@ export const getUCC = (doc: Document | string): string => {
       if (txt.includes("client code") || txt.includes("ucc")) {
         // First check inside the element itself if it contains a value
         const elText = el.textContent || "";
-        const inlineMatch = elText.match(/(?:client\s*code\s*\(?\s*ucc\s*\)?|client\s*code|client\s*id|ucc)\s*[:\-\u2014|]*\s*([A-Za-z0-9]{3,15})/i);
+        const inlineMatch = elText.match(/(?:ucc\s*of\s*client)\s*[:\-\u2014|.\s]*([A-Za-z0-9]{3,15})/i) ||
+                            elText.match(/(?:client\s*code\s*\(?\s*ucc\s*\)?|client\s*code|client\s*id|ucc)\s*[:\-\u2014|]*\s*([A-Za-z0-9]{3,15})/i);
         if (inlineMatch && inlineMatch[1]) {
           const val = inlineMatch[1].trim().toUpperCase();
           if (val && !blacklist.some(b => val.toLowerCase() === b || val.toLowerCase().includes(b))) {

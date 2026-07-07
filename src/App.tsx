@@ -1,17 +1,34 @@
-import { jwtDecode } from "jwt-decode";
+import { gapi } from "gapi-script";
 import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   Upload, X, Download, FileText, Info, CheckCircle2, AlertCircle, 
   ArrowRightLeft, ListChecks, Play, Trash2, PlusCircle, AlertTriangle, 
   RefreshCw, Check, ShieldAlert, Award, ChevronRight, Gauge,
-  Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3
+  Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3, Moon, Sun,
+  Briefcase, ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleLogin } from '@react-oauth/google';
-import { ContractNoteResult, ReconciliationStatus } from './types';
+import { useGoogleLogin } from '@react-oauth/google';
+import { ContractNoteResult, ReconciliationStatus, PortfolioHolding, PortfolioUser } from './types';
+import { persistGoogleToken, restoreGoogleToken, clearGoogleToken, hasValidGoogleToken } from './lib/googleAuth';
+import { logAccess, logImport } from './lib/accessLog';
+import { rebuildHoldingTab, syncCapitalGains } from './lib/holdingsCalc';
+import { ensureSheetTabs } from './lib/sheetTabs';
+import { normName, loadScripMaster, lookupScrip, SCRIP_MASTER_SPREADSHEET_ID, ScripMaster } from './lib/scripMaster';
+import { mapRecordsToHeader, headerKey, toIsoDate } from './lib/tradeRowSchema';
+import { PORTFOLIOS, portfolioByUcc, portfolioById, sheetIdForId, DEFAULT_PORTFOLIO_ID } from './lib/portfolios';
+import SecurityConfirmModal, { ConfirmSecurity } from './components/SecurityConfirmModal';
+import { toast, confirmDialog } from './components/ui/overlay';
+import { useVirtualRows } from './components/ui/useVirtualRows';
 import { processFile, mergeResults, calculateReconciliation } from './lib/parsers';
 import CsvAuditor from './components/CsvAuditor';
+import Dashboard from './components/Dashboard';
+import Holdings from './components/Holdings';
+import ImportHistory from './components/ImportHistory';
+import Login from './components/Login';
+import Reports from './components/Reports';
+import ScreenerImport from './components/ScreenerImport';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
 const SummaryCard = ({ 
@@ -44,10 +61,586 @@ const SummaryCard = ({
   </div>
 );
 
-const MAX_FILES = 25;
+const MAX_FILES = 31;
+
+// Best-effort trade date from a contract-note file name (broker files normally
+// carry it: "..._2024-05-03.pdf", "NJW724-03-05-2024.pdf", "20240503.pdf", …).
+// → epoch ms, or 0 when no recognisable date. Used only to order an over-limit
+// selection and label the cut-off — parsing the PDFs themselves would defeat
+// the point of warning *before* the heavy work.
+const dateFromFileName = (name: string): number => {
+  let m = name.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})/);          // yyyy mm dd
+  if (m) {
+    const y = +m[1], mo = +m[2], d = +m[3];
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return new Date(y, mo - 1, d).getTime();
+  }
+  m = name.match(/(\d{2})[-_.](\d{2})[-_.](20\d{2})/);                // dd mm yyyy
+  if (m) {
+    const d = +m[1], mo = +m[2], y = +m[3];
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return new Date(y, mo - 1, d).getTime();
+  }
+  return 0;
+};
 
 export default function App() {
+  useEffect(() => {
+    try {
+      // Record a "session resumed" row when a saved token is reused on load.
+      const logResume = () => {
+        try {
+          const u = JSON.parse(localStorage.getItem('portfolio_user') || 'null');
+          if (u?.email) logAccess('resume', u);
+        } catch { /* ignore */ }
+      };
+      if (typeof gapi !== 'undefined' && gapi && gapi.load) {
+        gapi.load("client:auth2", () => {
+          try {
+            const clientIDFromEnv = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || "";
+            const googleClientId = clientIDFromEnv.includes(".apps.googleusercontent.com")
+              ? clientIDFromEnv
+              : "1234567890-mockclientid.apps.googleusercontent.com";
+
+            gapi.client.init({
+              apiKey: "",
+              clientId: googleClientId,
+              scope: "https://www.googleapis.com/auth/spreadsheets",
+              discoveryDocs: [
+                "https://sheets.googleapis.com/$discovery/rest?version=v4",
+              ],
+            }).then(() => {
+              // Reuse a still-valid token from a previous session so the user
+              // doesn't have to reconnect Sheets after every page reload.
+              if (restoreGoogleToken()) logResume();
+            }).catch((err: any) => {
+              console.warn("Gapi initialization rejection: ", err);
+              if (restoreGoogleToken()) logResume();
+            });
+          } catch (err) {
+            console.warn("Gapi internal setup fail: ", err);
+          }
+        });
+      }
+    } catch (e) {
+      console.warn("Gapi element load exception: ", e);
+    }
+  }, []);
+
+  const [isImportingToSheets, setIsImportingToSheets] = useState(false);
+  const [sheetsImportStatus, setSheetsImportStatus] = useState<{ success?: boolean; error?: string } | null>(null);
+  // Post-upload security-name confirmation popup (Integrated notes carry ISIN)
+  const [securityConfirm, setSecurityConfirm] = useState<{ master: ScripMaster; securities: ConfirmSecurity[] } | null>(null);
+  // File name(s) of the most recently uploaded contract note(s), for the import log.
+  const [uploadedNoteNames, setUploadedNoteNames] = useState<string[]>([]);
+
+  const importToSheets = async () => {
+    if (!data) {
+      toast.error("No parsed contract note data available to import.");
+      return;
+    }
+
+    const token = gapi.client.getToken();
+    if (!token || !token.access_token) {
+      const confirmConnect = await confirmDialog({
+        title: 'Connect Google Sheets?',
+        body: 'Importing requires Google Sheets access. Authorize with Google now?',
+        confirmLabel: 'Connect',
+      });
+      if (confirmConnect) {
+        login();
+      }
+      return;
+    }
+
+    setIsImportingToSheets(true);
+    setSheetsImportStatus(null);
+
+    try {
+      const uccUpper = (data.ucc || "").trim().toUpperCase();
+      // Transaction reports have no UCC — route by the user's explicit pick.
+      // Contract notes carry their UCC, so keep auto-routing for those.
+      const isTxnReport = data.brokerName === 'transaction-report';
+      // Auto-route by the note's UCC; when it doesn't resolve (e.g. Zerodha notes
+      // carry no UCC) fall back to the user's manual destination pick.
+      const portfolioKey = isTxnReport
+        ? txnReportPortfolio
+        : (portfolioByUcc(uccUpper)?.id ?? txnReportPortfolio);
+      const spreadsheetId = sheetIdForId(portfolioKey);
+      // Create any missing required tabs. Case-insensitive and one request per
+      // tab — previously an existing tab with different casing made the whole
+      // batched creation fail, so the "Holding" tab silently never got created.
+      const requiredSheets = ["Raw Entry", "True Entry", "Holding"];
+      try {
+        await ensureSheetTabs(spreadsheetId, requiredSheets);
+      } catch (createErr) {
+        console.error("Failed to create missing sheet tabs:", createErr);
+      }
+
+      let existingSheetsMeta: any[] = [];
+      try {
+        const spreadsheetMeta = await (gapi.client as any).sheets.spreadsheets.get({
+          spreadsheetId: spreadsheetId,
+        });
+        existingSheetsMeta = spreadsheetMeta?.result?.sheets || [];
+      } catch (metaErr) {
+        console.warn("Failed to fetch spreadsheet metadata:", metaErr);
+      }
+
+      // Check if Raw Entry sheet has protection (locking), and add it if missing
+      const rawEntrySheet = existingSheetsMeta.find((s: any) => s.properties.title === "Raw Entry");
+      if (rawEntrySheet) {
+        const rawEntrySheetId = rawEntrySheet.properties.sheetId;
+        const hasProtection = rawEntrySheet.protectedRanges && rawEntrySheet.protectedRanges.some((p: any) => {
+          return p.range && p.range.sheetId === rawEntrySheetId;
+        });
+
+        if (!hasProtection) {
+          try {
+            await (gapi.client as any).sheets.spreadsheets.batchUpdate({
+              spreadsheetId: spreadsheetId,
+              resource: {
+                requests: [
+                  {
+                    addProtectedRange: {
+                      protectedRange: {
+                        range: {
+                          sheetId: rawEntrySheetId
+                        },
+                        description: "Locked Raw Entry Sheet",
+                        warningOnly: false,
+                        editors: {
+                          users: [],
+                          groups: [],
+                          domainUsersCanEdit: false
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            });
+            console.log("Successfully locked 'Raw Entry' sheet tab!");
+          } catch (protectErr) {
+            console.error("Failed to lock 'Raw Entry' sheet tab:", protectErr);
+          }
+        }
+      }
+
+      const isIntegrated = data.brokerName === 'integrated';
+      const showIpf = data.brokerName === 'integrated';
+
+      const numDecimals = data.brokerName === 'shareindia' ? 4 : 2;
+      const formatCSV = (val: number) => {
+        const fixed = val.toFixed(numDecimals);
+        if (numDecimals === 4) {
+          if (fixed.endsWith('00')) return fixed.slice(0, -2);
+          if (fixed.endsWith('0')) return fixed.slice(0, -1);
+        }
+        return fixed;
+      };
+
+      // Written only when a tab is still empty; existing tabs are written against
+      // their own header (header-aware append below). ISIN is no longer written.
+      const defaultHeader = [
+        "Trade Date", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price",
+        "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT",
+        "Exchange Turnover Charges", "SEBI Turnover Fees", ...(showIpf ? ["IPF Charges"] : []),
+        ...(isIntegrated ? ["Demat Charges"] : []), isIntegrated ? "Total GST" : "IGST",
+        "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)",
+        "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class",
+        // Stamped on every row so an import can be rewound (delete exactly its
+        // rows) later from the Import History view. Far-right, ignored by every
+        // downstream reader that matches columns by name.
+        "Import ID"
+      ];
+
+      // One id per import, written into the "Import ID" column of every row this
+      // upload appends. The Import Log records it so a later "Rewind" can find
+      // and delete precisely these rows.
+      const importBatchId = `IMP-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${Math.random().toString(36).slice(2, 7)}`;
+
+      // Resolve each security to its canonical name from the shared Scrip Master,
+      // so the rows written to Raw Entry / True Entry carry the official name
+      // (e.g. "Goodluck India Limited") rather than the raw parsed code ("GOODLUCK").
+      // Memoized — the same security repeats across fills and across existing rows.
+      let scripMaster: ScripMaster | null = null;
+      try {
+        scripMaster = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+      } catch (e) {
+        console.warn("Could not load Scrip Master for name resolution — keeping parsed names:", e);
+      }
+      // Best-effort canonical DISPLAY name written to the sheet — same resolution
+      // the confirmation popup uses (incl. unique token-subset), memoized.
+      const nameCache = new Map<string, string>();
+      const displayName = (isin: string, parsed: string): string => {
+        const ck = (isin || "") + "\t" + (parsed || "");
+        const hit = nameCache.get(ck);
+        if (hit !== undefined) return hit;
+        let out = parsed || "";
+        if (scripMaster) {
+          const entry = lookupScrip(scripMaster, (isin || "").trim(), parsed || "").entry;
+          if (entry) out = entry.canonicalName;
+        }
+        nameCache.set(ck, out);
+        return out;
+      };
+      // STABLE dedup identity (entry.key = isin || normName(canonicalName)), keyed
+      // identically on the existing-row and new-row sides so a re-import never
+      // duplicates/double-counts. EXACT match only — ISIN or exact normalized
+      // name/alias, deliberately NOT token-subset — so two genuinely different
+      // securities can never collapse to one key and silently drop a real trade.
+      // Falls back to the uppercased ISIN, else the normalized name.
+      const keyCache = new Map<string, string>();
+      const dedupKey = (isin: string, name: string): string => {
+        const code = (isin || "").trim().toUpperCase();
+        const ck = code + "\t" + (name || "");
+        const hit = keyCache.get(ck);
+        if (hit !== undefined) return hit;
+        let out = code || normName(name || "");
+        if (scripMaster) {
+          const e = (code && scripMaster.byIsin.get(code)) || scripMaster.byAliasNorm.get(normName(name || ""));
+          if (e) out = e.key;
+        }
+        keyCache.set(ck, out);
+        return out;
+      };
+
+      const records = data.trades.map(t => {
+        const brokeragePerShare = t.quantity > 0 ? formatCSV(t.brokerage / t.quantity) : "0.00";
+        const totalWithExpenseInclSTT = t.transactionType === "Buy"
+          ? t.turnover + t.totalExpensesInclSTT
+          : t.turnover - t.totalExpensesInclSTT;
+        const totalWithExpenseExclSTT = t.transactionType === "Buy"
+          ? t.turnover + t.totalExpensesExclSTT
+          : t.turnover - t.totalExpensesExclSTT;
+
+        return {
+          date: toIsoDate(t.tradeDate || ""),
+          name: displayName(t.isin || "", t.securityName || ""),
+          txType: t.transactionType || "",
+          qty: t.quantity,
+          price: formatCSV(t.avgPrice),
+          turnover: formatCSV(t.turnover),
+          brokeragePerShare,
+          brokerage: formatCSV(t.brokerage),
+          stt: formatCSV(t.stt),
+          exchangeCharges: formatCSV(t.etc),
+          sebiFees: formatCSV(t.sebiFees),
+          ipf: showIpf ? formatCSV(t.ipf) : "",
+          dmat: isIntegrated ? formatCSV(t.dmat || 0) : "",
+          gst: isIntegrated ? formatCSV(t.gst) : formatCSV(t.igst || t.gst),
+          stampDuty: formatCSV(t.stampDuty),
+          totalExpInclSTT: formatCSV(t.totalExpensesInclSTT),
+          totalExpExclSTT: formatCSV(t.totalExpensesExclSTT),
+          totalWithExpInclSTT: formatCSV(totalWithExpenseInclSTT),
+          totalWithExpExclSTT: formatCSV(totalWithExpenseExclSTT),
+          tradeClass: t.tradeType || "",
+          importId: importBatchId,
+          // Parsed ISIN kept for the dedup key only — not written to the sheet.
+          _isin: t.isin || "",
+        } as Record<string, any>;
+      });
+
+      // ── Dedup against existing True Entry so re-imports are idempotent ──
+      // Numeric-normalize qty/price (Sheets strips trailing zeros, so the
+      // written "960.10" reads back as "960.1") and ISO-normalize the date, so an
+      // existing DD-MM-YYYY row still matches a new ISO row for the same fill.
+      const numKey = (x: any) => {
+        const v = parseFloat((x ?? "").toString().replace(/,/g, "").trim());
+        return isNaN(v) ? (x ?? "").toString().trim() : String(v);
+      };
+      const rowKey = (date: any, type: any, id: string, qty: any, price: any) =>
+        [toIsoDate((date ?? "").toString().trim()), (type ?? "").toString().trim().toUpperCase(), id, numKey(qty), numKey(price)].join("|");
+
+      // Multiset of keys already present, so genuinely repeated same-day fills
+      // are kept while an identical re-upload (or contract-note/report overlap)
+      // is consumed and skipped.
+      const remaining = new Map<string, number>();
+      try {
+        const existingRes = await (gapi.client as any).sheets.spreadsheets.values.get({
+          spreadsheetId, range: "True Entry!A:T",
+        });
+        const exRows: any[][] = existingRes?.result?.values || [];
+        if (exRows.length > 1) {
+          const eh = exRows[0].map((h: any) => (h || "").toString().trim());
+          const ci = (n: string, fb: number) => { const i = eh.indexOf(n); return i >= 0 ? i : fb; };
+          // ISIN may be absent (column removed) — fall back to -1 (→ blank), never
+          // to a positional guess that would misread another column as the ISIN.
+          const di = ci("Trade Date", 0), ii = ci("ISIN", -1), ni = ci("Stock Name", 1), ti = ci("Transaction Type", 2), qi = ci("Number of Shares", 3), pi = ci("Avg Price", 4);
+          for (let i = 1; i < exRows.length; i++) {
+            const r = exRows[i]; if (!r || r.length === 0) continue;
+            // Identify the existing row by the SAME stable key new rows use (entry
+            // key from its ISIN/name), so a row previously written as "GOODLUCK" or
+            // with a blank/absent ISIN still matches and isn't duplicated.
+            const k = rowKey(r[di], r[ti], dedupKey(ii >= 0 ? r[ii] : "", r[ni]), r[qi], r[pi]);
+            remaining.set(k, (remaining.get(k) || 0) + 1);
+          }
+        }
+      } catch (e) {
+        console.warn("Could not read True Entry for dedup — importing all rows:", e);
+      }
+
+      const newRecords: Record<string, any>[] = [];
+      for (const rec of records) {
+        const k = rowKey(rec.date, rec.txType, dedupKey(rec._isin, rec.name), rec.qty, rec.price);
+        const have = remaining.get(k) || 0;
+        if (have > 0) remaining.set(k, have - 1); // already present — skip
+        else newRecords.push(rec);
+      }
+      const dupCount = records.length - newRecords.length;
+
+      const entrySheets = ["Raw Entry", "True Entry"];
+      for (const targetSheetName of entrySheets) {
+        // Align rows to whatever header the tab already has, so omitting ISIN
+        // never misaligns a sheet that still carries other columns; write
+        // defaultHeader only when the tab is still empty.
+        let header: string[] = [];
+        try {
+          const hRes = await (gapi.client as any).sheets.spreadsheets.values.get({
+            spreadsheetId, range: `${targetSheetName}!A1:Z1`,
+          });
+          header = ((hRes?.result?.values?.[0] as any[]) || []).map((h) => (h ?? "").toString()).filter((h) => h.trim() !== "");
+        } catch { /* treat as empty */ }
+        const isSheetEmpty = header.length === 0;
+        if (isSheetEmpty) {
+          header = defaultHeader;
+        } else {
+          // Auto-migrate: append any columns this importer needs that the tab
+          // doesn't have yet, to the END of the header (order is irrelevant —
+          // every downstream reader matches by header name), then rewrite row 1.
+          // Existing rows keep blank cells in the new columns.
+          //  • "Import ID" — for every broker, so any import can be rewound.
+          //  • IPF/Demat  — Integrated-only charge columns.
+          const needed = ["Import ID", ...(isIntegrated ? ["IPF Charges", "Demat Charges"] : [])];
+          const missing = needed.filter(n => !header.some(h => headerKey(h) === headerKey(n)));
+          if (missing.length) {
+            header = [...header, ...missing];
+            await (gapi.client as any).sheets.spreadsheets.values.update({
+              spreadsheetId, range: `${targetSheetName}!A1`,
+              valueInputOption: "RAW", resource: { values: [header] },
+            });
+          }
+        }
+
+        const dataRows = mapRecordsToHeader(header, newRecords);
+        const valuesToUpload: any[] = [];
+        if (isSheetEmpty) valuesToUpload.push(header);
+        valuesToUpload.push(...dataRows);
+
+        if (valuesToUpload.length === 0) {
+          console.log(`Sheet "${targetSheetName}": no new rows to append (all ${dupCount} already present).`);
+          continue;
+        }
+
+        const appendResponse = await (gapi.client as any).sheets.spreadsheets.values.append({
+          spreadsheetId: spreadsheetId,
+          range: `${targetSheetName}!A:Z`,
+          valueInputOption: "USER_ENTERED",
+          resource: {
+            values: valuesToUpload,
+          },
+        });
+        console.log(`Sheet "${targetSheetName}" Updated Successfully:`, appendResponse);
+      }
+
+      // (The shared scrip list is curated in its own Google Sheet — the app
+      // reads it live and does not auto-seed rows here. The upload-time
+      // confirmation popup is how new securities get added.)
+
+      // Recalculate Holdings from ALL rows in "True Entry"
+      // (shared module: date-sorted replay, ISIN↔name merging — entry-only)
+      let holdingWarning: string | null = null;
+      try {
+        const rebuild = await rebuildHoldingTab(spreadsheetId);
+        console.log("Successfully recalculated and updated 'Holding' tab:", rebuild);
+      } catch (holdingErr: any) {
+        console.error("Failed to update 'Holding' tab:", holdingErr);
+        holdingWarning = holdingErr?.result?.error?.message || holdingErr?.message || "Unknown error";
+      }
+
+      // Auto-sync capital gains too (FIFO STCG/LTCG → LTST + PnL Summary tabs), so
+      // they stay current on every import without a manual click. Best-effort.
+      let capGainsWarning: string | null = null;
+      try {
+        const cg = await syncCapitalGains(spreadsheetId);
+        console.log("Successfully recalculated capital gains:", cg);
+      } catch (cgErr: any) {
+        console.error("Failed to sync capital gains:", cgErr);
+        capGainsWarning = cgErr?.result?.error?.message || cgErr?.message || "Unknown error";
+      }
+
+      setSheetsImportStatus({ success: true });
+      const targetName = `${portfolioById(portfolioKey)?.code ?? portfolioKey.toUpperCase()} Sheet`;
+      const importLine = dupCount > 0
+        ? `Imported ${newRecords.length} new row(s) to ${targetName}; skipped ${dupCount} already present.`
+        : `Successfully imported ${newRecords.length} trade row(s) to 'Raw Entry' and 'True Entry' in ${targetName}!`;
+      if (holdingWarning || capGainsWarning) {
+        toast.error(
+          importLine +
+          (holdingWarning ? ` Warning: the 'Holding' tab could NOT be recalculated — ${holdingWarning}.` : "") +
+          (capGainsWarning ? ` Warning: capital gains (LTST / PnL Summary) could NOT be recalculated — ${capGainsWarning}.` : "")
+        );
+      } else {
+        toast.success(importLine);
+      }
+
+      // Record the import: Date | Time | Contract Note Name | Broker | User.
+      const brokerLabel = ({
+        zerodha: 'Zerodha', integrated: 'Integrated', shareindia: 'ShareIndia',
+        standard: 'Standard', 'transaction-report': 'Transaction Report',
+      } as Record<string, string>)[data.brokerName || ''] || (data.brokerName || 'Unknown');
+      const noteName = uploadedNoteNames.length
+        ? uploadedNoteNames.join(', ')
+        : `${brokerLabel} note`;
+      logImport({
+        noteName, broker: brokerLabel, user: currentUser,
+        // Only tag the log with a rewindable id when rows were actually written.
+        importId: newRecords.length ? importBatchId : "",
+        portfolioCode: portfolioById(portfolioKey)?.code || "",
+        rows: newRecords.length,
+      });
+    } catch (err: any) {
+      console.error("Sheets Import Error:", err);
+      const errorMsg = err.result?.error?.message || err.message || "Unknown error";
+      setSheetsImportStatus({ error: errorMsg });
+      toast.error(`Sheets import failed: ${errorMsg}`);
+    } finally {
+      setIsImportingToSheets(false);
+      setShowExportConfirmation(false);
+    }
+  };
+
+  // Drives the auto re-login modal when the ~1h Google token lapses.
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  const login = useGoogleLogin({
+    scope: "https://www.googleapis.com/auth/spreadsheets",
+    onSuccess: (tokenResponse) => {
+      persistGoogleToken(tokenResponse as any);
+      setSessionExpired(false);
+      // Re-auth / fresh Sheets grant — record it.
+      try { logAccess('login', JSON.parse(localStorage.getItem('portfolio_user') || 'null')); } catch { /* ignore */ }
+    },
+    onError: () => {
+      toast.error("Sheets login failed.");
+    },
+  });
+
+  const [currentUser, setCurrentUser] = useState<PortfolioUser | null>(() => {
+    const saved = localStorage.getItem('portfolio_user');
+    if (saved) return JSON.parse(saved);
+    // Auto-login default guest user for premium development bypass
+    return {
+      email: "guest@saguncapital.com",
+      name: "Guest Investor",
+      picture: "https://lh3.googleusercontent.com/a/default-user=s96-c",
+      given_name: "Guest"
+    };
+  });
+
+  const [currentView, setCurrentView] = useState<'dashboard' | 'holdings' | 'imports' | 'reports'>(() => {
+    const saved = localStorage.getItem('portfolio_current_view');
+    return (saved as any) || 'dashboard';
+  });
+
+  const [activePortfolio, setActivePortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
+  const [isDetailView, setIsDetailView] = useState(false);
+
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // Light/dark theme — persisted, defaults to the OS preference. Applied by
+  // toggling a `dark` class on <html>, which activates the dark override layer
+  // in index.css. Purely presentational; touches no parsing/calc logic.
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'dark' || saved === 'light') return saved;
+      return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } catch { return 'light'; }
+  });
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    try { localStorage.setItem('theme', theme); } catch { /* ignore */ }
+  }, [theme]);
+
+  // Google's OAuth token lapses ~hourly. Detect it proactively and pop a
+  // one-click re-login, rather than letting Sheets calls quietly fail. (Skips
+  // the guest dev-bypass user, who has no Sheets token.)
+  useEffect(() => {
+    if (!currentUser || currentUser.email === 'guest@saguncapital.com') return;
+    const check = () => setSessionExpired(!hasValidGoogleToken());
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
+  }, [currentUser]);
+
+  const [holdings, setHoldings] = useState<PortfolioHolding[]>(() => {
+    const saved = localStorage.getItem('portfolio_holdings');
+    if (saved) return JSON.parse(saved);
+    return [
+      {
+        id: '1',
+        symbol: 'HDFCBANK',
+        name: 'HDFC Bank Limited',
+        isin: 'INE040A01034',
+        quantity: 400,
+        avgCost: 1450,
+        currentPrice: 1560,
+        sector: 'Financial Services'
+      },
+      {
+        id: '2',
+        symbol: 'RELIANCE',
+        name: 'Reliance Industries Limited',
+        isin: 'INE002A01018',
+        quantity: 250,
+        avgCost: 2300,
+        currentPrice: 2480,
+        sector: 'Energy'
+      },
+      {
+        id: '3',
+        symbol: 'TCS',
+        name: 'Tata Consultancy Services Limited',
+        isin: 'INE467B01029',
+        quantity: 100,
+        avgCost: 3505,
+        currentPrice: 3820,
+        sector: 'IT & Tech'
+      },
+      {
+        id: '4',
+        symbol: 'INFY',
+        name: 'Infosys Limited',
+        isin: 'INE009A01021',
+        quantity: 300,
+        avgCost: 1380,
+        currentPrice: 1450,
+        sector: 'IT & Tech'
+      }
+    ];
+  });
+
+  const [cashBalance, setCashBalance] = useState<number>(() => {
+    const saved = localStorage.getItem('portfolio_cash_balance');
+    return saved ? parseFloat(saved) : 500000;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('portfolio_current_view', currentView);
+  }, [currentView]);
+
+  useEffect(() => {
+    localStorage.setItem('portfolio_holdings', JSON.stringify(holdings));
+  }, [holdings]);
+
+  useEffect(() => {
+    localStorage.setItem('portfolio_cash_balance', cashBalance.toString());
+  }, [cashBalance]);
+
   const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
+  // Imports page sub-view: the upload/import flow vs. the import-history log.
+  const [importPageTab, setImportPageTab] = useState<'import' | 'history' | 'screener'>('import');
   const [data, setData] = useState<ContractNoteResult | null>(null);
   const [showRawText, setShowRawText] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
@@ -145,7 +738,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [fileCount, setFileCount] = useState({ total: 0, processed: 0 });
   const [dragging, setDragging] = useState(false);
-  const [broker, setBroker] = useState<'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard'>('zerodha');
+  const [broker, setBroker] = useState<'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard' | 'transaction-report'>('zerodha');
+  // A transaction-report CSV carries no portfolio code, so the user picks the
+  // destination explicitly; this overrides UCC-based routing for that source.
+  const [txnReportPortfolio, setTxnReportPortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
   const [pdfPassword, setPdfPassword] = useState("");
   const [isPasswordRequired, setIsPasswordRequired] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
@@ -154,6 +750,14 @@ export default function App() {
   const [isLogicOpen, setIsLogicOpen] = useState(false);
   const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | 'integrated' | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sort once per (data, sort, broker) change instead of re-sorting on every render.
+  const sortedTrades = React.useMemo(() => getSortedTrades(), [data, sortConfig, broker]);
+  // Virtualize the preview table only for large imports (e.g. transaction reports
+  // with thousands of rows). Small notes render in full, exactly as before.
+  const TRADE_VIRTUALIZE_THRESHOLD = 200;
+  const tradesVirtual = sortedTrades.length > TRADE_VIRTUALIZE_THRESHOLD;
+  const tradeVR = useVirtualRows(tradesVirtual ? sortedTrades.length : 0, { estimatedRowHeight: 56, overscan: 14 });
 
   const DEFAULT_LEDGER_MAPPINGS = React.useMemo(() => ({
     STT: "STT ON EQUITY-IMSPL",
@@ -212,6 +816,38 @@ export default function App() {
     });
   };
 
+  // ── Right after a successful parse, confirm each security's name against the
+  // NSE/BSE list. Runs for Integrated notes (ISIN-bearing) and Transaction
+  // Reports (name-only, no ISIN) — for the latter this is the only chance to map
+  // a name the list doesn't recognise, otherwise its Holding/LTST would split. ──
+  const confirmSecurities = async (parsed: ContractNoteResult) => {
+    if (parsed.brokerName !== 'integrated' && parsed.brokerName !== 'transaction-report') return;
+    let master: ScripMaster;
+    try {
+      master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+    } catch (e) {
+      console.warn("Could not load Scrip Master for security confirmation:", e);
+      return;
+    }
+    const seen = new Set<string>();
+    const securities: ConfirmSecurity[] = [];
+    for (const t of parsed.trades) {
+      if (!t.securityName) continue;
+      const key = (t.isin || "").trim() || normName(t.securityName);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      securities.push({ parsedName: t.securityName, isin: (t.isin || "").trim() });
+    }
+    if (securities.length > 0) setSecurityConfirm({ master, securities });
+  };
+
+  // Re-fetch the scrip sheet (bypassing the cache) and re-resolve the popup —
+  // used after the user adds a missing row directly in the sheet.
+  const rescanSecurities = async () => {
+    const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true });
+    setSecurityConfirm(prev => prev ? { master, securities: prev.securities } : prev);
+  };
+
   const handleFileUpload = async (files: FileList | File[] | null, password?: string) => {
     if (!files) return;
     setIsLoading(true);
@@ -219,7 +855,8 @@ export default function App() {
     setData(null);
     setIsPasswordRequired(false);
     setShowExportConfirmation(false);
-    
+    setSheetsImportStatus(null);   // fresh note → re-arm the Import button (green/pressable)
+
     let fileArray = Array.from(files);
 
     if (broker === 'zerodha') {
@@ -235,7 +872,38 @@ export default function App() {
       fileArray = allowedFiles;
     }
 
+    // Over the per-batch limit → ask: keep the first MAX_FILES in ascending
+    // (date) order and drop the rest, or abort so the user can reselect.
+    if (fileArray.length > MAX_FILES) {
+      const sorted = [...fileArray].sort((a, b) => {
+        const da = dateFromFileName(a.name), db = dateFromFileName(b.name);
+        if (da && db && da !== db) return da - db;
+        return a.name.localeCompare(b.name, undefined, { numeric: true });
+      });
+      const firstExcluded = sorted[MAX_FILES];
+      const exTs = dateFromFileName(firstExcluded.name);
+      const exLabel = exTs
+        ? `dated ${new Date(exTs).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`
+        : `"${firstExcluded.name}"`;
+      const proceed = await confirmDialog({
+        title: `Upload limit is ${MAX_FILES} contract notes`,
+        body: (
+          <span>
+            You selected <b>{fileArray.length}</b> files. Continue with the first <b>{MAX_FILES}</b> in
+            ascending order — every note from {exLabel} onward ({fileArray.length - MAX_FILES} file
+            {fileArray.length - MAX_FILES > 1 ? 's' : ''}) will be <b>excluded</b>. Or reupload with a
+            smaller selection.
+          </span>
+        ),
+        confirmLabel: `Continue with first ${MAX_FILES}`,
+        cancelLabel: 'Reupload',
+      });
+      if (!proceed) { setIsLoading(false); return; }
+      fileArray = sorted.slice(0, MAX_FILES);
+    }
+
     setPendingFiles(fileArray);
+    setUploadedNoteNames(fileArray.map(f => f.name));
     setFileCount({ total: fileArray.length, processed: 0 });
 
     try {
@@ -262,6 +930,7 @@ export default function App() {
         const merged = mergeResults(results);
         setData(merged);
         setPendingFiles(null);
+        confirmSecurities(merged);  // name-confirmation popup for Integrated notes & Transaction Reports
       }
     } catch (err: any) {
       setError(err?.message || "Failed to parse the files. Please check if they are valid contract notes.");
@@ -306,6 +975,7 @@ export default function App() {
     const clearingCharges = data.trades.reduce((sum, t) => sum + t.clearingCharges, 0);
     const sebiFees = data.trades.reduce((sum, t) => sum + t.sebiFees, 0);
     const ipf = data.trades.reduce((sum, t) => sum + t.ipf, 0);
+    const dmat = data.trades.reduce((sum, t) => sum + (t.dmat || 0), 0);
     const totalExpensesInclSTT = data.trades.reduce((sum, t) => sum + t.totalExpensesInclSTT, 0);
     const totalExpensesExclSTT = data.trades.reduce((sum, t) => sum + t.totalExpensesExclSTT, 0);
 
@@ -354,6 +1024,7 @@ export default function App() {
       clearingCharges,
       sebiFees,
       ipf,
+      dmat,
       totalExpensesInclSTT,
       totalExpensesExclSTT,
       totalAmountWithExpenseInclSTT,
@@ -378,13 +1049,14 @@ export default function App() {
     const isIntegrated = data.brokerName === 'integrated';
     const showIpf = data.brokerName === 'integrated';
     const headers = [
-      "Trade Date", "ISIN", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price", 
-      "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT", 
-      "Exchange Turnover Charges", "SEBI Turnover Fees", ...(showIpf ? ["IPF Charges"] : []), isIntegrated ? "Total GST" : "IGST", 
-      "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)", 
+      "Trade Date", "ISIN", "Stock Name", "Transaction Type", "Number of Shares", "Avg Price",
+      "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT",
+      "Exchange Turnover Charges", "SEBI Turnover Fees", ...(showIpf ? ["IPF Charges"] : []),
+      ...(isIntegrated ? ["Demat Charges"] : []), isIntegrated ? "Total GST" : "IGST",
+      "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)",
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
-    
+
     const numDecimals = data.brokerName === 'shareindia' ? 4 : 2;
     const formatCSV = (val: number) => {
       const fixed = val.toFixed(numDecimals);
@@ -409,7 +1081,7 @@ export default function App() {
         `"${(t.isin || "").replace(/"/g, '""')}"`,
         `"${t.securityName.replace(/"/g, '""')}"`, 
         `"${t.transactionType}"`, 
-        t.quantity, 
+        t.quantity,
         formatCSV(t.avgPrice),
         formatCSV(t.turnover),
         brokeragePerShare,
@@ -418,6 +1090,7 @@ export default function App() {
         formatCSV(t.etc),
         formatCSV(t.sebiFees),
         ...(showIpf ? [formatCSV(t.ipf)] : []),
+        ...(isIntegrated ? [formatCSV(t.dmat || 0)] : []),
         isIntegrated ? formatCSV(t.gst) : formatCSV(t.igst || t.gst),
         formatCSV(t.stampDuty),
         formatCSV(t.totalExpensesInclSTT),
@@ -442,6 +1115,7 @@ export default function App() {
       formatCSV(calculatedTotals.etc), // Exchange Turnover Charges
       formatCSV(calculatedTotals.sebiFees), // SEBI Turnover Fees
       ...(showIpf ? [formatCSV(calculatedTotals.ipf)] : []), // IPF Charges
+      ...(isIntegrated ? [formatCSV(calculatedTotals.dmat)] : []), // Demat Charges
       isIntegrated ? formatCSV(calculatedTotals.gst) : formatCSV(calculatedTotals.igst), // IGST / GST
       formatCSV(calculatedTotals.stampDuty), // Stamp Duty
       formatCSV(calculatedTotals.totalExpensesInclSTT), // Total Expenses (incl STT)
@@ -939,7 +1613,7 @@ export default function App() {
     if (isUncertain) {
       setShowExportConfirmation(true);
     } else {
-      downloadCSV();
+      importToSheets();
     }
   };
 
@@ -970,107 +1644,240 @@ export default function App() {
     }
   }, [activeTab, customCases]);
 
-  const clearCustomCases = () => {
-    if (window.confirm("Are you sure you want to delete all custom regression cases?")) {
+  const clearCustomCases = async () => {
+    const ok = await confirmDialog({
+      title: 'Delete all custom regression cases?',
+      body: 'This removes every custom test case you added. This cannot be undone.',
+      danger: true,
+      confirmLabel: 'Delete all',
+    });
+    if (ok) {
       localStorage.removeItem('custom_regression_cases');
       setCustomCases([]);
       setTestResults([]);
     }
   };
 
+  if (!currentUser) {
+    return (
+      <Login
+        onLoginSuccess={(user) => {
+          setCurrentUser(user);
+          localStorage.setItem('portfolio_user', JSON.stringify(user));
+          setSessionExpired(false);
+          logAccess('login', user);
+        }}
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20" style={{ backgroundColor: '#d8d8ff' }}>
-      <header className="bg-white border-b border-slate-250 sticky top-0 z-50 px-6 h-16 shadow-sm flex items-center">
-        <div className="flex-1 flex items-center space-x-2 sm:space-x-3">
-          <div className="bg-indigo-600 text-white p-2 sm:p-2.5 rounded-xl shadow shadow-indigo-150 flex-shrink-0">
-            <FileText className="w-4 h-4 sm:w-5 sm:h-5" />
-          </div>
-          <div>
-            <h1 className="text-xs sm:text-lg font-black text-slate-800 tracking-tight leading-none">Contract Note Analyzer</h1>
-          </div>
-        </div>
+    <div className="min-h-screen bg-gradient-to-br from-[#d8d8ff] via-[#e6e7ff] to-[#eef1ff] dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 text-slate-900 dark:text-slate-100 font-sans pb-20 animate-fadeIn">
 
-        <div className="flex-1 flex justify-center">
-          <div className="inline-flex items-center justify-center p-1 bg-slate-100 rounded-xl border border-slate-200/60 shadow-inner overflow-hidden max-w-full">
-            {(!data || broker === 'zerodha') && (
-              <button
-                id="btn-broker-zerodha"
-                type="button"
-                onClick={() => setBroker('zerodha')}
-                disabled={!!data}
-                className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all min-w-[120px] ${broker === 'zerodha' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
-              >
-                <img 
-                  src="/zerodha-logo.png" 
-                  alt="Zerodha Logo" 
-                  className={`h-5 w-auto object-contain transition-all duration-300 mix-blend-multiply ${broker === 'zerodha' ? 'grayscale-0 opacity-100' : 'grayscale opacity-60'}`} 
-                />
-                <span>Zerodha</span>
-              </button>
-            )}
-            {(!data || broker === 'shareindia') && (
-              <button
-                id="btn-broker-shareindia"
-                type="button"
-                onClick={() => setBroker('shareindia')}
-                disabled={!!data}
-                className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all min-w-[120px] ${broker === 'shareindia' ? 'bg-white shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
-              >
-                <img 
-                  src="/shareindia-logo.png" 
-                  alt="Share India Logo" 
-                  className={`h-5 w-auto object-contain transition-all duration-300 mix-blend-multiply ${broker === 'shareindia' ? 'grayscale-0 opacity-100' : 'grayscale opacity-60'}`} 
-                />
-                <span className="flex items-center gap-1 font-bold">
-                  <span className={broker === 'shareindia' ? 'text-[#12b8f1]' : 'text-inherit'}>Share</span>
-                  <span className={broker === 'shareindia' ? 'text-[#ef233c]' : 'text-inherit'}>India</span>
-                </span>
-              </button>
-            )}
-            {(!data || broker === 'integrated') && (
-              <button
-                id="btn-broker-integrated"
-                type="button"
-                onClick={() => setBroker('integrated')}
-                disabled={!!data}
-                className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-black transition-all min-w-[120px] ${broker === 'integrated' ? 'bg-white text-[#12b8f1] shadow-sm border border-slate-200' : 'text-slate-600 hover:text-slate-900'}`}
-              >
-                <img 
-                  src="/integrated-logo.png" 
-                  alt="Integrated Logo" 
-                  className={`h-5 w-auto object-contain transition-all duration-300 mix-blend-multiply ${broker === 'integrated' ? 'grayscale-0 opacity-100' : 'grayscale opacity-60'}`} 
-                />
-                <span className={broker === 'integrated' ? 'bg-white text-[#1285f1]' : ''}>Integrated</span>
-              </button>
-            )}
+      {/* Auto re-login: Google's token lapses ~hourly; this pops the moment it
+          does so the user signs back in (one click) instead of hitting failures. */}
+      {sessionExpired && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-6 text-center">
+            <div className="mx-auto w-12 h-12 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center mb-3">
+              <ShieldCheck className="w-6 h-6" />
+            </div>
+            <h3 className="text-sm font-black text-slate-800 dark:text-slate-100 uppercase tracking-tight">Session expired</h3>
+            <p className="text-[12px] text-slate-500 dark:text-slate-400 mt-2 leading-relaxed">
+              Google signs you out about every hour for security. Sign in again to keep your Sheets connection active — your work stays exactly as it is.
+            </p>
+            <button
+              onClick={() => login()}
+              className="mt-5 w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-xl transition-colors cursor-pointer flex items-center justify-center gap-2"
+            >
+              <ShieldCheck className="w-4 h-4" /> Sign in again
+            </button>
           </div>
         </div>
+      )}
 
-        <div className="flex-1 flex justify-end items-center gap-3">
-     <GoogleLogin
-  onSuccess={(credentialResponse) => {
-    console.log("Login Success:", credentialResponse);
 
-    if (credentialResponse.credential) {
-      const decoded: any = jwtDecode(credentialResponse.credential);
+      {/* Post-upload security-name confirmation (Integrated notes) */}
+      {securityConfirm && (
+        <SecurityConfirmModal
+          spreadsheetId={SCRIP_MASTER_SPREADSHEET_ID}
+          master={securityConfirm.master}
+          securities={securityConfirm.securities}
+          onClose={() => setSecurityConfirm(null)}
+          onRefresh={rescanSecurities}
+        />
+      )}
 
-      console.log(decoded);
+      {/* LEFT NAVIGATION SIDEBAR (The "3-dash" hamburger menu on side) */}
+      <AnimatePresence>
+        {isSidebarOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSidebarOpen(false)}
+              className="fixed inset-0 bg-slate-900/35 backdrop-blur-xs z-[80]"
+            />
+            <motion.div
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="fixed left-0 top-0 h-full w-64 bg-slate-900/80 backdrop-blur-xl text-slate-100 shadow-2xl z-[85] border-r border-slate-700/50 flex flex-col justify-between"
+            >
+              <div>
+                <div className="p-6 border-b border-slate-800 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="bg-indigo-600 text-white p-2 rounded-xl">
+                      <Briefcase className="w-5 h-5 text-indigo-200" />
+                    </div>
+                    <div>
+                      <span className="font-extrabold text-xs tracking-wider uppercase tracking-tight block text-white">Backoffice</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsSidebarOpen(false)}
+                    className="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                <div className="p-4 space-y-1.5">
+                  <button
+                    onClick={() => { setCurrentView('dashboard'); setIsSidebarOpen(false); }}
+                    className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'dashboard' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                  >
+                    <Gauge className="w-4 h-4" /> Dashboard
+                  </button>
+                  <button
+                    onClick={() => { setCurrentView('holdings'); setIsSidebarOpen(false); }}
+                    className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'holdings' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                  >
+                    <Briefcase className="w-4 h-4" /> Holdings
+                  </button>
+                  <button
+                    onClick={() => { setCurrentView('imports'); setIsSidebarOpen(false); }}
+                    className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'imports' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                  >
+                    <Upload className="w-4 h-4" /> Imports
+                  </button>
+                  <button
+                    onClick={() => { setCurrentView('reports'); setIsSidebarOpen(false); }}
+                    className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'reports' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                  >
+                    <BarChart3 className="w-4 h-4" /> Reports
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
-      alert(`Logged in as ${decoded.email}`);
-    }
-  }}
-  onError={() => {
-    console.log("Login Failed");
-  }}
-/>
+      <header className="bg-white/70 dark:bg-slate-900/65 backdrop-blur-xl backdrop-saturate-150 border-b border-white/50 dark:border-slate-700/50 sticky top-0 z-50 px-6 h-16 shadow-sm flex items-center">
+        <div className="flex-1 flex items-center space-x-2">
           <button
             id="btn-open-menu"
-            onClick={() => setIsDrawerOpen(true)}
-            className="p-2 hover:bg-slate-100 rounded-xl transition-all text-slate-600 hover:text-slate-950 flex items-center justify-center border border-transparent hover:border-slate-200"
-            title="Calculation logic details"
+            onClick={() => setIsSidebarOpen(true)}
+            className="p-2 hover:bg-slate-100 rounded-xl transition-all text-slate-600 hover:text-slate-950 flex items-center justify-center border border-slate-200 shadow-xs cursor-pointer mr-2"
+            title="Open backoffice navigation drawer"
           >
             <Menu className="w-5 h-5 font-bold" />
           </button>
+          <div className="flex items-center space-x-2.5">
+            <div className="bg-indigo-600 text-white p-1.5 rounded-lg shadow-sm flex items-center justify-center">
+              {currentView === 'dashboard' ? <Gauge className="w-4 h-4" /> : currentView === 'holdings' ? <Briefcase className="w-4 h-4" /> : currentView === 'reports' ? <BarChart3 className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
+            </div>
+            <div>
+              <h1 className="text-xs sm:text-base font-black text-slate-800 tracking-tight leading-none uppercase">
+                {currentView === 'dashboard' ? "Executive Dashboard" : currentView === 'holdings' ? "Consolidated Holdings" : currentView === 'reports' ? "Reports" : "Broker Note Imports"}
+              </h1>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 hidden md:block" />
+
+        <div className="flex-1 flex justify-end items-center gap-3">
+          <button
+            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label="Toggle dark mode"
+            className="p-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer shrink-0 flex items-center justify-center"
+          >
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+          {currentView === 'imports' && (
+            <>
+              {/* Sheets access is granted at login; this only appears if the
+                  token is missing or has expired (Google caps it at ~1 hour). */}
+              {!hasValidGoogleToken() && (
+                <button
+                  onClick={() => login()}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-[10px] font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                >
+                  Reconnect Sheets
+                </button>
+              )}
+              {/* Show a destination picker when the note carries no resolvable UCC
+                  (transaction reports never do; Zerodha notes don't either) so the
+                  import doesn't silently fall back to the default portfolio. */}
+              {data && (data.brokerName === 'transaction-report' || !portfolioByUcc(data.ucc || '')) && (
+                <div className="inline-flex flex-col gap-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wider text-amber-600">
+                    {data.ucc ? `UCC ${data.ucc} not recognised — pick destination` : 'No account code in note — pick destination'}
+                  </span>
+                  <select
+                    value={txnReportPortfolio}
+                    onChange={(e) => setTxnReportPortfolio(e.target.value)}
+                    title="Choose which portfolio sheet to import this note into"
+                    className="px-2.5 py-1.5 text-[11px] font-bold text-slate-700 bg-white border border-slate-200 rounded-lg outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer max-w-xs"
+                  >
+                    {PORTFOLIOS.map((p) => (
+                      <option key={p.id} value={p.id}>{p.code} · {p.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <button
+                onClick={importToSheets}
+                className={`px-3 py-1.5 text-white text-[10px] font-bold rounded-lg transition-colors shadow-sm hidden lg:inline ${
+                  sheetsImportStatus?.success
+                    ? 'bg-blue-600 cursor-not-allowed'
+                    : sheetsImportStatus?.error
+                      ? 'bg-rose-600 hover:bg-rose-700 cursor-pointer'
+                      : 'bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 cursor-pointer'
+                } ${isImportingToSheets ? 'opacity-75 cursor-not-allowed' : ''}`}
+                disabled={isImportingToSheets || sheetsImportStatus?.success === true}
+              >
+                {isImportingToSheets
+                  ? "Importing..."
+                  : sheetsImportStatus?.success
+                    ? "Imported ✓"
+                    : sheetsImportStatus?.error
+                      ? "Failed — Retry"
+                      : "Import to Sheet"}
+              </button>
+            </>
+          )}
+
+          {currentUser && (
+            <div className="flex items-center gap-2 bg-slate-50 p-1 pr-3 rounded-full border border-slate-200 shadow-sm shrink-0">
+              <img src={currentUser.picture} alt="Avatar" className="w-6 h-6 rounded-full shadow-xs" referrerPolicy="no-referrer" />
+              <span className="text-[10px] font-extrabold text-slate-700 hidden sm:inline max-w-[90px] truncate">{currentUser.given_name || currentUser.name.split(' ')[0]}</span>
+              <button
+                onClick={() => {
+                  localStorage.removeItem('portfolio_user');
+                  clearGoogleToken();
+                  setCurrentUser(null);
+                }}
+                className="text-[9px] font-black text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 px-1.5 py-0.5 rounded-full transition-all ml-1 cursor-pointer"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -1422,15 +2229,129 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="max-w-7xl mx-auto px-4 py-8" style={{ backgroundColor: '#d8d8ff' }}>
-        {activeTab === 'analyse' && (
-          <div className="space-y-6">
-            {!data && !isLoading && (
-              <div className="text-center max-w-3xl mx-auto mt-6">
-                {/* Broker Selection is now in Header */}
+      <main className="max-w-7xl mx-auto px-4 py-8 bg-[#d8d8ff] dark:bg-slate-950">
+        {currentView === 'dashboard' ? (
+          <Dashboard
+            holdings={holdings}
+            cashBalance={cashBalance}
+            setCashBalance={setCashBalance}
+            onNavigate={setCurrentView}
+            onOpenPortfolio={(id) => {
+              setActivePortfolio(id);
+              setIsDetailView(true);
+              setCurrentView('holdings');
+            }}
+          />
+        ) : currentView === 'holdings' ? (
+          <Holdings
+            holdings={holdings}
+            setHoldings={setHoldings}
+            parsedContractNote={data}
+            activePortfolio={activePortfolio}
+            setActivePortfolio={setActivePortfolio}
+            isDetailView={isDetailView}
+            setIsDetailView={setIsDetailView}
+          />
+        ) : currentView === 'reports' ? (
+          <Reports />
+        ) : (
+          <>
+            {/* Imports sub-view toggle: Import vs Import History */}
+            <div className="flex justify-center mb-6">
+              <div className="inline-flex items-center p-1 bg-white border border-slate-200 rounded-xl shadow-xs">
+                <button
+                  type="button"
+                  onClick={() => setImportPageTab('import')}
+                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'import' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  Import
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportPageTab('history')}
+                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'history' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  Import History
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportPageTab('screener')}
+                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'screener' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  Securities &amp; Prices
+                </button>
+              </div>
+            </div>
 
-                <div 
-                  className={`relative flex flex-col items-center justify-center h-64 border-2 border-dashed rounded-2xl transition-all ${dragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-300 bg-white shadow-sm hover:border-indigo-400'}`}
+            {importPageTab === 'history' && <ImportHistory />}
+
+            {importPageTab === 'screener' && <ScreenerImport />}
+
+            {importPageTab === 'import' && activeTab === 'analyse' && (
+              <div className="space-y-6">
+            {!data && !isLoading && (
+              <div className="text-center max-w-3xl mx-auto mt-6 space-y-5">
+                {/* Broker Selection Control Panel */}
+                <div className="flex flex-col items-center justify-center space-y-2 mb-2">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Select Broker Contract Note Source</span>
+                  <div className="inline-flex items-center justify-center p-1 bg-white border border-slate-200/80 shadow-xs rounded-xl overflow-hidden max-w-full">
+                    <button
+                      id="btn-broker-zerodha"
+                      type="button"
+                      onClick={() => setBroker('zerodha')}
+                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'zerodha' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                    >
+                      <span>Zerodha</span>
+                    </button>
+                    <button
+                      id="btn-broker-shareindia"
+                      type="button"
+                      onClick={() => setBroker('shareindia')}
+                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'shareindia' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                    >
+                      <span className="flex items-center gap-1 font-bold">
+                        <span>Share</span>
+                        <span>India</span>
+                      </span>
+                    </button>
+                    <button
+                      id="btn-broker-integrated"
+                      type="button"
+                      onClick={() => setBroker('integrated')}
+                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'integrated' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                    >
+                      <span>Integrated</span>
+                    </button>
+                    <button
+                      id="btn-broker-txnreport"
+                      type="button"
+                      onClick={() => setBroker('transaction-report')}
+                      title="Upload a broker transaction report PDF to seed historical trades"
+                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'transaction-report' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                    >
+                      <span>Txn Report</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Transaction report has no embedded portfolio code — pick the destination sheet */}
+                {broker === 'transaction-report' && (
+                  <div className="flex flex-col items-center justify-center space-y-2 mb-2">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Export To Portfolio Sheet</span>
+                    <select
+                      value={txnReportPortfolio}
+                      onChange={(e) => setTxnReportPortfolio(e.target.value)}
+                      className="px-4 py-2 text-xs font-bold text-slate-700 bg-white border border-slate-200/80 shadow-xs rounded-xl outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                    >
+                      {PORTFOLIOS.map((p) => (
+                        <option key={p.id} value={p.id}>{p.code} · {p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div
+                  className={`relative flex flex-col items-center justify-center h-64 border-2 border-dashed rounded-2xl transition-all ${dragging ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-300/70 glass-soft shadow-sm hover:border-indigo-400'}`}
                   onDragEnter={() => setDragging(true)}
                   onDragLeave={() => setDragging(false)}
                   onDragOver={(e) => e.preventDefault()}
@@ -1441,29 +2362,28 @@ export default function App() {
                     type="file" 
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
                     onChange={(e) => e.target.files && handleFileUpload(e.target.files)} 
-                    accept={broker === 'zerodha' ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'} 
+                    accept={broker === 'transaction-report' ? '.csv,.pdf' : broker === 'zerodha' ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'}
                     multiple 
                     disabled={isLoading} 
                   />
                   <div className="text-center px-4 pointer-events-none">
                     <div className="relative inline-block mb-4">
-                      {broker === 'zerodha' && <img src="/zerodha-logo.png" alt="Zerodha" className="h-12 w-auto object-contain mx-auto mix-blend-multiply" />}
-                      {broker === 'shareindia' && <img src="/shareindia-logo.png" alt="Share India" className="h-14 w-auto object-contain mx-auto mix-blend-multiply" />}
-                      {broker === 'integrated' && <img src="/integrated-logo.png" alt="Integrated" className="h-10 w-auto object-contain mx-auto mix-blend-multiply" />}
-                      {broker !== 'zerodha' && broker !== 'shareindia' && broker !== 'integrated' && <Upload className="mx-auto w-12 h-12 text-indigo-400" />}
+                      <Upload className="mx-auto w-12 h-12 text-indigo-400" />
                     </div>
                     
                     <p className="text-xl md:text-2xl font-black text-slate-800 tracking-tight leading-tight">
-                      Drop {broker === 'shareindia' ? "Share India" : broker === 'zerodha' ? "Zerodha" : broker === 'integrated' ? "Integrated" : "your"} contract notes here
+                      {broker === 'transaction-report'
+                        ? "Drop the broker transaction report here"
+                        : `Drop ${broker === 'shareindia' ? "Share India" : broker === 'zerodha' ? "Zerodha" : broker === 'integrated' ? "Integrated" : "your"} contract notes here`}
                     </p>
                     <div className="flex items-center justify-center gap-2 mt-3">
                       <span className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-bold shadow-sm pointer-events-auto">Browse Files</span>
                     </div>
                     <p className="text-xs font-semibold text-slate-500 mt-3">
-                      {broker === 'zerodha' 
-                        ? `PDFs Contract Note valid only` 
-                        : broker === 'integrated'
-                          ? `Only HTM/HTML files.`
+                      {broker === 'integrated'
+                        ? `Only HTM/HTML files.`
+                        : broker === 'transaction-report'
+                          ? `Transaction report CSV (preferred) or PDF — seeds historical trades.`
                           : `PDFs Contract Note valid only`
                       }
                     </p>
@@ -1656,7 +2576,7 @@ export default function App() {
                   </div>
                   
                   <div className="relative z-10 p-6 sm:p-10 w-full md:w-auto flex flex-col sm:flex-row gap-4 items-center justify-start md:justify-end">
-                    {data.brokerName === 'shareindia' && data.ucc && (
+                    {(data.brokerName === 'shareindia' || data.brokerName === 'integrated') && data.ucc && (
                       <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 hover:shadow-2xl transition-all relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
                         {/* Subtle highlight in the UCC card */}
                         <div className="absolute inset-x-0 top-0 h-px bg-slate-600 opacity-40"></div>
@@ -1738,35 +2658,68 @@ export default function App() {
                     </button>
 
                     <div className="relative">
-                      <button 
-                        onClick={handleExportClick} 
-                        className={`px-5 py-2.5 text-xs font-black text-white rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] flex items-center gap-1.5 ${
-                          data.reconciliation && !data.reconciliation.isValid 
-                            ? 'bg-amber-600 hover:bg-amber-700' 
-                            : 'bg-[#0f172a] hover:bg-slate-800'
-                        }`}
-                        style={{ 
-                          boxShadow: data.reconciliation && !data.reconciliation.isValid 
-                            ? '0 1px 2px rgba(217,119,6,0.06), 0 6px 16px rgba(217,119,6,0.1)' 
-                            : '0 1px 2px rgba(15,23,42,0.06), 0 8px 18px rgba(15,23,42,0.1)' 
+                      <button
+                        onClick={handleExportClick}
+                        disabled={isImportingToSheets || sheetsImportStatus?.success === true}
+                        className={`px-5 py-2.5 text-xs font-black text-white rounded-xl transition-all duration-200 transform active:translate-y-0 active:scale-[0.98] flex items-center gap-1.5 ${
+                          sheetsImportStatus?.success
+                            ? 'bg-blue-600 cursor-not-allowed'
+                            : sheetsImportStatus?.error
+                              ? 'bg-rose-600 hover:bg-rose-700 hover:-translate-y-0.5'
+                              : data.reconciliation && !data.reconciliation.isValid
+                                ? 'bg-amber-600 hover:bg-amber-700 hover:-translate-y-0.5'
+                                : 'bg-[#10b981] hover:bg-[#059669] hover:-translate-y-0.5'
+                        } ${isImportingToSheets ? 'opacity-75 cursor-not-allowed' : ''}`}
+                        style={{
+                          boxShadow: sheetsImportStatus?.success
+                            ? '0 1px 2px rgba(37,99,235,0.06), 0 8px 18px rgba(37,99,235,0.12)'
+                            : sheetsImportStatus?.error
+                              ? '0 1px 2px rgba(225,29,72,0.06), 0 8px 18px rgba(225,29,72,0.12)'
+                              : data.reconciliation && !data.reconciliation.isValid
+                                ? '0 1px 2px rgba(217,119,6,0.06), 0 6px 16px rgba(217,119,6,0.1)'
+                                : '0 1px 2px rgba(16,185,129,0.06), 0 8px 18px rgba(16,185,129,0.1)'
                         }}
                       >
-                        {data.reconciliation && !data.reconciliation.isValid ? <AlertTriangle className="w-4 h-4" /> : <Download className="w-4 h-4" />}
-                        {data.reconciliation && !data.reconciliation.isValid ? "Export (Mismatch Warning)" : "Export CSV File"}
+                        {isImportingToSheets ? (
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                        ) : sheetsImportStatus?.success ? (
+                          <CheckCircle2 className="w-4 h-4" />
+                        ) : sheetsImportStatus?.error ? (
+                          <AlertTriangle className="w-4 h-4" />
+                        ) : data.reconciliation && !data.reconciliation.isValid ? (
+                          <AlertTriangle className="w-4 h-4" />
+                        ) : (
+                          <Upload className="w-4 h-4" />
+                        )}
+                        {isImportingToSheets
+                          ? "Importing..."
+                          : sheetsImportStatus?.success
+                            ? "Imported"
+                            : sheetsImportStatus?.error
+                              ? "Import Failed — Retry"
+                              : data.reconciliation && !data.reconciliation.isValid
+                                ? "Import (Mismatch Warning)"
+                                : "Import"}
                       </button>
 
-                      {/* Sliding Inline Export Warning Banner overlay */}
+                      {/* Sliding Inline Import Warning Banner overlay */}
                       {showExportConfirmation && (
                         <div className="absolute right-0 top-12 mt-2 p-4 bg-white border border-rose-200 rounded-2xl shadow-xl z-50 min-w-[340px] text-xs space-y-3 animate-fadeIn">
                           <p className="font-bold text-rose-900 flex items-center gap-1">
-                            <AlertTriangle className="w-4 h-4 text-red-500" /> Export Warning: Parser Uncertain
+                            <AlertTriangle className="w-4 h-4 text-red-500" /> Import Warning: Parser Uncertain
                           </p>
                           <p className="text-slate-600 leading-relaxed font-sans">
-                            The parser is mathematically uncertain on this note (Discrepancy: ₹${data.reconciliation?.difference}). Do you still wish to silently export?
+                            The parser is mathematically uncertain on this note (Discrepancy: ₹${data.reconciliation?.difference}). Do you still wish to proceed with the import?
                           </p>
                           <div className="flex justify-end gap-2 pt-1">
                             <button onClick={() => setShowExportConfirmation(false)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-750 font-bold rounded-lg">Cancel</button>
-                            <button onClick={downloadCSV} className="px-3 py-1.5 bg-red-655 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm">Yes, Export Anyway</button>
+                            <button 
+                              onClick={importToSheets} 
+                              disabled={isImportingToSheets}
+                              className="px-3 py-1.5 bg-red-655 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm disabled:opacity-50"
+                            >
+                              {isImportingToSheets ? "Importing..." : "Yes, Import Anyway"}
+                            </button>
                           </div>
                         </div>
                       )}
@@ -1951,43 +2904,52 @@ export default function App() {
                   {data?.brokerName === 'integrated' && (
                     <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
                   )}
+                  {data?.brokerName === 'integrated' && (
+                    <SummaryCard label="Demat Charges" value={calculatedTotals.dmat} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  )}
                 </div>
 
-                <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
+                <div
+                  ref={tradeVR.scrollRef}
+                  onScroll={tradesVirtual ? tradeVR.onScroll : undefined}
+                  className={`bg-white border border-slate-200 rounded-2xl shadow-sm ${tradesVirtual ? 'overflow-auto max-h-[70vh]' : 'overflow-hidden overflow-x-auto'}`}
+                >
                   <table className="w-full text-sm text-left">
-                    <thead className="bg-slate-50 text-slate-600 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200">
+                    <thead className={`bg-slate-50 text-slate-600 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200 ${tradesVirtual ? 'sticky top-0 z-10' : ''}`}>
                       <tr>
-                        <SortableHeader label="Date" sortKey="tradeDate" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="ISIN" sortKey="isin" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Security" sortKey="securityName" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="text-slate-705" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="text-slate-710" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="text-slate-720 border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Turnover" sortKey="turnover" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Brokerage" sortKey="brokerage" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="STT" sortKey="stt" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Date" sortKey="tradeDate" className="text-slate-705" />
+                        <SortableHeader label="Security" sortKey="securityName" className="text-slate-705" />
+                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="text-slate-705" />
+                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="text-slate-710" />
+                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="text-slate-720 border-r border-slate-200" />
+                        <SortableHeader label="Turnover" sortKey="turnover" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
+                        <SortableHeader label="Brokerage" sortKey="brokerage" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
+                        <SortableHeader label="STT" sortKey="stt" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         {data?.brokerName === 'integrated' ? (
-                          <SortableHeader label="Total GST" sortKey="gstOrIgst" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                          <SortableHeader label="Total GST" sortKey="gstOrIgst" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         ) : (
-                          <SortableHeader label="IGST" sortKey="gstOrIgst" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                          <SortableHeader label="IGST" sortKey="gstOrIgst" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         )}
-                        <SortableHeader label="ETC" sortKey="etc" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Stamp Duty" sortKey="stampDuty" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="SEBI Fees" sortKey="sebiFees" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="ETC" sortKey="etc" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
+                        <SortableHeader label="Stamp Duty" sortKey="stampDuty" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
+                        <SortableHeader label="SEBI Fees" sortKey="sebiFees" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         {data?.brokerName === 'integrated' && (
-                          <SortableHeader label="IPF" sortKey="ipf" align="right" className="text-slate-700 font-bold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
+                          <SortableHeader label="IPF" sortKey="ipf" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         )}
-                        <SortableHeader label="Exp (Incl STT)" sortKey="totalExpensesInclSTT" align="right" className="text-slate-700 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Exp (Excl STT)" sortKey="totalExpensesExclSTT" align="right" className="text-slate-700 font-semibold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Net (Incl STT)" sortKey="totalInclSTT" align="right" className="text-indigo-900 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Net (Excl STT)" sortKey="totalExclSTT" align="right" className="text-sky-900 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Obligation" sortKey="netTotalBeforeLevies" align="right" className="text-slate-900 font-extrabold border-r border-slate-200" style={{ backgroundColor: '#ecfdf5' }} />
-                        <SortableHeader label="Class" sortKey="tradeType" align="center" className="text-slate-700 font-bold" style={{ backgroundColor: '#ecfdf5' }} />
+                        <SortableHeader label="Exp (Incl STT)" sortKey="totalExpensesInclSTT" align="right" className="text-slate-700 font-extrabold border-r border-slate-200" />
+                        <SortableHeader label="Exp (Excl STT)" sortKey="totalExpensesExclSTT" align="right" className="text-slate-700 font-semibold border-r border-slate-200" />
+                        <SortableHeader label="Net (Incl STT)" sortKey="totalInclSTT" align="right" className="text-indigo-900 font-extrabold border-r border-slate-200" />
+                        <SortableHeader label="Net (Excl STT)" sortKey="totalExclSTT" align="right" className="text-sky-900 font-extrabold border-r border-slate-200" />
+                        <SortableHeader label="Obligation" sortKey="netTotalBeforeLevies" align="right" className="text-slate-900 font-extrabold border-r border-slate-200" />
+                        <SortableHeader label="Class" sortKey="tradeType" align="center" className="text-slate-700 font-bold" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-150 font-mono text-xs">
-                      {getSortedTrades().map(t => {
-                        const totalInclSTT = t.transactionType === "Buy" 
+                      {tradesVirtual && tradeVR.padTop > 0 && (
+                        <tr aria-hidden="true"><td colSpan={99} style={{ height: tradeVR.padTop, padding: 0, border: 0 }} /></tr>
+                      )}
+                      {(tradesVirtual ? sortedTrades.slice(tradeVR.start, tradeVR.end) : sortedTrades).map((t, _vi) => {
+                        const totalInclSTT = t.transactionType === "Buy"
                           ? t.turnover + t.totalExpensesInclSTT 
                           : t.turnover - t.totalExpensesInclSTT;
                         const totalExclSTT = t.transactionType === "Buy" 
@@ -1998,9 +2960,8 @@ export default function App() {
                         const fmt = (val: number) => val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: isShareIndia ? 4 : 2 });
 
                         return (
-                           <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                           <tr key={t.id} ref={tradesVirtual && _vi === 0 ? tradeVR.measureRow : undefined} className="hover:bg-slate-50 transition-colors">
                             <td className="px-6 py-4 text-slate-400 bg-slate-50/10">{t.tradeDate}</td>
-                            <td className="px-6 py-4 text-slate-500 font-semibold bg-slate-50/10 font-mono tracking-wider">{t.isin || "—"}</td>
                             <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic bg-slate-50/10">{t.securityName}</td>
                             <td className="px-6 py-4 text-center bg-slate-50/10">
                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>
@@ -2034,6 +2995,9 @@ export default function App() {
                           </tr>
                         );
                       })}
+                      {tradesVirtual && tradeVR.padBottom > 0 && (
+                        <tr aria-hidden="true"><td colSpan={99} style={{ height: tradeVR.padBottom, padding: 0, border: 0 }} /></tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -2262,6 +3226,8 @@ export default function App() {
               )}
             </div>
           </div>
+        )}
+          </>
         )}
       </main>
     </div>

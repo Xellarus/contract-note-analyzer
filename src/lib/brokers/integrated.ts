@@ -5,6 +5,7 @@ import {
   cleanText,
   isFootnoteOrDisclaimer,
   getTradeDate,
+  getUCC,
   calculateReconciliation
 } from './utils';
 
@@ -55,10 +56,13 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       clearingCharges: summaryData.clearingCharges || 0,
       stampDuty: summaryData.stampDuty || 0,
       ipf: summaryData.ipf || 0,
+      dmat: summaryData.dmat || 0,
       netSettlement: summaryData.netSettlement || 0
     };
 
-    return this.finalizeContractNote(finalSummary, tradesData, tradeDate, "ih");
+    const ucc = getUCC(doc);
+
+    return this.finalizeContractNote(finalSummary, tradesData, tradeDate, "ih", ucc);
   }
 
   async parsePdfText(text: string): Promise<ContractNoteResult | null> {
@@ -80,11 +84,13 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "i");
+    const ucc = getUCC(text);
+
+    return this.finalizeContractNote(summary, merged, tradeDate || "26-05-2026", "i", ucc);
   }
 
   private extractSummaryFromText(text: string): Summary {
-    const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
+    const s: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, dmat: 0, netSettlement: 0 };
     const lines = text.split('\n');
 
     const getSummaryKeyFromLineText = (l: string): keyof Summary | null => {
@@ -104,6 +110,8 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
         return "stampDuty";
       } else if (l.includes("ipf") || l.includes("investor protection fund") || l.includes("investor protection")) {
         return "ipf";
+      } else if (l.includes("demat")) {
+        return "dmat";
       } else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)") || (l.includes("net amount") && (l.includes("receivable") || l.includes("payable")))) {
         return "netSettlement";
       } else if (l.includes("igst") || l.includes("integrated tax")) {
@@ -139,6 +147,7 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
             if (!t.includes("exchange") && !t.includes("corp")) colMap.clearing = idx;
           } else if (t.includes("stamp")) colMap.stampDuty = idx;
           else if (t.includes("ipf") || t.includes("investor")) colMap.ipf = idx;
+          else if (t.includes("demat")) colMap.dmat = idx;
           else if (t.includes("net amount") || (t.includes("net") && t.includes("receivable"))) colMap.netSettlement = idx;
         });
         break;
@@ -172,6 +181,7 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
             if (colMap.clearing !== undefined) s.clearingCharges = Math.abs(getVal(colMap.clearing));
             if (colMap.stampDuty !== undefined) s.stampDuty = Math.abs(getVal(colMap.stampDuty));
             if (colMap.ipf !== undefined) s.ipf = Math.abs(getVal(colMap.ipf));
+            if (colMap.dmat !== undefined) s.dmat = Math.abs(getVal(colMap.dmat));
             if (colMap.netSettlement !== undefined) s.netSettlement = getVal(colMap.netSettlement);
             
             return s;
@@ -212,12 +222,24 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
   private extractTradesFromText(text: string): any[] {
     const trades: any[] = [];
     const lines = text.split('\n');
+    // Trade lines may not carry the ISIN — it follows the scrip's trades in an
+    // "ISIN Code … Scrip Total" line. Back-fill the block when we hit one.
+    let blockStart = 0;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
 
       const lowerLine = line.toLowerCase();
+      if (lowerLine.includes("scrip total") || lowerLine.includes("isin code")) {
+        const m = line.match(/\b(IN[A-Z0-9]{10})\b/i);
+        if (m) {
+          const code = m[1].toUpperCase();
+          for (let k = blockStart; k < trades.length; k++) if (!trades[k].isin) trades[k].isin = code;
+        }
+        blockStart = trades.length;
+        continue;
+      }
       if (lowerLine.includes("security/contract") || lowerLine.includes("buy/sell") || lowerLine.includes("description") || lowerLine.includes("order no")) {
         continue;
       }
@@ -265,6 +287,11 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
 
       securityPart = securityPart.replace(/^[\d\s\-\,\.\/]+/, "").trim();
 
+      // Capture the ISIN embedded in the security column before stripping it
+      // from the name (matches ShareIndia's behaviour; the note carries it).
+      const isinMatch = securityPart.match(/(IN[A-Z0-9]{10})/i);
+      const isin = isinMatch ? isinMatch[1].toUpperCase() : "";
+
       const name = securityPart
         .replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "")
         .replace(/\s*-?\s*\(?IN[A-Z0-9]{11}\)?/i, "")
@@ -279,6 +306,7 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
 
       trades.push({
         securityName: name,
+        isin,
         quantity: qty,
         price: price,
         brokeragePerShare: brok,
@@ -310,6 +338,8 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
         return "stampDuty";
       } else if (l.includes("ipf") || l.includes("investor protection fund") || l.includes("investor protection")) {
         return "ipf";
+      } else if (l.includes("demat")) {
+        return "dmat";
       } else if (l.includes("net amount receivable") || l.includes("net amount payable") || l.includes("net amount receivable/(payable)") || (l.includes("net amount") && (l.includes("receivable") || l.includes("payable")))) {
         return "netSettlement";
       } else if (l.includes("igst") || l.includes("integrated tax")) {
@@ -407,7 +437,7 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
     return s;
   }
 
-  private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
+  private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string, ucc?: string): ContractNoteResult {
     const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
     const exchangeNames = ["NSE", "BSE", "MCX", "NCDEX"];
@@ -437,23 +467,45 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
     tradesToProcess = [];
     groupMap.forEach((typeMap, name) => {
       typeMap.forEach((items, type) => {
-        const totalQty = items.reduce((sum: number, x: any) => sum + x.quantity, 0);
-        const totalTurnover = items.reduce((sum: number, x: any) => sum + (x.quantity * x.price), 0);
-        const totalBrokerage = items.reduce((sum: number, x: any) => sum + (x.quantity * (x.brokeragePerShare || 0)), 0);
-        
-        const avgPrice = totalQty > 0 ? (totalTurnover / totalQty) : 0;
-        const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
-        
-        const mergedContext = items.map((x: any) => x.contextText || "").join(" ");
-        
-        tradesToProcess.push({
-          securityName: name,
-          type: type,
-          quantity: totalQty,
-          price: avgPrice,
-          brokeragePerShare: avgBrokerage,
-          contextText: mergedContext
-        });
+        // Two genuinely different securities can share one display name (NSE vs
+        // BSE line, partly-paid series). Never merge distinct non-empty ISINs:
+        // if the group carries more than one, split it by ISIN. Rows that lack
+        // an ISIN attach to the sole ISIN when there is exactly one.
+        const distinctIsins = Array.from(
+          new Set(items.map((x: any) => (x.isin || "").trim()).filter(Boolean))
+        );
+        const buckets: Array<{ isin: string; rows: any[] }> = [];
+        if (distinctIsins.length <= 1) {
+          buckets.push({ isin: distinctIsins[0] || "", rows: items });
+        } else {
+          for (const code of distinctIsins) {
+            buckets.push({ isin: code, rows: items.filter((x: any) => (x.isin || "").trim() === code) });
+          }
+          const noIsin = items.filter((x: any) => !(x.isin || "").trim());
+          if (noIsin.length) buckets.push({ isin: "", rows: noIsin });
+        }
+
+        for (const bucket of buckets) {
+          const rows = bucket.rows;
+          const totalQty = rows.reduce((sum: number, x: any) => sum + x.quantity, 0);
+          const totalTurnover = rows.reduce((sum: number, x: any) => sum + (x.quantity * x.price), 0);
+          const totalBrokerage = rows.reduce((sum: number, x: any) => sum + (x.quantity * (x.brokeragePerShare || 0)), 0);
+
+          const avgPrice = totalQty > 0 ? (totalTurnover / totalQty) : 0;
+          const avgBrokerage = totalQty > 0 ? (totalBrokerage / totalQty) : 0;
+
+          const mergedContext = rows.map((x: any) => x.contextText || "").join(" ");
+
+          tradesToProcess.push({
+            securityName: name,
+            isin: bucket.isin,
+            type: type,
+            quantity: totalQty,
+            price: avgPrice,
+            brokeragePerShare: avgBrokerage,
+            contextText: mergedContext
+          });
+        }
       });
     });
 
@@ -519,7 +571,8 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       etc: summary.etc,
       sebiFees: summary.sebiFees,
       clearingCharges: summary.clearingCharges,
-      ipf: summary.ipf
+      ipf: summary.ipf,
+      dmat: summary.dmat || 0
     };
 
     const numTrades = tradesToProcess.length;
@@ -584,13 +637,15 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       const sebiFees = allocateExpense(summary.sebiFees, 'sebiFees', ratio);
       const clearingCharges = allocateExpense(summary.clearingCharges, 'clearingCharges', ratio);
       
-      let ipf = 0;
-      if (summary.ipf > 0) {
-        ipf = allocateExpense(summary.ipf, 'ipf', ratio);
-      } else {
-        // Calculate IPF at default NSE rate: ₹10 per crore (0.0001% of turnover)
-        ipf = rt(grossTotal * 0.000001);
-      }
+      // Use the note's itemised IPF, allocated pro-rata like ETC/SEBI/Stamp.
+      // Integrated always itemises IPF in the Obligation Detail, so IPF = 0 means
+      // genuinely no IPF — never fabricate a ₹10/crore estimate (it coincided with
+      // the SEBI-fee rate and invented a charge on IPF-free notes).
+      const ipf = allocateExpense(summary.ipf, 'ipf', ratio);
+
+      // Demat/DP charge from the Obligation Detail, allocated pro-rata like IPF.
+      // A pass-through levy (not part of the GST base), 0 when the note has none.
+      const dmat = allocateExpense(summary.dmat || 0, 'dmat', ratio);
 
       // Stamp Duty pre-calculated
       let stampDuty = 0;
@@ -611,16 +666,17 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       const sgst = rt(gst / 2);
       const igst = 0;
 
-      const totalExclSTT = brokerage + etc + sebiFees + clearingCharges + stampDuty + ipf + gst;
+      const totalExclSTT = brokerage + etc + sebiFees + clearingCharges + stampDuty + ipf + dmat + gst;
       const totalInclSTT = totalExclSTT + stt;
 
-      return { 
-          id: `tx-${prefix}-${idx}`, 
-          tradeDate, 
-          securityName: t.securityName, 
-          transactionType: t.type as TransactionType, 
-          quantity: t.quantity, 
-          avgPrice: t.price, 
+      return {
+          id: `tx-${prefix}-${idx}`,
+          tradeDate,
+          securityName: t.securityName,
+          isin: t.isin || "",
+          transactionType: t.type as TransactionType,
+          quantity: t.quantity,
+          avgPrice: t.price,
           turnover: grossTotal,
           tradeType: isIntraday ? "Intraday" : "Delivery",
           netTotalBeforeLevies: t.type === "Sell" ? grossTotal : -grossTotal,
@@ -631,6 +687,7 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
           clearingCharges,
           stampDuty,
           ipf,
+          dmat,
           cgst,
           sgst,
           igst,
@@ -662,7 +719,7 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
     }
 
     const reconciliation = calculateReconciliation(summary, trades);
-    return { summary, trades, brokerName, tradeDate, reconciliation };
+    return { summary, trades, brokerName, tradeDate, reconciliation, ucc };
   }
 }
 
@@ -918,7 +975,8 @@ function TmExtractSummaryIntegrated(doc: Document): any {
     sebiFees: 0,
     clearingCharges: 0,
     stampDuty: 0,
-    ipf: 0
+    ipf: 0,
+    dmat: 0
   };
   const tables = Array.from(doc.querySelectorAll("table"));
   for (const table of tables) {
@@ -954,6 +1012,7 @@ function TmExtractSummaryIntegrated(doc: Document): any {
             else if (N.includes("sebi")) g.sebiFees = O;
             else if (N.includes("stamp")) g.stampDuty = O;
             else if (N.includes("ipf") || N.includes("investor")) g.ipf = O;
+            else if (N.includes("demat")) g.dmat = O;
             else if (N.includes("clearing") || N.includes("clg")) g.clearingCharges += O;
             else if (
               (N.includes("exchange") || (N.includes("turnover") && N.includes("charge")) || (N.includes("trans") && N.includes("charge"))) &&
@@ -981,12 +1040,26 @@ function xmExtractTradesIntegrated(doc: Document): any[] {
     let F = "";
     const N = { security: -1, type: -1, qty: -1, price: -1, brokerage: -1, net: -1, netIsRate: true };
     let O = false;
+    // Annexure trades don't carry the ISIN in their security cell — it arrives in
+    // the "ISIN Code … Scrip Total" row that FOLLOWS each scrip's trades. Track the
+    // start of the current scrip block so that row can back-fill its trades.
+    let blockStart = g.length;
     for (let R = 0; R < rows.length; R++) {
       const row = rows[R];
       const cells = Array.from(row.querySelectorAll("td, th"));
       const T = cleanTextLower(row.textContent);
       if (T.includes("segment name")) {
         F = T.replace("segment name", "").trim();
+        blockStart = g.length;
+        continue;
+      }
+      if (T.includes("scrip total")) {
+        const m = (row.textContent || "").match(/\b(IN[A-Z0-9]{10})\b/i);
+        if (m) {
+          const code = m[1].toUpperCase();
+          for (let k = blockStart; k < g.length; k++) if (!g[k].isin) g[k].isin = code;
+        }
+        blockStart = g.length;   // close the block whether or not it carried an ISIN (F&O totals don't)
         continue;
       }
       if (T.includes("security/contract") && T.includes("quantity")) {
@@ -1010,8 +1083,12 @@ function xmExtractTradesIntegrated(doc: Document): any[] {
       if (O && matchedSegment) {
         if (cells.length < 5) continue;
         const securityCell = cells[N.security];
-        const B = securityCell?.textContent?.trim();
-        if (!B || cleanTextLower(B).includes("total")) continue;
+        const Braw = securityCell?.textContent?.trim();
+        if (!Braw || cleanTextLower(Braw).includes("total")) continue;
+        // Capture an ISIN embedded in the security/contract cell, then strip it
+        const isinM = Braw.match(/(IN[A-Z0-9]{10})/i);
+        const isin = isinM ? isinM[1].toUpperCase() : "";
+        const B = Braw.replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "").trim() || Braw;
         const typeStr = cells[N.type] ? cleanTextLower(cells[N.type].textContent) : "";
         const q = typeStr.includes("buy") ? "Buy" : typeStr.includes("sell") ? "Sell" : null;
         const qtyVal = cells[N.qty] ? cleanNumValue(cells[N.qty].textContent) : 0;
@@ -1032,8 +1109,31 @@ function xmExtractTradesIntegrated(doc: Document): any[] {
           } else if (N.price !== -1 && cells[N.price]) {
             priceVal = cleanNumValue(cells[N.price].textContent);
           }
-          g.push({ securityName: B, quantity: qtyVal, price: priceVal, brokeragePerShare: brokerageVal, type: q });
+          g.push({ securityName: B, isin, quantity: qtyVal, price: priceVal, brokeragePerShare: brokerageVal, type: q });
         }
+      }
+    }
+  }
+
+  // Backstop: the Equity Segment summary table is an ISIN ↔ name legend
+  // (first cell = bare ISIN, second = the same truncated name the annexure
+  // uses). Fill any trade still missing its ISIN by exact name match.
+  const legend = new Map<string, string>();
+  for (const table of tables) {
+    for (const row of Array.from(table.querySelectorAll("tr"))) {
+      const cells = Array.from(row.querySelectorAll("td, th"));
+      if (cells.length < 2) continue;
+      const c0 = (cells[0].textContent || "").trim();
+      if (!/^IN[A-Z0-9]{10}$/i.test(c0)) continue;
+      const nm = (cells[1].textContent || "").trim().toUpperCase();
+      if (nm) legend.set(nm, c0.toUpperCase());
+    }
+  }
+  if (legend.size > 0) {
+    for (const t of g) {
+      if (!t.isin) {
+        const hit = legend.get((t.securityName || "").trim().toUpperCase());
+        if (hit) t.isin = hit;
       }
     }
   }

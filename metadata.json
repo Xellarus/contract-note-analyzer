@@ -1,6 +1,6 @@
 {
-  "name": "Remix: Contract Note Analyzer",
-  "description": "Analyze Zerodha and other broker contract notes to see trade-wise breakdown of charges like STT, GST, and Stamp Duty.",
+  "name": "Portfolio Management & Backoffice Suite",
+  "description": "Institutional portfolio management, assets tracking, and contract note verification backoffice software.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "File Analysis",

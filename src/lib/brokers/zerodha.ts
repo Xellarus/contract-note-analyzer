@@ -5,6 +5,7 @@ import {
   cleanText,
   isFootnoteOrDisclaimer,
   getTradeDate,
+  getUCC,
   calculateReconciliation
 } from './utils';
 
@@ -22,7 +23,8 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const summary: Summary = { payinObligation: 0, stt: 0, taxableValue: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, etc: 0, sebiFees: 0, clearingCharges: 0, stampDuty: 0, ipf: 0, netSettlement: 0 };
     const tradeDate = getTradeDate(doc);
-    
+    const ucc = getUCC(doc);
+
     const isinMap = new Map<string, string>();
     const tables = Array.from(doc.querySelectorAll('table'));
     
@@ -164,12 +166,13 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate, "z");
+    return this.finalizeContractNote(summary, merged, tradeDate, "z", ucc);
   }
 
   async parsePdfText(text: string): Promise<ContractNoteResult | null> {
     const summary = this.extractSummaryFromText(text);
     const tradeDate = getTradeDate(text);
+    const ucc = getUCC(text);
     const rawTrades: any[] = [];
     
     // Extract ISIN mapping from the entire text
@@ -265,7 +268,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    return this.finalizeContractNote(summary, merged, tradeDate, "z");
+    return this.finalizeContractNote(summary, merged, tradeDate, "z", ucc);
   }
 
   private getConfidenceAndKey(lText: string, insideBlock: boolean): { key: keyof Summary | null, confidence: number } {
@@ -339,6 +342,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       clearingCharges: [],
       stampDuty: [],
       ipf: [],
+      dmat: [],
       netSettlement: []
     };
 
@@ -450,7 +454,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     return s;
   }
 
-  private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string): ContractNoteResult {
+  private finalizeContractNote(summary: Summary, rawTrades: any[], tradeDate: string, prefix: string, ucc?: string): ContractNoteResult {
     const rt = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
     // Zero out IPF for Zerodha broker
@@ -677,6 +681,6 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
 
     const brokerName = "zerodha";
     const reconciliation = calculateReconciliation(summary, trades);
-    return { summary, trades, brokerName, tradeDate, reconciliation };
+    return { summary, trades, brokerName, tradeDate, ucc, reconciliation };
   }
 }

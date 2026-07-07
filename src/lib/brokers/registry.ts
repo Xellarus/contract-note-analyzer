@@ -3,9 +3,13 @@ import { ZerodhaBrokerStrategy } from './zerodha';
 import { ShareIndiaBrokerStrategy } from './shareindia';
 import { IntegratedBrokerStrategy } from './integrated';
 import { StandardBrokerStrategy } from './standard';
+import { TransactionReportBrokerStrategy } from './transactionReport';
 
-// Instances of all available brokers
+// Instances of all available brokers. TransactionReport is listed before
+// Zerodha because its asset names can mention "Zerodha … ETF" which would
+// otherwise falsely trigger Zerodha auto-detection; its own detect is strict.
 const brokersList: BrokerStrategy[] = [
+  new TransactionReportBrokerStrategy(),
   new ZerodhaBrokerStrategy(),
   new ShareIndiaBrokerStrategy(),
   new IntegratedBrokerStrategy(),

@@ -22,37 +22,50 @@ export const parsePdfContractNote = async (text: string): Promise<ContractNoteRe
  * Orchestrates file processing (PDF extraction and format detection) and
  * delegates HTML/PDF parsing to the chosen or detected Broker strategy.
  */
+// Pull a portfolio code (e.g. T059 / S713) out of a filename like
+// "Taparia Holdings_T059_transaction_report.csv" — used when the file content
+// itself carries no portfolio id (the CSV transaction report has none).
+const uccFromFilename = (name: string): string => {
+  const m = name.match(/(?:^|[_\-\s.])([A-Za-z]\d{3,})(?:[_\-\s.]|$)/);
+  return m ? m[1].toUpperCase() : "";
+};
+
 export const processFile = async (
   file: File,
   password?: string,
-  brokerId?: 'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard'
+  brokerId?: 'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard' | 'transaction-report'
 ): Promise<ContractNoteResult | null> => {
   try {
-    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-    
+    const lower = file.name.toLowerCase();
+    const isPdf = file.type === 'application/pdf' || lower.endsWith('.pdf');
+    const isCsv = file.type === 'text/csv' || lower.endsWith('.csv');
+
+    let res: ContractNoteResult | null = null;
+
     if (isPdf) {
       const text = await extractTextFromPDF(file, password);
-      const broker = (!brokerId || brokerId === 'auto') 
-        ? detectBroker(text, true) 
-        : getBroker(brokerId);
-      
-      const res = await broker.parsePdfText(text);
-      if (res) res.rawText = text;
-      return res;
+      const broker = (!brokerId || brokerId === 'auto') ? detectBroker(text, true) : getBroker(brokerId);
+      res = await broker.parsePdfText(text);
+      if (res) res.rawText = res.rawText || text;
+    } else if (isCsv) {
+      const text = await file.text();
+      const broker = (!brokerId || brokerId === 'auto') ? detectBroker(text, false) : getBroker(brokerId);
+      res = broker.parseCsv ? await broker.parseCsv(text) : null;
+      if (res) res.rawText = res.rawText || text;
+    } else {
+      const html = await file.text();
+      const broker = (!brokerId || brokerId === 'auto') ? detectBroker(html, false) : getBroker(brokerId);
+      res = await broker.parseHtml(html);
+      if (res && res.trades.length > 0) res.rawText = res.rawText || html;
+      else res = null;
     }
 
-    const html = await file.text();
-    const broker = (!brokerId || brokerId === 'auto') 
-      ? detectBroker(html, false) 
-      : getBroker(brokerId);
-    
-    let res = await broker.parseHtml(html);
-    if (res && res.trades.length > 0) {
-      res.rawText = res.rawText || html;
-      return res;
+    // Fall back to the portfolio code in the filename when the content had none.
+    if (res && !res.ucc) {
+      const fileUcc = uccFromFilename(file.name);
+      if (fileUcc) res.ucc = fileUcc;
     }
-    
-    return null;
+    return res;
   } catch (e: any) {
     if (e.message === "PDF_PASSWORD_REQUIRED" || (e.message && (e.message.startsWith("Invalid Contract Note") || e.message.includes("FnO")))) {
       throw e;

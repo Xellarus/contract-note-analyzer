@@ -20,4 +20,10 @@ export interface BrokerStrategy {
    * Parse the contract note from PDF-extracted text.
    */
   parsePdfText(text: string): Promise<ContractNoteResult | null>;
+
+  /**
+   * Optional: parse a CSV export (e.g. a broker transaction report). Only the
+   * strategies that accept CSV input implement this.
+   */
+  parseCsv?(text: string): Promise<ContractNoteResult | null>;
 }
