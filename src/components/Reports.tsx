@@ -1,18 +1,88 @@
 import { useState } from 'react';
-import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Download, Briefcase, CalendarDays, TrendingUp, Receipt } from 'lucide-react';
+import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Download, Briefcase, CalendarDays, TrendingUp, Receipt, Coins, Layers } from 'lucide-react';
 import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
 import { useVirtualRows } from './ui/useVirtualRows';
 
 type Step = 'home' | 'portfolio' | 'config' | 'result';
-type ReportType = 'holding' | 'capgains' | 'transactions';
+type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expenses-detailed';
 
 const REPORTS: { type: ReportType; title: string; desc: string; Icon: typeof FileBarChart2; needsDate: boolean }[] = [
   { type: 'holding', title: 'Historical Holding Report', desc: 'Holdings of a portfolio as they stood on any past date — quantity, average cost and invested value.', Icon: FileBarChart2, needsDate: true },
   { type: 'capgains', title: 'Capital Gains Report', desc: 'Realised intraday / short-term / long-term gains per sale (FY25-26 onwards), from the LTST ledger.', Icon: TrendingUp, needsDate: false },
   { type: 'transactions', title: 'Transaction Report', desc: 'Every Buy / Sell recorded in True Entry — the full trade ledger for the portfolio.', Icon: Receipt, needsDate: false },
+  { type: 'expenses', title: 'Expense Report', desc: 'Total of each expense (brokerage, STT, GST, charges…) summed per date over the chosen period.', Icon: Coins, needsDate: false },
+  { type: 'expenses-detailed', title: 'Detailed Expense Report', desc: 'Total of each expense summed per date and per company (scrip) over the chosen period.', Icon: Layers, needsDate: false },
 ];
+
+// The expense columns in True Entry, in report order. Each carries the header
+// name(s) to look up (Integrated uses "Total GST", the rest "IGST"; IPF/Demat may
+// be absent for some brokers → that column just stays blank).
+const EXPENSE_COLS: { label: string; names: string[] }[] = [
+  { label: 'Brokerage', names: ['Total Brokerage', 'Brokerage'] },
+  { label: 'STT', names: ['STT'] },
+  { label: 'GST', names: ['IGST', 'Total GST', 'GST'] },
+  { label: 'Exchange Chgs', names: ['Exchange Turnover Charges', 'ETC'] },
+  { label: 'SEBI', names: ['SEBI Turnover Fees', 'SEBI'] },
+  { label: 'Stamp Duty', names: ['Stamp Duty'] },
+  { label: 'IPF', names: ['IPF Charges', 'IPF'] },
+  { label: 'Demat', names: ['Demat Charges', 'Demat Chrg', 'Demat'] },
+];
+
+// Build a date-wise (or date+company-wise) expense report from a True Entry grid.
+function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, toDate: string): { header: string[]; rows: string[][] } {
+  const hdr = (vals[0] || []).map((c: any) => (c ?? '').toString().trim());
+  const findCol = (...names: string[]) => { for (const n of names) { const i = hdr.indexOf(n); if (i >= 0) return i; } return -1; };
+  const dateIdx = findCol('Trade Date', 'Date');
+  const nameIdx = findCol('Stock Name', 'Security Name');
+  const expIdx = EXPENSE_COLS.map(e => findCol(...e.names));
+  const num = (v: any) => { const n = parseFloat((v ?? '').toString().replace(/,/g, '').trim()); return isNaN(n) ? 0 : n; };
+  const fromTs = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : -Infinity;
+  const toTs = toDate ? new Date(`${toDate}T23:59:59`).getTime() : Infinity;
+
+  const groups = new Map<string, { ts: number; dateStr: string; company: string; sums: number[] }>();
+  for (let i = 1; i < vals.length; i++) {
+    const r = vals[i]; if (!r) continue;
+    const dateCell = (r[dateIdx] ?? '').toString().trim();
+    const ts = parseCellDate(dateCell);
+    if (ts === null || ts < fromTs || ts > toTs) continue;   // a date report needs a dated row in range
+    const company = (r[nameIdx] ?? '').toString().trim();
+    const key = detailed ? `${ts}|${company}` : `${ts}`;
+    let g = groups.get(key);
+    if (!g) { g = { ts, dateStr: dateCell, company, sums: EXPENSE_COLS.map(() => 0) }; groups.set(key, g); }
+    expIdx.forEach((ci, k) => { if (ci >= 0) g!.sums[k] += num(r[ci]); });
+  }
+  const list = [...groups.values()].sort((a, b) => (a.ts - b.ts) || a.company.localeCompare(b.company));
+
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const fmt = (n: number) => n === 0 ? '' : r2(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const header = detailed
+    ? ['Date', 'Company', ...EXPENSE_COLS.map(e => e.label), 'Total']
+    : ['Date', ...EXPENSE_COLS.map(e => e.label), 'Total'];
+
+  const rows: string[][] = [];
+  let prevDate = '';
+  for (const g of list) {
+    const total = g.sums.reduce((s, x) => s + x, 0);
+    const cells = g.sums.map(fmt);
+    if (detailed) {
+      const d = g.dateStr === prevDate ? '' : g.dateStr;   // blank a repeated date → grouped look
+      prevDate = g.dateStr;
+      rows.push([d, g.company, ...cells, fmt(total)]);
+    } else {
+      rows.push([g.dateStr, ...cells, fmt(total)]);
+    }
+  }
+  // Grand total across the whole period.
+  if (list.length) {
+    const grand = EXPENSE_COLS.map((_, k) => list.reduce((s, g) => s + g.sums[k], 0));
+    const grandCells = grand.map(fmt);
+    const grandTotal = fmt(grand.reduce((s, x) => s + x, 0));
+    rows.push(detailed ? ['TOTAL', '', ...grandCells, grandTotal] : ['TOTAL', ...grandCells, grandTotal]);
+  }
+  return { header, rows };
+}
 
 const todayStr = () => new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -74,6 +144,12 @@ export default function Reports() {
         setPositions(res.positions);
         setTotalInvested(res.totalInvested);
         setTradeRows(res.tradeRows);
+      } else if (reportType === 'expenses' || reportType === 'expenses-detailed') {
+        const vals = await readTab(portfolio.sheetId, 'True Entry!A:Z');
+        if (vals.length < 2) throw new Error("No transactions found in True Entry — import a contract note or transaction report first.");
+        const { header, rows } = buildExpenseReport(vals, reportType === 'expenses-detailed', fromDate, toDate);
+        setGenHeader(header);
+        setGenRows(rows);
       } else {
         const range = reportType === 'capgains' ? 'LTST!A:Z' : 'True Entry!A:T';
         const vals = await readTab(portfolio.sheetId, range);
@@ -121,7 +197,8 @@ export default function Reports() {
     } else {
       rows = [genHeader, ...genRows];
       const range = (fromDate || toDate) ? `_${fromDate || 'start'}_to_${toDate || 'today'}` : '';
-      filename = `${reportType === 'capgains' ? 'CapitalGains' : 'Transactions'}_${portfolio.code}${range}.csv`;
+      const fnMap: Record<ReportType, string> = { holding: 'Holding', capgains: 'CapitalGains', transactions: 'Transactions', expenses: 'ExpenseReport', 'expenses-detailed': 'DetailedExpenseReport' };
+      filename = `${fnMap[reportType]}_${portfolio.code}${range}.csv`;
     }
     const csv = rows.map(r => r.map(csvEsc).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));

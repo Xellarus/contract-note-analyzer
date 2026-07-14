@@ -73,7 +73,10 @@ function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMast
   }
 
   const isBuySide = line.action !== "Sell";
-  const txType = isBuySide ? "Buy" : "Sell";
+  // Store the REAL action ("Bonus" / "Split" / "IPO" / "Rights" / "Buy" / "Sell") so the
+  // Trade Book shows what actually happened; the calc engines classify it back to a
+  // buy/sell side via ledgerSide() (Bonus/Split are buy-side at ₹0).
+  const txType = line.action;
   const freeShares = line.action === "Bonus" || line.action === "Split";  // ₹0, no charges
   // IPO allotment and rights subscription are buys at a real price, always delivery.
   const forceDelivery = freeShares || line.action === "IPO" || line.action === "Rights";

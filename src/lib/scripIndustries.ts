@@ -73,16 +73,21 @@ export async function saveScripIndustries(
   incoming: { isin: string; name: string; industry: string }[],
 ): Promise<{ updated: number; total: number }> {
   const existing = await fetchRows(spreadsheetId);  // strict: a real read error aborts (no clobber)
+  // Key by ISIN when present, else by normalized name (opening-basis sectors from
+  // a holding statement carry no ISIN but still need to classify by name).
+  const keyOf = (isin: string, name: string) => isin ? "isin:" + isin.toUpperCase() : (name ? "name:" + normName(name) : "");
   const map = new Map<string, ScripIndustry>();
-  for (const p of existing) if (p.isin) map.set(p.isin, p);
+  for (const p of existing) { const k = keyOf(p.isin, p.name); if (k) map.set(k, p); }
 
   const stamp = istStamp();
   let updated = 0;
   for (const s of incoming) {
     const isin = (s.isin || "").trim().toUpperCase();
     const industry = (s.industry || "").trim();
-    if (!isin || !industry) continue;
-    map.set(isin, { isin, name: s.name || map.get(isin)?.name || "", industry, updated: stamp });
+    const name = s.name || "";
+    const k = keyOf(isin, name);
+    if (!industry || !k) continue;
+    map.set(k, { isin, name: name || map.get(k)?.name || "", industry, updated: stamp });
     updated++;
   }
 

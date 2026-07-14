@@ -3,7 +3,8 @@ import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Slider
 import { ModalShell } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { CorpActionType } from '../lib/corporateActions';
-import { ScripMaster } from '../lib/scripMaster';
+import { ScripMaster, loadScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import ScripCombobox from './ScripCombobox';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS, portfolioById, sheetIdForId } from '../lib/portfolios';
 
@@ -13,6 +14,7 @@ interface AddTradeModalProps {
   defaultPortfolio: string;
   master: ScripMaster | null;
   onSaved: (pid: string) => void;
+  holdings?: { name: string; isin: string; qty: number }[];   // active-portfolio holdings, to prefill "shares held" for Bonus/Split
 }
 
 const portfolioLabel = (id: string) => { const p = portfolioById(id); return p ? `${p.label} · ${p.code}` : id; };
@@ -26,7 +28,7 @@ const ACTIONS: { value: ManualAction; label: string; hint: string }[] = [
   { value: 'Rights', label: 'Rights', hint: 'Rights subscription — a buy at the issue price.' },
 ];
 
-const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges'>; label: string }[] = [
+const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held'>; label: string }[] = [
   { key: 'brokerage', label: 'Brokerage' },
   { key: 'stt', label: 'STT' },
   { key: 'exchangeCharges', label: 'Exchange Turnover' },
@@ -52,6 +54,10 @@ interface LineDraft {
   gst: string;
   ipf: string;
   showCharges: boolean;
+  // Bonus/Split ratio helper (drives `qty`; Bonus = N:M free per held, Split = new:old).
+  ratioNum: string;
+  ratioDen: string;
+  held: string;
 }
 
 const num = (s: string): number => { const v = parseFloat((s || '').toString().replace(/,/g, '').trim()); return isNaN(v) ? 0 : v; };
@@ -61,7 +67,21 @@ let _seq = 1;
 const blankLine = (): LineDraft => ({
   id: _seq++, company: '', isin: '', action: 'Buy', qty: '', price: '', tradeClass: 'Delivery',
   brokerage: '', stt: '', exchangeCharges: '', sebiFees: '', stampDuty: '', gst: '', ipf: '', showCharges: false,
+  ratioNum: '', ratioDen: '', held: '',
 });
+
+// Bonus/Split: turn the ratio + shares-held into a free-share quantity (written to `qty`,
+// which stays the source of truth on save so the calc engine is unchanged).
+//   • Bonus  N : M      → held × N/M   free shares (e.g. 1:1 doubles the holding)
+//   • Split  new : old  → held × (new/old − 1) free shares (each `old` becomes `new`)
+const freeSharesFromRatio = (l: LineDraft): number => {
+  const held = num(l.held), n = num(l.ratioNum), d = num(l.ratioDen);
+  if (!(held > 0) || !(n > 0) || !(d > 0)) return 0;
+  const free = l.action === 'Split' ? held * (n / d - 1) : held * (n / d);
+  return free > 0 ? Math.round(free * 1e6) / 1e6 : 0;
+};
+const applyRatio = (l: LineDraft): LineDraft =>
+  isFreeShares(l.action) ? { ...l, qty: (() => { const f = freeSharesFromRatio(l); return f > 0 ? String(f) : ''; })() } : l;
 
 const todayISO = (): string => {
   const d = new Date();
@@ -71,7 +91,7 @@ const todayISO = (): string => {
 const isFreeShares = (a: ManualAction) => a === 'Bonus' || a === 'Split';
 const isDeliveryLocked = (a: ManualAction) => isFreeShares(a) || a === 'IPO' || a === 'Rights';
 
-export default function AddTradeModal({ open, onClose, defaultPortfolio, master, onSaved }: AddTradeModalProps) {
+export default function AddTradeModal({ open, onClose, defaultPortfolio, master, onSaved, holdings }: AddTradeModalProps) {
   const titleId = useId();
   const [portfolio, setPortfolio] = useState<string>(defaultPortfolio);
   const [tradeDate, setTradeDate] = useState<string>(todayISO());
@@ -79,6 +99,16 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AppendManualResult | null>(null);
+  // The company autocomplete needs the scrip master. Normally it's passed in from
+  // Holdings, but load it here too if that prop is null (modal opened before Holdings
+  // finished loading, or that load failed) so the dropdown is never empty.
+  const [selfMaster, setSelfMaster] = useState<ScripMaster | null>(null);
+  const activeMaster = master || selfMaster;
+  useEffect(() => {
+    if (open && !master && !selfMaster && hasValidGoogleToken()) {
+      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then(setSelfMaster).catch(() => {});
+    }
+  }, [open, master, selfMaster]);
 
   // Corporate-action mode (merger / demerger → dedicated tab).
   const [mode, setMode] = useState<'trades' | 'corpaction'>('trades');
@@ -105,23 +135,24 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     setCaSaving(false); setCaError(null); setCaResult(null);
   }, [open, defaultPortfolio]);
 
-  // One shared datalist of canonical names for the company autocomplete.
-  const nameOptions = useMemo(() => {
-    if (!master) return [];
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const e of master.entries) {
-      const n = e.canonicalName?.trim();
-      if (n && !seen.has(n)) { seen.add(n); out.push(n); }
-      if (out.length >= 4000) break;
-    }
-    return out.sort((a, b) => a.localeCompare(b));
-  }, [master]);
+  // Company autocomplete is handled by <ScripCombobox> (a filtered typeahead), not a
+  // native <datalist> — the latter silently stops rendering suggestions once the master
+  // reaches ~5,000 entries, which broke the dropdown for every scrip.
 
   if (!open) return null;
 
   const setLine = (id: number, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  // Apply a patch and, for Bonus/Split, recompute the free-share qty from the ratio.
+  const setLineRatio = (id: number, patch: Partial<LineDraft>) =>
+    setLines((prev) => prev.map((l) => (l.id === id ? applyRatio({ ...l, ...patch }) : l)));
+  // Current holding of a company (active portfolio) — to prefill "shares held".
+  const heldFor = (company: string, isin: string): number | null => {
+    if (!holdings?.length) return null;
+    const c = company.trim().toLowerCase(), i = isin.trim().toUpperCase();
+    const h = holdings.find((x) => (i && (x.isin || '').toUpperCase() === i) || (c && x.name.trim().toLowerCase() === c));
+    return h && h.qty > 0 ? h.qty : null;
+  };
   const removeLine = (id: number) => setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.id !== id)));
   const addLine = () => setLines((prev) => [...prev, blankLine()]);
 
@@ -138,8 +169,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
 
   const lineError = (l: LineDraft): string | null => {
     if (!l.company.trim()) return 'Company is required';
+    if (isFreeShares(l.action)) return num(l.qty) > 0 ? null : 'Enter a ratio and shares held';
     if (num(l.qty) <= 0) return 'Quantity must be greater than 0';
-    if (!isFreeShares(l.action) && num(l.price) <= 0) return 'Price must be greater than 0';
+    if (num(l.price) <= 0) return 'Price must be greater than 0';
     return null;
   };
 
@@ -299,11 +331,11 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{caLabels.from}</label>
-                  <input type="text" list="scrip-name-options" placeholder="Company name…" value={caFrom} onChange={(e) => setCaFrom(e.target.value)} className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
+                  <ScripCombobox value={caFrom} onChange={setCaFrom} master={activeMaster} placeholder="Company name…" className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{caLabels.to}</label>
-                  <input type="text" list="scrip-name-options" placeholder="Company name…" value={caTo} onChange={(e) => setCaTo(e.target.value)} className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
+                  <ScripCombobox value={caTo} onChange={setCaTo} master={activeMaster} placeholder="Company name…" className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
                 </div>
               </div>
 
@@ -322,10 +354,6 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Notes <span className="font-normal normal-case text-slate-400">(optional)</span></label>
                 <input type="text" placeholder="e.g. ratio, record date…" value={caNotes} onChange={(e) => setCaNotes(e.target.value)} className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
               </div>
-
-              <datalist id="scrip-name-options">
-                {nameOptions.map((n) => <option key={n} value={n} />)}
-              </datalist>
 
               <p className="text-[11px] text-slate-400 leading-relaxed">{caLabels.hint}</p>
 
@@ -399,10 +427,6 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 </div>
               </div>
 
-              <datalist id="scrip-name-options">
-                {nameOptions.map((n) => <option key={n} value={n} />)}
-              </datalist>
-
               {/* Line items */}
               <div className="space-y-3">
                 {lines.map((l, idx) => {
@@ -428,9 +452,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div className="sm:col-span-2 space-y-1">
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Company</label>
-                          <input
-                            type="text" list="scrip-name-options" placeholder="Start typing a company name…"
-                            value={l.company} onChange={(e) => setLine(l.id, { company: e.target.value })}
+                          <ScripCombobox
+                            value={l.company} onChange={(v) => setLine(l.id, { company: v })}
+                            master={activeMaster} placeholder="Start typing a company name…"
                             className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                           />
                         </div>
@@ -444,7 +468,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         </div>
                       </div>
 
-                      {/* Action / Qty / Price / Class */}
+                      {/* Type + (Qty · Price · Class) for trades — or (Ratio · Held · Free shares) for Bonus/Split */}
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Type</label>
@@ -452,43 +476,90 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                             value={l.action}
                             onChange={(e) => {
                               const action = e.target.value as ManualAction;
-                              setLine(l.id, { action, tradeClass: isDeliveryLocked(action) ? 'Delivery' : l.tradeClass });
+                              const patch: Partial<LineDraft> = { action, tradeClass: isDeliveryLocked(action) ? 'Delivery' : l.tradeClass };
+                              // Prefill shares-held from the current holding when switching to a ratio action.
+                              if (isFreeShares(action) && !l.held.trim()) { const h = heldFor(l.company, l.isin); if (h != null) patch.held = String(h); }
+                              setLineRatio(l.id, patch);
                             }}
                             className="w-full px-2.5 py-2 text-xs font-semibold text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white cursor-pointer"
                           >
                             {ACTIONS.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
                           </select>
                         </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Quantity</label>
-                          <input
-                            type="number" min="0" step="any" placeholder="0"
-                            value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })}
-                            className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{l.action === 'IPO' ? 'Issue Price' : l.action === 'Rights' ? 'Rights Price' : 'Price'}</label>
-                          <input
-                            type="number" min="0" step="any" placeholder={free ? '0 (free)' : '0'}
-                            value={free ? '' : l.price} disabled={free} onChange={(e) => setLine(l.id, { price: e.target.value })}
-                            className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono disabled:bg-slate-100 disabled:text-slate-400"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Class</label>
-                          <select
-                            value={l.tradeClass} disabled={deliveryLocked}
-                            onChange={(e) => setLine(l.id, { tradeClass: e.target.value as 'Delivery' | 'Intraday' })}
-                            className="w-full px-2.5 py-2 text-xs font-semibold text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white cursor-pointer disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
-                          >
-                            <option value="Delivery">Delivery</option>
-                            <option value="Intraday">Intraday</option>
-                          </select>
-                        </div>
+
+                        {free ? (
+                          <>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{l.action === 'Split' ? 'Ratio (new : old)' : 'Ratio (bonus : held)'}</label>
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="number" min="0" step="any" placeholder={l.action === 'Split' ? 'new' : 'N'}
+                                  value={l.ratioNum} onChange={(e) => setLineRatio(l.id, { ratioNum: e.target.value })}
+                                  className="w-full min-w-0 px-2 py-2 text-xs text-center text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                                />
+                                <span className="text-slate-400 font-bold shrink-0">:</span>
+                                <input
+                                  type="number" min="0" step="any" placeholder={l.action === 'Split' ? 'old' : 'M'}
+                                  value={l.ratioDen} onChange={(e) => setLineRatio(l.id, { ratioDen: e.target.value })}
+                                  className="w-full min-w-0 px-2 py-2 text-xs text-center text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                                />
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Shares held</label>
+                              <input
+                                type="number" min="0" step="any" placeholder="0"
+                                value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
+                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Free shares</label>
+                              <input
+                                type="number" min="0" step="any" placeholder="0"
+                                value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })}
+                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                              />
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Quantity</label>
+                              <input
+                                type="number" min="0" step="any" placeholder="0"
+                                value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })}
+                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{l.action === 'IPO' ? 'Issue Price' : l.action === 'Rights' ? 'Rights Price' : 'Price'}</label>
+                              <input
+                                type="number" min="0" step="any" placeholder="0"
+                                value={l.price} onChange={(e) => setLine(l.id, { price: e.target.value })}
+                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Class</label>
+                              <select
+                                value={l.tradeClass} disabled={deliveryLocked}
+                                onChange={(e) => setLine(l.id, { tradeClass: e.target.value as 'Delivery' | 'Intraday' })}
+                                className="w-full px-2.5 py-2 text-xs font-semibold text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white cursor-pointer disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
+                              >
+                                <option value="Delivery">Delivery</option>
+                                <option value="Intraday">Intraday</option>
+                              </select>
+                            </div>
+                          </>
+                        )}
                       </div>
 
-                      {actionHint && <p className="text-[10px] text-slate-400">{actionHint}</p>}
+                      {free ? (
+                        <p className="text-[10px] text-slate-400">
+                          {actionHint}{num(l.qty) > 0 ? ` · adds ${num(l.qty).toLocaleString('en-IN')} free share${num(l.qty) === 1 ? '' : 's'} at ₹0` : ''}
+                        </p>
+                      ) : actionHint ? <p className="text-[10px] text-slate-400">{actionHint}</p> : null}
 
                       {/* Charges */}
                       {!free && (

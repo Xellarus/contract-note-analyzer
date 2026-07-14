@@ -29,6 +29,7 @@ import ImportHistory from './components/ImportHistory';
 import Login from './components/Login';
 import Reports from './components/Reports';
 import ScreenerImport from './components/ScreenerImport';
+import OpeningBasisImport from './components/OpeningBasisImport';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
 const SummaryCard = ({ 
@@ -640,7 +641,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
   // Imports page sub-view: the upload/import flow vs. the import-history log.
-  const [importPageTab, setImportPageTab] = useState<'import' | 'history' | 'screener'>('import');
+  const [importPageTab, setImportPageTab] = useState<'import' | 'history' | 'screener' | 'opening'>('import');
   const [data, setData] = useState<ContractNoteResult | null>(null);
   const [showRawText, setShowRawText] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
@@ -860,12 +861,9 @@ export default function App() {
     let fileArray = Array.from(files);
 
     if (broker === 'zerodha') {
-      const allowedFiles = fileArray.filter(file => 
-        file.name.toUpperCase().startsWith('NJW724') && 
-        file.name.toLowerCase().endsWith('.pdf')
-      );
+      const allowedFiles = fileArray.filter(file => file.name.toLowerCase().endsWith('.pdf'));
       if (allowedFiles.length === 0) {
-        setError("Only PDF files starting with name 'NJW724' are allowed and processed.");
+        setError("Only PDF contract notes are allowed for Zerodha.");
         setIsLoading(false);
         return;
       }
@@ -1840,25 +1838,6 @@ export default function App() {
                   </select>
                 </div>
               )}
-              <button
-                onClick={importToSheets}
-                className={`px-3 py-1.5 text-white text-[10px] font-bold rounded-lg transition-colors shadow-sm hidden lg:inline ${
-                  sheetsImportStatus?.success
-                    ? 'bg-blue-600 cursor-not-allowed'
-                    : sheetsImportStatus?.error
-                      ? 'bg-rose-600 hover:bg-rose-700 cursor-pointer'
-                      : 'bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 cursor-pointer'
-                } ${isImportingToSheets ? 'opacity-75 cursor-not-allowed' : ''}`}
-                disabled={isImportingToSheets || sheetsImportStatus?.success === true}
-              >
-                {isImportingToSheets
-                  ? "Importing..."
-                  : sheetsImportStatus?.success
-                    ? "Imported ✓"
-                    : sheetsImportStatus?.error
-                      ? "Failed — Retry"
-                      : "Import to Sheet"}
-              </button>
             </>
           )}
 
@@ -2280,12 +2259,21 @@ export default function App() {
                 >
                   Securities &amp; Prices
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setImportPageTab('opening')}
+                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'opening' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  Opening Basis
+                </button>
               </div>
             </div>
 
             {importPageTab === 'history' && <ImportHistory />}
 
             {importPageTab === 'screener' && <ScreenerImport />}
+
+            {importPageTab === 'opening' && <OpeningBasisImport />}
 
             {importPageTab === 'import' && activeTab === 'analyse' && (
               <div className="space-y-6">

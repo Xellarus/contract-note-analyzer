@@ -123,10 +123,10 @@ export function invalidateScripCache(): void {
  *  regardless of how the tab was named when the CSV was imported. */
 async function firstSheetTitle(spreadsheetId: string): Promise<string> {
   if (_titleCache[spreadsheetId]) return _titleCache[spreadsheetId];
-  const meta: any = await (gapi.client as any).sheets.spreadsheets.get({
+  const meta: any = await sheetsBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
     spreadsheetId,
     fields: "sheets.properties(title,sheetId)",
-  });
+  }));
   const arr: any[] = meta?.result?.sheets || [];
   const s0 = arr.find((s: any) => s?.properties?.sheetId === 0) || arr[0];
   const title = s0?.properties?.title || "Sheet1";
@@ -136,6 +136,24 @@ async function firstSheetTitle(spreadsheetId: string): Promise<string> {
 
 // A1-notation-safe sheet reference: always single-quoted (handles spaces).
 const quoteTab = (title: string): string => `'${title.replace(/'/g, "''")}'`;
+
+// Sheets reads transiently 429/5xx during heavy batches (rebuild + CG + ledger back to
+// back). The scrip master is load-CRITICAL: a swallowed failure used to return — and cache
+// for 90s — an EMPTY master, so every security (even ones present in the sheet) showed
+// "no match found", and a "create new" on that list would append duplicate rows. So retry
+// the read, and let a genuine failure propagate rather than silently emptying the master.
+async function sheetsBackoff<T>(fn: () => Promise<T>, tries = 5): Promise<T> {
+  let last: any;
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); } catch (e: any) {
+      last = e;
+      const code = Number(e?.result?.error?.code ?? e?.status ?? 0);
+      if (code !== 429 && code !== 500 && code !== 503) throw e;
+      await new Promise(r => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
+  throw last;
+}
 
 /**
  * Read the shared scrip master from its Google Sheet. Columns are detected from
@@ -150,13 +168,23 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
   }
 
   const master = emptyMaster();
+  let rows: any[][];
   try {
     const tab = await firstSheetTitle(spreadsheetId);
-    const res: any = await (gapi.client as any).sheets.spreadsheets.values.get({
+    const res: any = await sheetsBackoff(() => (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
       range: `${quoteTab(tab)}!A1:J50000`,  // wide enough for BSE Code / Tally Name / Industry extras
-    });
-    const rows: any[][] = res?.result?.values || [];
+    }));
+    rows = res?.result?.values || [];
+  } catch (e: any) {
+    // DON'T cache or return an empty master on a read failure — that would make every
+    // security show "no match found" for 90s. Surface it so the caller fails loudly and
+    // the user can retry once the rate limit clears (the master is untouched).
+    const msg = e?.result?.error?.message || e?.message || "read failed";
+    throw new Error(`Couldn't load the shared Scrip Master sheet (${msg}). If this is a Google Sheets rate limit, wait ~30s and retry — nothing was changed.`);
+  }
+
+  {
     if (rows.length > 0) {
       const header = (rows[0] || []).map((h: any) => (h || "").toString().toLowerCase());
       const hasHeader = header.some((h: string) => /isin|name|security|company|alias|scrip|bse|nse|code/.test(h));
@@ -216,12 +244,10 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
         if (industry && !entry.industry) entry.industry = industry;
       }
     }
-  } catch (e) {
-    console.warn("Could not load the scrip list from the sheet — names won't match until it loads:", e);
   }
 
   master.dirty = false;
-  _cache = { id: spreadsheetId, master, ts: now };
+  _cache = { id: spreadsheetId, master, ts: now };   // cache only after a SUCCESSFUL read
   return master;
 }
 

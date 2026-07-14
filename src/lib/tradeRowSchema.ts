@@ -9,6 +9,31 @@
  * records out in the sheet's column order.
  */
 
+/**
+ * Map a ledger "Transaction Type" to the holding SIDE the replay engines use.
+ * The ledger stores the real action ("Buy" / "Sell" / "IPO" / "Bonus" / "Split" /
+ * "Rights") for display, but every engine only adds (buy) or removes (sell) shares:
+ *   • SELL  — Sell / Sale / Buyback / Redeem  → removes shares
+ *   • BUY   — Buy / IPO / Bonus / Split / Rights / Purchase / Allot / Paid → adds shares
+ *             (Bonus & Split carry ₹0, so their sheet row already has 0 turnover/cost)
+ *   • ""    — anything else (Dividend, blank) → skipped by the replay
+ * Buyback is tested before Buy (it contains "buy"). Existing rows are only ever
+ * "Buy"/"Sell", so this maps them identically — no change to historical data.
+ */
+export function ledgerSide(type: string): "BUY" | "SELL" | "" {
+  const t = (type || "").toUpperCase();
+  if (/SELL|SALE|BUY\s*-?\s*BACK|BUYBACK|REDEEM|REDEM/.test(t)) return "SELL";
+  if (/BUY|BONUS|SPLIT|IPO|RIGHT|PURCHASE|ALLOT|SUBSCRIB|PAID/.test(t)) return "BUY";
+  return "";
+}
+
+/** True for the ₹0 free-share corporate actions (bonus / split). */
+export const isFreeShareType = (type: string): boolean => /BONUS|SPLIT/i.test(type || "");
+
+/** True for a Split specifically — the engines RESCALE held lots for it (keeping their
+ *  acquisition dates), rather than adding ₹0 shares like a Bonus. */
+export const isSplitType = (type: string): boolean => /SPLIT/i.test(type || "");
+
 /** Map a sheet header cell to a canonical record key (""/none if unrecognised).
  *  Composite "Total …" columns are matched before the single-charge columns
  *  they contain ("incl STT" literally contains "stt"), so totals never land in

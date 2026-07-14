@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle, 
+import {
+  Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
   Compass, Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
-  ArrowLeft, ChevronLeft, Download, ExternalLink, Wrench
+  ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save
 } from 'lucide-react';
 import { PortfolioHolding, ContractNoteResult } from '../types';
 import { useGoogleLogin } from '@react-oauth/google';
@@ -13,11 +13,12 @@ import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedSc
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
 import { loadScripMaster, lookupScrip, normName, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { loadScripPrices, ScripPrice } from '../lib/scripPrices';
+import { loadOpeningHoldings, updateOpeningHoldingRow } from '../lib/openingHoldings';
+import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
-import { migrateTrueRawEntry } from '../lib/sheetMigration';
 import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
-import { toast, confirmDialog } from './ui/overlay';
+import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
 // Parse a "23 Jun 2026, 02:30 PM"-style IST stamp (as written to the Prices tab)
 // to epoch ms, so we can pick the most recent one. Tolerant of am/pm casing and
@@ -34,6 +35,29 @@ const parsePriceStamp = (s: string): number => {
 };
 
 const csvEscape = (v: any) => { const s = (v ?? '').toString(); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+
+// "Edit Entry" popup field specs. `header` is the True Entry sheet column; a field is
+// only shown/written when that column exists in the current sheet's header row.
+const TE_CORE_FIELDS: { key: string; label: string; header: string; kind: 'text' | 'type' | 'num' | 'class' }[] = [
+  { key: 'tradeDate', label: 'Trade Date', header: 'Trade Date', kind: 'text' },
+  { key: 'transactionType', label: 'Type', header: 'Transaction Type', kind: 'type' },
+  { key: 'tradeClass', label: 'Trade Class', header: 'Trade Class', kind: 'class' },
+  { key: 'quantity', label: 'Quantity', header: 'Number of Shares', kind: 'num' },
+  { key: 'price', label: 'Avg Price', header: 'Avg Price', kind: 'num' },
+  { key: 'turnover', label: 'Turnover', header: 'Total Amount (Turnover)', kind: 'num' },
+];
+const TE_EXPENSE_FIELDS: { key: string; label: string; header: string }[] = [
+  { key: 'brokerage', label: 'Total Brokerage', header: 'Total Brokerage' },
+  { key: 'stt', label: 'STT', header: 'STT' },
+  { key: 'etc', label: 'Exchange Charges', header: 'Exchange Turnover Charges' },
+  { key: 'sebi', label: 'SEBI Fees', header: 'SEBI Turnover Fees' },
+  { key: 'ipf', label: 'IPF Charges', header: 'IPF Charges' },
+  { key: 'demat', label: 'Demat Charges', header: 'Demat Charges' },
+  { key: 'gst', label: 'Total GST', header: 'Total GST' },
+  { key: 'igst', label: 'IGST', header: 'IGST' },
+  { key: 'stamp', label: 'Stamp Duty', header: 'Stamp Duty' },
+];
+const numCell = (v: any): number => { const n = parseFloat((v ?? '').toString().replace(/,/g, '')); return isNaN(n) ? 0 : n; };
 
 interface HoldingsProps {
   holdings: PortfolioHolding[];
@@ -65,6 +89,13 @@ interface Transaction {
   brokeragePerShare: number;
   amount: number;
   balanceQuantity?: number;
+  isOpening?: boolean;   // seeded from the Opening Holdings tab (carried-in basis)
+  longTerm?: boolean;    // opening lot's long-term flag (pre-Apr-2024 block)
+  // Edit-in-place metadata (Google portfolios only): which sheet a row came from and
+  // its 1-based row number, so the "Edit Entry" popup can write the change straight back.
+  editSource?: 'trueEntry' | 'opening';
+  sheetRow?: number;
+  rawRow?: any[];        // the full True Entry row (preserves columns the popup doesn't edit)
 }
 
 interface DisplayHolding {
@@ -80,6 +111,7 @@ interface DisplayHolding {
   unrealizedGain: number;
   unrealizedGainPct: number;
   type: string;
+  sold?: boolean;   // exited position (traded historically, no current holding)
   original: any;
 }
 
@@ -135,6 +167,20 @@ export default function Holdings({
   }, [priceRows]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
+  // True Entry header row for the current drill-down (maps field → column when writing an edit).
+  const [trueEntryHeaders, setTrueEntryHeaders] = useState<string[]>([]);
+  // "Edit Entry" popup state.
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [editForm, setEditForm] = useState<Record<string, string>>({});
+  const [savingEdit, setSavingEdit] = useState(false);
+  // Args of the current drill-down, so an edit can re-fetch the same scrip after saving.
+  const [lastTxFetch, setLastTxFetch] = useState<{ companyName: string; isin: string } | null>(null);
+  // "Show Sold" toggle: also list companies that were traded but are no longer held.
+  // Derived from True Entry + Opening Holdings — NOT the Holding tab, which only
+  // ever contains qty > 0 positions (rebuildHoldingTab filters them out).
+  const [showSold, setShowSold] = useState(false);
+  const [soldHoldings, setSoldHoldings] = useState<SheetHolding[]>([]);
+  const [isLoadingSold, setIsLoadingSold] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState<'trade_book' | 'inventory' | 'realised_inventory'>('trade_book');
   const [customCmp, setCustomCmp] = useState<number | null>(null);
   const [isEditingCmp, setIsEditingCmp] = useState(false);
@@ -179,7 +225,6 @@ export default function Holdings({
   // Which portfolio a main-page action is currently running for (spinner/disable per row).
   const [actionPid, setActionPid] = useState<string | null>(null);
   const [downloadingFor, setDownloadingFor] = useState<string | null>(null);
-  const [migratingFor, setMigratingFor] = useState<string | null>(null);
   // FY transaction-register generator (scrip-wise Excel Trx tab)
   const [isGeneratingTrx, setIsGeneratingTrx] = useState(false);
   const [trxStatus, setTrxStatus] = useState<{ pid?: string; result?: TrxRegisterResult; error?: string } | null>(null);
@@ -286,6 +331,77 @@ export default function Holdings({
       if (!silent) setIsLoadingSheet(false);
     }
   };
+
+  // Companies with trade history that are NOT in the current Holding tab — fully
+  // sold / exited (or merged away). Reads True Entry + Opening Holdings, resolves
+  // every name through the scrip master, and diffs against the live holdings list.
+  const fetchSoldHoldings = async (portfolio: string) => {
+    if (portfolio === 'local') { setSoldHoldings([]); return; }
+    const token = (gapi.client as any)?.getToken?.();
+    if (!token || !token.access_token) return;
+    const spreadsheetId = sheetIdForId(portfolio);
+    if (!spreadsheetId) return;
+    setIsLoadingSold(true);
+    try {
+      const m = scrip || await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null);
+      const keyFor = (isin: string, name: string): string => {
+        const e = m ? lookupScrip(m, isin, name).entry : null;
+        if (e) return e.key;
+        // Fallback must be IDENTICAL for the same company whether or not a given row carries
+        // an ISIN — True Entry rows have none, the Opening Holdings lot does. Key on the
+        // normalized NAME first so the two don't split into duplicate "sold" rows (and so
+        // heldKeys, built from the ISIN-bearing Holding tab, still matches a no-ISIN True
+        // Entry row for the same name). Only used when the master didn't resolve the scrip.
+        return normName(name) || (isin || '').trim().toLowerCase();
+      };
+      interface SeenScrip { name: string; isin: string; }
+      const seen = new Map<string, SeenScrip>();
+      const note = (isin: string, name: string) => {
+        if (!name) return;
+        const k = keyFor(isin, name);
+        const cur = seen.get(k);
+        if (!cur) seen.set(k, { name, isin });
+        else {
+          if (name.length > cur.name.length) cur.name = name;   // prefer the fullest name
+          if (!cur.isin && isin) cur.isin = isin;
+        }
+      };
+      const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId, range: 'True Entry!A:T' });
+      const rows: any[][] = res?.result?.values || [];
+      if (rows.length > 1) {
+        const headers = rows[0].map((h: any) => h.toString().trim());
+        const nameIdx = headers.indexOf('Stock Name');
+        const isinIdx = headers.indexOf('ISIN');
+        for (let i = 1; i < rows.length; i++) {
+          const r = rows[i]; if (!r || r.length === 0) continue;
+          note(isinIdx !== -1 ? (r[isinIdx] || '').toString().trim() : '', (r[nameIdx !== -1 ? nameIdx : 2] || '').toString().trim());
+        }
+      }
+      const opening = await loadOpeningHoldings(spreadsheetId).catch(() => []);
+      for (const ol of opening) note(ol.isin, ol.name);
+
+      const heldKeys = new Set(sheetHoldings.map(h => keyFor(h.isin, h.companyName)));
+      const sold: SheetHolding[] = [];
+      for (const [k, s] of seen) {
+        if (heldKeys.has(k)) continue;
+        sold.push({ companyName: s.name, isin: s.isin, quantity: 0, avgBuyPrice: 0, investedValue: 0 });
+      }
+      sold.sort((a, b) => a.companyName.localeCompare(b.companyName));
+      setSoldHoldings(sold);
+    } catch (err: any) {
+      console.error('Failed to compute sold companies:', err);
+      toast.error('Could not load sold companies.');
+    } finally {
+      setIsLoadingSold(false);
+    }
+  };
+
+  // Refresh the sold list whenever the toggle is on and the holdings change
+  // (portfolio switch, resync, an edit's rebuild) — the diff is against live holdings.
+  useEffect(() => {
+    if (showSold && activePortfolio !== 'local') fetchSoldHoldings(activePortfolio);
+    else setSoldHoldings([]);
+  }, [showSold, activePortfolio, sheetHoldings]);
 
   // Lightweight read of ONE portfolio's Holding-tab total for its summary card.
   // Deliberately does NOT touch sheetHoldings/sheetTotal (the detail-view state),
@@ -429,54 +545,6 @@ export default function Holdings({
     }
   };
 
-  // One-time cleanup: drop the ISIN column and convert Trade Date cells to real
-  // ISO dates in True Entry / Raw Entry, then recompute downstream tabs.
-  const migrateSheets = async (pid: string) => {
-    if (!hasValidGoogleToken()) {
-      toast.error("Google Sheets connection required. Please authorize with Google first.");
-      return;
-    }
-    const ok = await confirmDialog({
-      title: `Clean up ${pid.toUpperCase()}'s ledger?`,
-      body: (
-        <>
-          This rewrites True Entry &amp; Raw Entry to:
-          <ul className="list-disc pl-4 mt-1 space-y-0.5">
-            <li>Remove the ISIN column</li>
-            <li>Convert every Trade Date to a real date (YYYY-MM-DD) so pivots can group by date</li>
-          </ul>
-          <span className="block mt-2">It then rebuilds Holding + capital gains. This is a one-time operation.</span>
-        </>
-      ),
-      confirmLabel: 'Clean up',
-    });
-    if (!ok) return;
-    setMigratingFor(pid);
-    try {
-      const res = await migrateTrueRawEntry(sheetIdForId(pid));
-      const fixed = res.tabs.reduce((s, t) => s + t.datesFixed, 0);
-      const removed = res.tabs.some(t => t.removedIsin);
-      if (activePortfolio === pid) await fetchSheetHoldings(pid, true);
-      const summary =
-        `Done for ${pid.toUpperCase()}. ` +
-        `${removed ? 'ISIN column removed. ' : 'No ISIN column found. '}` +
-        `${fixed} date cell(s) converted to real dates.`;
-      if (res.holdingWarning || res.capGainsWarning) {
-        toast.error(
-          summary +
-          (res.holdingWarning ? ` Warning: Holding rebuild — ${res.holdingWarning}.` : '') +
-          (res.capGainsWarning ? ` Warning: capital gains — ${res.capGainsWarning}.` : '')
-        );
-      } else {
-        toast.success(summary);
-      }
-    } catch (err: any) {
-      toast.error("Cleanup failed: " + (err?.result?.error?.message || err?.message || "unknown error"));
-    } finally {
-      setMigratingFor(null);
-    }
-  };
-
   // Google Sign-In hook inside Holdings
   const login = useGoogleLogin({
     scope: "https://www.googleapis.com/auth/spreadsheets",
@@ -591,6 +659,7 @@ export default function Holdings({
   const fetchTransactionsForStock = async (companyName: string, isin: string) => {
     setIsLoadingTransactions(true);
     setTransactions([]);
+    setLastTxFetch({ companyName, isin });
 
     if (activePortfolio === 'local') {
       // Pull trades from parsedContractNote
@@ -633,12 +702,9 @@ export default function Holdings({
       let currentBal = 0;
       const sortedLocal = [...parsed].sort((a, b) => parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate));
       sortedLocal.forEach(t => {
-        const type = t.transactionType.toUpperCase();
-        if (type.includes("BUY") || type.includes("RIGHT") || type.includes("PAID")) {
-          currentBal += t.quantity;
-        } else if (type.includes("SELL")) {
-          currentBal -= t.quantity;
-        }
+        const side = ledgerSide(t.transactionType);
+        if (side === "BUY") currentBal += t.quantity;
+        else if (side === "SELL") currentBal -= t.quantity;
         t.balanceQuantity = currentBal;
       });
 
@@ -668,8 +734,21 @@ export default function Holdings({
       const rows = response?.result?.values || [];
       const parsed: Transaction[] = [];
 
+      // Resolve the selected holding to its canonical scrip key ONCE, then match every
+      // candidate row (True Entry + opening lots) through the scrip master — the same
+      // resolution the importer uses — instead of only raw ISIN / name-substring. This
+      // catches rows whose name spelling differs but resolve to the same scrip.
+      const selKey = scrip ? (lookupScrip(scrip, isin, companyName).entry?.key || "") : "";
+      const rowMatchesSel = (rowIsin: string, rowName: string): boolean => {
+        if (isin && rowIsin && rowIsin.toLowerCase() === isin.toLowerCase()) return true;
+        if (scrip && selKey) { const e = lookupScrip(scrip, rowIsin, rowName).entry; if (e && e.key === selKey) return true; }
+        const cn = (companyName || "").toLowerCase(), rn = (rowName || "").toLowerCase();
+        return !!cn && !!rn && (rn.includes(cn) || cn.includes(rn));
+      };
+
       if (rows.length > 1) {
         const headers = rows[0].map((h: any) => h.toString().trim());
+        setTrueEntryHeaders(headers);
         const dateIdx = headers.indexOf("Trade Date");
         const isinIdx = headers.indexOf("ISIN");
         const nameIdx = headers.indexOf("Stock Name");
@@ -686,13 +765,7 @@ export default function Holdings({
           const rowIsin = (row[isinIdx !== -1 ? isinIdx : 1] || "").toString().trim();
           const rowName = (row[nameIdx !== -1 ? nameIdx : 2] || "").toString().trim();
 
-          const matchIsin = isin && rowIsin && rowIsin.toLowerCase() === isin.toLowerCase();
-          const matchName = companyName && rowName && (
-            rowName.toLowerCase().includes(companyName.toLowerCase()) || 
-            companyName.toLowerCase().includes(rowName.toLowerCase())
-          );
-
-          if (matchIsin || matchName) {
+          if (rowMatchesSel(rowIsin, rowName)) {
             const tradeDate = (row[dateIdx !== -1 ? dateIdx : 0] || "").toString().trim();
             const transactionType = (row[typeIdx !== -1 ? typeIdx : 3] || "").toString().trim();
             const quantity = parseFloat((row[qtyIdx !== -1 ? qtyIdx : 4] || "0").toString().replace(/,/g, ""));
@@ -710,11 +783,42 @@ export default function Holdings({
               turnover: isNaN(turnover) ? 0 : turnover,
               brokerage: isNaN(brokerage) ? 0 : brokerage,
               brokeragePerShare: quantity > 0 && !isNaN(brokerage) ? brokerage / quantity : 0,
-              amount: isNaN(turnover) ? 0 : turnover
+              amount: isNaN(turnover) ? 0 : turnover,
+              editSource: 'trueEntry',
+              sheetRow: i + 1,   // rows[0] is sheet row 1
+              rawRow: row,
             });
           }
         }
       }
+
+      // Seed the scrip's opening lots (pre-FY26 basis) so the trade book, inventory
+      // and realised tables start from the carried-in position — not from zero. A
+      // scrip held before FY26 and then sold down (e.g. Goodluck) otherwise reads as
+      // a negative balance because this view only sees FY26 True Entry rows.
+      try {
+        const opening = await loadOpeningHoldings(spreadsheetId);
+        if (opening.length) {
+          for (const ol of opening.filter(ol => rowMatchesSel(ol.isin, ol.name))) {
+            parsed.push({
+              tradeDate: ol.acqDate,
+              isin: ol.isin || isin || "",
+              assetName: ol.name,
+              transactionType: "Opening Buy",
+              quantity: ol.qty,
+              price: ol.costPerShare,
+              turnover: ol.qty * ol.costPerShare,
+              brokerage: 0,
+              brokeragePerShare: 0,
+              amount: ol.qty * ol.costPerShare,
+              isOpening: true,
+              longTerm: ol.longTerm,
+              editSource: 'opening',
+              sheetRow: ol.rowIndex,
+            });
+          }
+        }
+      } catch { /* no Opening Holdings tab → view stays FY26-only */ }
 
       parsed.sort((a, b) => parseDateStr(b.tradeDate) - parseDateStr(a.tradeDate));
 
@@ -722,12 +826,9 @@ export default function Holdings({
       const oldestFirst = [...parsed].sort((a, b) => parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate));
       let currentBal = 0;
       oldestFirst.forEach(t => {
-        const type = t.transactionType.toUpperCase();
-        if (type.includes("BUY") || type.includes("RIGHT") || type.includes("PAID") || type === "PARTLY PAID") {
-          currentBal += t.quantity;
-        } else if (type.includes("SELL")) {
-          currentBal -= t.quantity;
-        }
+        const side = ledgerSide(t.transactionType);
+        if (side === "BUY") currentBal += t.quantity;
+        else if (side === "SELL") currentBal -= t.quantity;
         t.balanceQuantity = currentBal;
       });
 
@@ -739,6 +840,216 @@ export default function Holdings({
       setIsLoadingTransactions(false);
     }
   };
+
+  // ── Edit Entry (Trade Book) ───────────────────────────────────────────────
+  // Open the popup, prefilling the form from the row's source (True Entry raw row,
+  // or the opening lot's fields).
+  const openEdit = (t: Transaction) => {
+    const form: Record<string, string> = {};
+    if (t.editSource === 'opening') {
+      form.tradeDate = t.tradeDate;
+      form.quantity = String(t.quantity);
+      form.price = String(t.price);          // cost/share
+      form.longTerm = t.longTerm ? 'yes' : '';
+    } else {
+      form.tradeDate = t.tradeDate;
+      form.transactionType = t.transactionType;
+      form.quantity = String(t.quantity);
+      form.price = String(t.price);
+      form.turnover = String(t.turnover);
+      const raw = t.rawRow || [];
+      for (const f of [...TE_CORE_FIELDS, ...TE_EXPENSE_FIELDS]) {
+        const idx = trueEntryHeaders.indexOf(f.header);
+        if (idx !== -1) form[f.key] = (raw[idx] ?? '').toString();
+      }
+    }
+    setEditForm(form);
+    setEditingTx(t);
+  };
+
+  // Rebuild a full True Entry row from the edited form, preserving untouched columns
+  // (Trade Class, Import ID, …) and recomputing the derived expense/total columns.
+  const saveTrueEntryRow = async (spreadsheetId: string, t: Transaction) => {
+    const headers = trueEntryHeaders;
+    const idx = (h: string) => headers.indexOf(h);
+    const raw = t.rawRow || [];
+    const width = Math.max(headers.length, raw.length);
+    const row: any[] = [];
+    for (let i = 0; i < width; i++) row[i] = raw[i] !== undefined ? raw[i] : '';
+    const setCol = (h: string, val: any) => { const i = idx(h); if (i !== -1) row[i] = val; };
+
+    const type = (editForm.transactionType || t.transactionType || '').trim();
+    const qty = numCell(editForm.quantity);
+    const price = numCell(editForm.price);
+    const turnover = numCell(editForm.turnover);
+    const brokerage = numCell(editForm.brokerage);
+    const stt = numCell(editForm.stt);
+    const etc = numCell(editForm.etc);
+    const sebi = numCell(editForm.sebi);
+    const ipf = idx('IPF Charges') !== -1 ? numCell(editForm.ipf) : 0;
+    const demat = idx('Demat Charges') !== -1 ? numCell(editForm.demat) : 0;
+    const gst = numCell(editForm.gst);
+    const igst = numCell(editForm.igst);
+    const gstVal = idx('Total GST') !== -1 ? gst : igst;   // whichever column this sheet has
+    const stamp = numCell(editForm.stamp);
+
+    setCol('Trade Date', (editForm.tradeDate || '').trim());
+    setCol('Transaction Type', type);
+    if (editForm.tradeClass) setCol('Trade Class', editForm.tradeClass.trim());
+    setCol('Number of Shares', qty);
+    setCol('Avg Price', price);
+    setCol('Total Amount (Turnover)', turnover);
+    setCol('Total Brokerage', brokerage);
+    setCol('Brokerage Per Share', qty > 0 ? Math.round((brokerage / qty) * 1e6) / 1e6 : 0);
+    setCol('STT', stt);
+    setCol('Exchange Turnover Charges', etc);
+    setCol('SEBI Turnover Fees', sebi);
+    setCol('IPF Charges', ipf);
+    setCol('Demat Charges', demat);
+    setCol('Total GST', gst);
+    setCol('IGST', igst);
+    setCol('Stamp Duty', stamp);
+
+    // Derived totals — same formula the importer uses (Sell nets expenses out).
+    const totalExclSTT = brokerage + etc + sebi + ipf + demat + gstVal + stamp;
+    const totalInclSTT = totalExclSTT + stt;
+    const isBuy = ledgerSide(type) === "BUY";   // Buy/IPO/Bonus/Split/Rights are buy-side
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    setCol('Total Expenses (incl STT)', r2(totalInclSTT));
+    setCol('Total Expenses (excl STT)', r2(totalExclSTT));
+    setCol('Total Amount with Expense (Incl STT)', r2(isBuy ? turnover + totalInclSTT : turnover - totalInclSTT));
+    setCol('Total Amount with Expense (Excl STT)', r2(isBuy ? turnover + totalExclSTT : turnover - totalExclSTT));
+
+    await (gapi.client as any).sheets.spreadsheets.values.update({
+      spreadsheetId, range: `True Entry!A${t.sheetRow}`, valueInputOption: 'USER_ENTERED', resource: { values: [row] },
+    });
+  };
+
+  const saveEdit = async () => {
+    const t = editingTx;
+    if (!t || t.sheetRow == null) return;
+    const spreadsheetId = sheetIdForId(activePortfolio);
+    if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
+    setSavingEdit(true);
+    try {
+      if (t.editSource === 'opening') {
+        await updateOpeningHoldingRow(spreadsheetId, t.sheetRow, {
+          acqDate: (editForm.tradeDate || '').trim(),
+          qty: numCell(editForm.quantity),
+          costPerShare: numCell(editForm.price),
+          longTerm: editForm.longTerm === 'yes',
+        });
+      } else {
+        await saveTrueEntryRow(spreadsheetId, t);
+      }
+      setEditingTx(null);
+      toast.success('Entry updated — rebuilding Holdings & capital gains…');
+      // Recompute so Holdings, CG and the Trx register all reflect the edit (per user choice).
+      try { await rebuildHoldingTab(spreadsheetId); } catch (e: any) { toast.error('Holding rebuild failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
+      try { await syncCapitalGains(spreadsheetId); } catch (e: any) { toast.error('Capital-gains sync failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
+      await fetchSheetHoldings(activePortfolio, true);
+      if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+    } catch (e: any) {
+      toast.error('Save failed: ' + (e?.result?.error?.message || e?.message || 'error'));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  // Edit Entry popup (Trade Book) — writes straight back to True Entry / Opening Holdings.
+  // Declared once and rendered in BOTH top-level return branches: the component early-returns
+  // renderStockDetailView() when a stock is selected, and the Trade Book (with its Edit
+  // buttons) lives in THAT branch — a modal present only in the main return never mounts there.
+  const editEntryModal = (
+      <ModalShell open={!!editingTx} onClose={() => !savingEdit && setEditingTx(null)} busy={savingEdit} labelledBy="edit-entry-title">
+        <div className="relative z-10 w-full max-w-xl max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn">
+          <div className="flex items-start justify-between px-5 py-4 border-b border-slate-150">
+            <div>
+              <h3 id="edit-entry-title" className="text-sm font-black text-slate-800 flex items-center gap-2"><Edit2 className="w-4 h-4 text-indigo-600" /> Edit Entry</h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {editingTx?.assetName}
+                <span className={`ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${editingTx?.editSource === 'opening' ? 'bg-violet-50 text-violet-700' : 'bg-slate-100 text-slate-600'}`}>
+                  {editingTx?.editSource === 'opening' ? 'Opening lot' : 'True Entry'}
+                </span>
+              </p>
+            </div>
+            <button onClick={() => !savingEdit && setEditingTx(null)} className="p-1.5 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-4 h-4 text-slate-500" /></button>
+          </div>
+
+          <div className="overflow-y-auto px-5 py-4">
+            {editingTx?.editSource === 'opening' ? (
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="text-[10px] font-bold uppercase text-slate-500">Acquisition Date</span>
+                  <input type="date" value={editForm.tradeDate ?? ''} onChange={e => setEditForm(p => ({ ...p, tradeDate: e.target.value }))}
+                    className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-bold uppercase text-slate-500">Quantity</span>
+                  <input type="number" step="any" value={editForm.quantity ?? ''} onChange={e => setEditForm(p => ({ ...p, quantity: e.target.value }))}
+                    className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-bold uppercase text-slate-500">Cost / Share</span>
+                  <input type="number" step="any" value={editForm.price ?? ''} onChange={e => setEditForm(p => ({ ...p, price: e.target.value }))}
+                    className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
+                </label>
+                <label className="col-span-2 flex items-center gap-2 mt-1 cursor-pointer">
+                  <input type="checkbox" checked={editForm.longTerm === 'yes'} onChange={e => setEditForm(p => ({ ...p, longTerm: e.target.checked ? 'yes' : '' }))}
+                    className="w-4 h-4 accent-indigo-600" />
+                  <span className="text-[12px] font-medium text-slate-700">Long-term (acquired before 1-Apr-2024)</span>
+                </label>
+                <p className="col-span-2 text-[11px] text-slate-400">Invested is recomputed as Quantity × Cost/Share on save.</p>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  {TE_CORE_FIELDS.filter(f => trueEntryHeaders.indexOf(f.header) !== -1).map(f => (
+                    <label key={f.key} className="block">
+                      <span className="text-[10px] font-bold uppercase text-slate-500">{f.label}</span>
+                      {f.kind === 'class' ? (
+                        <select value={editForm[f.key] || 'Delivery'}
+                          onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))}
+                          className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg bg-white cursor-pointer">
+                          <option value="Delivery">Delivery</option>
+                          <option value="Intraday">Intraday</option>
+                        </select>
+                      ) : (
+                        <input type={f.kind === 'num' ? 'number' : 'text'} step="any" value={editForm[f.key] ?? ''}
+                          onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))}
+                          className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
+                      )}
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 text-[11px] text-slate-400">Set both legs of a same-day buy+sell to <strong className="text-slate-600">Intraday</strong> for the matched quantity to post to the Intra-Day P/L column (the surplus stays delivery).</p>
+                <p className="mt-4 mb-1.5 text-[10px] font-black uppercase tracking-wider text-slate-400">Expenses</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  {TE_EXPENSE_FIELDS.filter(f => trueEntryHeaders.indexOf(f.header) !== -1).map(f => (
+                    <label key={f.key} className="block">
+                      <span className="text-[10px] font-bold uppercase text-slate-500">{f.label}</span>
+                      <input type="number" step="any" value={editForm[f.key] ?? ''}
+                        onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))}
+                        className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-3 text-[11px] text-slate-400">Brokerage/share, Total Expenses and Total-Amount-with-Expense columns are recalculated automatically on save.</p>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-150">
+            <button onClick={() => setEditingTx(null)} disabled={savingEdit} className="px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer disabled:opacity-50">Cancel</button>
+            <button onClick={saveEdit} disabled={savingEdit} data-autofocus
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer disabled:opacity-50">
+              {savingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+              {savingEdit ? 'Saving & recomputing…' : 'Save & recompute'}
+            </button>
+          </div>
+        </div>
+      </ModalShell>
+  );
 
   // Extract Series (PEQ/EQ) and Clean Name
   const getCompanyDisplayInfo = (name: string, isin: string) => {
@@ -1002,7 +1313,11 @@ export default function Holdings({
         ? sheetHoldings
         : getPreloadedHoldingsForSheet(activePortfolio);
 
-      return activeSheetHoldings.map((h, index) => {
+      // Toggle on → append exited companies (qty 0) after the live positions; they
+      // render like any holding and click through to the same scrip drill-down.
+      const withSold = showSold ? [...activeSheetHoldings, ...soldHoldings] : activeSheetHoldings;
+
+      return withSold.map((h, index) => {
         const { type, cleanName } = getCompanyDisplayInfo(h.companyName, h.isin);
         const { symbol, sector } = getCompanySymbolAndSector(h.companyName, h.isin);
         
@@ -1036,6 +1351,7 @@ export default function Holdings({
           unrealizedGain: profit,
           unrealizedGainPct: profitPct,
           type,
+          sold: h.quantity <= 0,
           original: h
         };
       });
@@ -1164,6 +1480,8 @@ export default function Holdings({
       quantity: number;
       remainingQty: number;
       price: number;
+      isOpening?: boolean;
+      longTerm?: boolean;
     }
 
     interface RealisedTransaction {
@@ -1175,7 +1493,12 @@ export default function Holdings({
       gain: number;
     }
 
-    const chronxs = [...transactions].sort((a, b) => parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate));
+    // Date order with a buy→split→sell tiebreak for same-day rows (matches the CG engine):
+    // a split must rescale the lots BEFORE a same-day sell consumes them, else the sell
+    // would match pre-split cost/qty. Without this, order would depend on sheet row order.
+    const evOrd = (tt: string) => isSplitType(tt) ? 1 : (ledgerSide(tt) === 'SELL' ? 2 : 0);
+    const chronxs = [...transactions].sort((a, b) =>
+      (parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate)) || (evOrd(a.transactionType) - evOrd(b.transactionType)));
     
     const activeInventory: InventoryLot[] = [];
     const realisedTrades: RealisedTransaction[] = [];
@@ -1193,15 +1516,29 @@ export default function Holdings({
         continue;
       }
 
-      if (type.includes("BUY") || type.includes("RIGHT") || type.includes("PAID") || type === "PARTLY PAID") {
+      if (isSplitType(t.transactionType)) {
+        // Split: subdivide the held lots (qty ×factor, cost/share ÷factor), keeping each
+        // lot's acquisition date — NOT a ₹0 add on the split date.
+        const held = activeInventory.reduce((s, l) => s + l.remainingQty, 0);
+        if (held > 1e-9 && t.quantity > 0) {
+          const f = (held + t.quantity) / held;
+          for (const l of activeInventory) { l.quantity *= f; l.remainingQty *= f; l.price = l.price / f; }
+        }
+        continue;
+      }
+
+      const side = ledgerSide(t.transactionType);   // Buy/IPO/Bonus/Rights → BUY (Bonus at ₹0)
+      if (side === "BUY") {
         totalBuyAmount += actionAmt;
         activeInventory.push({
           date: t.tradeDate,
           quantity: t.quantity,
           remainingQty: t.quantity,
-          price: t.price
+          price: t.price,
+          isOpening: t.isOpening,
+          longTerm: t.longTerm
         });
-      } else if (type.includes("SELL")) {
+      } else if (side === "SELL") {
         totalSellAmount += actionAmt;
         let sellQty = t.quantity;
         
@@ -1243,8 +1580,14 @@ export default function Holdings({
 
     const hasTransactions = transactions.length > 0;
     const holdingQty = hasTransactions ? filteredInventory.reduce((sum, l) => sum + l.remainingQty, 0) : quantity;
-    const finalHoldingQty = holdingQty > 0 ? holdingQty : quantity;
-    
+    // Trust the ledger's FIFO when we have the transactions — including a legitimate 0
+    // (fully sold). Only fall back to the sheet quantity when there is nothing to replay.
+    // (Previously `holdingQty > 0 ? holdingQty : quantity` treated a sold-out 0 as "no
+    // data" and showed the stale sheet qty — e.g. Onesource: 860 opening − 860 sold = 0
+    // but the card displayed 860 with a phantom unrealised gain.)
+    const finalHoldingQty = hasTransactions ? holdingQty : quantity;
+    const soldOut = hasTransactions && finalHoldingQty <= 1e-4;
+
     const finalAvgBuyPrice = hasTransactions && filteredInventory.reduce((sum, l) => sum + l.remainingQty, 0) > 0
       ? (filteredInventory.reduce((sum, l) => sum + (l.remainingQty * l.price), 0) / filteredInventory.reduce((sum, l) => sum + l.remainingQty, 0))
       : avgBuyPrice;
@@ -1255,9 +1598,11 @@ export default function Holdings({
     // transaction FIFO replay above (turnover-based) still feeds the inventory/
     // realised tables + Total Buy/Sell amounts. Falls back to the replay for the
     // local sandbox or when the tab lacks a figure.
-    const displayInvestedValue = (!isLocal && investedValue > 0) ? investedValue : finalInvestedValue;
-    const displayAvgBuyPrice = (!isLocal && investedValue > 0) ? avgBuyPrice : finalAvgBuyPrice;
-    const totalHoldingValue = finalHoldingQty * cmpPrice;
+    // A sold-out position has no cost / market value / unrealised gain left — don't
+    // surface the stale sheet figures (which still describe the pre-sale position).
+    const displayInvestedValue = soldOut ? 0 : ((!isLocal && investedValue > 0) ? investedValue : finalInvestedValue);
+    const displayAvgBuyPrice = soldOut ? 0 : ((!isLocal && investedValue > 0) ? avgBuyPrice : finalAvgBuyPrice);
+    const totalHoldingValue = soldOut ? 0 : finalHoldingQty * cmpPrice;
     const unrealizedGain = totalHoldingValue - displayInvestedValue;
     const totalGain = unrealizedGain + realisedGain + totalDividend;
 
@@ -1265,9 +1610,10 @@ export default function Holdings({
     const cashFlows: { date: Date; amount: number }[] = [];
     chronxs.forEach(t => {
       const type = t.transactionType.toUpperCase();
-      if (type.includes("BUY") || type.includes("RIGHT") || type.includes("PAID")) {
+      const side = ledgerSide(t.transactionType);   // Bonus/Split are ₹0 → no cash-flow impact
+      if (side === "BUY") {
         cashFlows.push({ date: new Date(parseDateStr(t.tradeDate)), amount: -1 * (t.quantity * t.price) });
-      } else if (type.includes("SELL")) {
+      } else if (side === "SELL") {
         cashFlows.push({ date: new Date(parseDateStr(t.tradeDate)), amount: t.quantity * t.price });
       } else if (type.includes("DIVIDEND")) {
         const divAmt = t.amount > 0 ? t.amount : (t.quantity > 0 ? t.quantity * t.price : 0);
@@ -1603,20 +1949,23 @@ export default function Holdings({
                         <th className="px-6 py-3 text-right">BROKERAGE</th>
                         <th className="px-6 py-3 text-right">AMOUNT</th>
                         <th className="px-6 py-3 text-right">BAL QTY</th>
+                        <th className="px-6 py-3 text-center">EDIT</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-150">
                       {filteredTxs.length === 0 ? (
                         <tr>
-                          <td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic font-medium">
+                          <td colSpan={8} className="px-6 py-12 text-center text-slate-400 italic font-medium">
                             No matching ledger line items found.
                           </td>
                         </tr>
                       ) : (
                         filteredTxs.map((t, idx) => {
                           const type = t.transactionType.toUpperCase();
-                          const isBuy = type.includes("BUY") || type.includes("RIGHT") || type.includes("PAID") || type === "PARTLY PAID";
-                          const isSell = type.includes("SELL");
+                          const side = ledgerSide(t.transactionType);
+                          const isCorp = /BONUS|SPLIT|IPO|RIGHT/.test(type);   // corporate actions get their own badge
+                          const isSell = side === "SELL";
+                          const isBuy = side === "BUY" && !isCorp;
                           const isDiv = type.includes("DIVIDEND");
                           
                           return (
@@ -1626,6 +1975,7 @@ export default function Holdings({
                                 <span className={`inline-block px-2.5 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none ${
                                   isBuy ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
                                   isSell ? 'bg-rose-50 text-rose-800 border-rose-200' :
+                                  isCorp ? 'bg-violet-50 text-violet-800 border-violet-200' :
                                   isDiv ? 'bg-amber-50 text-amber-800 border-amber-200' :
                                   'bg-slate-50 text-slate-800 border-slate-200'
                                 }`}>
@@ -1647,6 +1997,19 @@ export default function Holdings({
                               <td className="px-6 py-3.5 text-right font-mono text-slate-450 border-l border-slate-50">
                                 {t.balanceQuantity !== undefined ? formatNum(t.balanceQuantity) : '—'}
                               </td>
+                              <td className="px-6 py-3.5 text-center">
+                                {t.editSource && activePortfolio !== 'local' ? (
+                                  <button
+                                    onClick={() => openEdit(t)}
+                                    title="Edit this entry"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:text-white hover:bg-indigo-600 border border-indigo-200 hover:border-indigo-600 rounded-md transition-colors cursor-pointer"
+                                  >
+                                    <Edit2 className="w-3 h-3" /> Edit
+                                  </button>
+                                ) : (
+                                  <span className="text-slate-300">—</span>
+                                )}
+                              </td>
                             </tr>
                           );
                         })
@@ -1660,6 +2023,7 @@ export default function Holdings({
                     <thead className="bg-[#f8fafc] border-b border-slate-205 font-bold text-slate-600 uppercase tracking-wider">
                       <tr>
                         <th className="px-6 py-3">LOT PURCHASE DATE</th>
+                        <th className="px-6 py-3">TERM</th>
                         <th className="px-6 py-3 text-right">QUANTITY HELD</th>
                         <th className="px-6 py-3 text-right">PURCHASE PRICE</th>
                         <th className="px-6 py-3 text-right">ORIGINAL COST</th>
@@ -1671,7 +2035,7 @@ export default function Holdings({
                     <tbody className="divide-y divide-slate-150">
                       {filteredInventory.length === 0 ? (
                         <tr>
-                          <td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic font-medium">
+                          <td colSpan={8} className="px-6 py-12 text-center text-slate-400 italic font-medium">
                             No active holding cost lots computed. All quantities fully liquidated.
                           </td>
                         </tr>
@@ -1679,15 +2043,32 @@ export default function Holdings({
                         filteredInventory.map((lot, idx) => {
                           const buyTime = parseDateStr(lot.date);
                           const ageDays = buyTime > 0 ? Math.floor((Date.now() - buyTime) / (1000 * 60 * 60 * 24)) : 0;
-                          
+
                           const lotCost = lot.remainingQty * lot.price;
                           const lotValue = lot.remainingQty * cmpPrice;
                           const lotGain = lotValue - lotCost;
                           const isPos = lotGain >= 0;
+                          // Opening lots carry their own long-term flag from the reconstruction;
+                          // regular FY26 lots are long-term once they've been held > 365 days.
+                          const isLong = lot.isOpening ? !!lot.longTerm : ageDays > 365;
 
                           return (
                             <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
-                              <td className="px-6 py-3.5 font-medium text-slate-600">{lot.date}</td>
+                              <td className="px-6 py-3.5 font-medium text-slate-600">
+                                {lot.date}
+                                {lot.isOpening && (
+                                  <span className="ml-2 inline-block px-2 py-0.5 rounded-[6px] text-[9px] font-black tracking-wider select-none bg-indigo-50 text-indigo-700 border border-indigo-200 align-middle">
+                                    OPENING
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-6 py-3.5">
+                                <span className={`inline-block px-2.5 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none ${
+                                  isLong ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}>
+                                  {isLong ? 'LONG TERM' : 'SHORT TERM'}
+                                </span>
+                              </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">
                                 {formatNum(lot.remainingQty)} <span className="text-[10px] text-slate-400 font-normal">/ {formatNum(lot.quantity)}</span>
                               </td>
@@ -1757,6 +2138,7 @@ export default function Holdings({
             )}
           </div>
         </div>
+        {editEntryModal}
       </div>
     );
   };
@@ -1827,8 +2209,11 @@ export default function Holdings({
         onClose={() => setShowAddTrade(false)}
         defaultPortfolio={activePortfolio === 'local' ? DEFAULT_PORTFOLIO_ID : activePortfolio}
         master={scrip}
+        holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
         onSaved={(pid) => { if (pid === activePortfolio) fetchSheetHoldings(pid, true); }}
       />
+
+      {editEntryModal}
       {lastPriceUpdate && (
         <div className="flex justify-end">
           <span className="text-[11px] text-slate-400">
@@ -1858,7 +2243,7 @@ export default function Holdings({
               const cg = capGainsSyncStatus?.pid === id ? capGainsSyncStatus : null;
               const rb = holdingRebuildStatus?.pid === id ? holdingRebuildStatus : null;
               const trx = trxStatus?.pid === id ? trxStatus : null;
-              const anyBusy = isLoadingSheet || isSyncingCapGains || isRebuildingHolding || isGeneratingTrx || !!downloadingFor || !!migratingFor;
+              const anyBusy = isLoadingSheet || isSyncingCapGains || isRebuildingHolding || isGeneratingTrx || !!downloadingFor;
               const stop = (e: React.MouseEvent) => e.stopPropagation();
               return (
                 <div
@@ -1922,8 +2307,8 @@ export default function Holdings({
                       value={selectedFy}
                       onChange={(e) => setSelectedFy(Number(e.target.value))}
                       disabled={anyBusy}
-                      aria-label="Financial year for the transaction register"
-                      title="Financial year for the transaction register"
+                      aria-label="Financial year for the Capital Gains report"
+                      title="Financial year for the Capital Gains report"
                       className="text-[10px] font-bold text-slate-700 bg-white border border-slate-200 rounded-md px-1 py-1 outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer disabled:opacity-50"
                     >
                       {fyOptions.map((y) => (
@@ -1932,7 +2317,7 @@ export default function Holdings({
                     </select>
                     <button
                       onClick={() => generateTrx(id)} disabled={anyBusy}
-                      aria-label="Generate transaction register" title="Generate the scrip-wise FY transaction register (opening → purchases → sales → closing) as a new tab"
+                      aria-label="Generate Capital Gains" title="Generate the scrip-wise FY Capital Gains report (opening → purchases → sales → closing) + a 'Holding as on 31st March' snapshot tab"
                       className="p-1.5 bg-violet-50 border border-violet-200 text-violet-700 hover:bg-violet-100 rounded-md transition-colors cursor-pointer disabled:opacity-50"
                     >
                       <FileSpreadsheet className={`w-3.5 h-3.5 ${isGeneratingTrx && actionPid === id ? 'animate-pulse' : ''}`} />
@@ -1944,14 +2329,6 @@ export default function Holdings({
                     >
                       <Download className={`w-3.5 h-3.5 ${downloadingFor === id ? 'animate-pulse' : ''}`} />
                     </button>
-                    <button
-                      onClick={() => migrateSheets(id)} disabled={anyBusy}
-                      aria-label="Clean up ledger (drop ISIN, fix dates)" title="One-time cleanup: drop the ISIN column + convert Trade Dates to real dates (for pivots)"
-                      className="p-1.5 bg-slate-100 border border-slate-200 text-slate-700 hover:bg-slate-200 rounded-md transition-colors cursor-pointer disabled:opacity-50"
-                    >
-                      <Wrench className={`w-3.5 h-3.5 ${migratingFor === id ? 'animate-pulse' : ''}`} />
-                    </button>
-
                     {cg && (cg.success ? (
                       <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
                         ✓ STCG ₹{(cg.stcg || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })} · LTCG ₹{(cg.ltcg || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
@@ -1967,11 +2344,11 @@ export default function Holdings({
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={rb.error}>✗ Rebuild failed</span>
                     ))}
                     {trx && (trx.result ? (
-                      <span className="text-[10px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-1 rounded-lg" title={`Wrote tab "${trx.result.tabName}" — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
+                      <span className="text-[10px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-1 rounded-lg" title={`Wrote "${trx.result.tabName}" + "${trx.result.holdingTabName}" — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
                       </span>
                     ) : (
-                      <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={trx.error}>✗ Register failed</span>
+                      <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={trx.error}>✗ Capital Gains failed</span>
                     ))}
                     {scripReview && scripReview.pid === id && scripReview.unresolved.length > 0 && (
                       <button
@@ -2109,12 +2486,29 @@ export default function Holdings({
                       <Plus className="w-4 h-4 font-bold" /> Record Manual Asset
                     </button>
                   ) : (
-                    <button
-                      onClick={() => setShowAddTrade(true)}
-                      className="px-4 py-2.5 bg-slate-900 border border-slate-900 hover:bg-slate-800 text-white font-black text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
-                    >
-                      <Plus className="w-4 h-4 font-bold" /> Add Trade
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => setShowSold(v => !v)}
+                        role="switch" aria-checked={showSold}
+                        title="Also list companies that were fully sold (no current holding) — click one to open its trade history"
+                        className={`px-3.5 py-2.5 border font-black text-xs rounded-xl transition-all flex items-center gap-2 cursor-pointer shadow-sm ${
+                          showSold
+                            ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500'
+                            : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'
+                        }`}
+                      >
+                        <span className={`relative inline-flex w-7 h-4 rounded-full transition-colors ${showSold ? 'bg-white/30' : 'bg-slate-300'}`}>
+                          <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-all ${showSold ? 'left-3.5' : 'left-0.5'}`} />
+                        </span>
+                        {isLoadingSold ? 'Loading sold…' : 'Show Sold'}
+                      </button>
+                      <button
+                        onClick={() => setShowAddTrade(true)}
+                        className="px-4 py-2.5 bg-slate-900 border border-slate-900 hover:bg-slate-800 text-white font-black text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
+                      >
+                        <Plus className="w-4 h-4 font-bold" /> Add Trade
+                      </button>
+                    </div>
                   )}
                 </div>
 
@@ -2301,10 +2695,16 @@ export default function Holdings({
                               className="hover:bg-slate-50/80 cursor-pointer transition-colors"
                             >
                               <td className="px-6 py-4">
-                                <span className="font-bold text-slate-800 block truncate max-w-[260px]" title={h.name}>
-                                  {h.name}
-                                </span>
-                                <span className="font-mono text-[9px] text-slate-400 select-all leading-none mt-1 block">{h.isin}</span>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-slate-800 truncate max-w-[260px]" title={h.name}>
+                                    {h.name}
+                                  </span>
+                                  {h.sold && (
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-rose-50 text-rose-600 border border-rose-200 shrink-0 select-none">
+                                      Sold
+                                    </span>
+                                  )}
+                                </div>
                               </td>
 
                               <td className="px-6 py-4 text-right font-mono font-bold text-slate-700">

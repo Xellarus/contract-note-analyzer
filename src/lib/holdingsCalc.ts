@@ -7,6 +7,8 @@ import {
 import { loadScripPrices, makePriceResolver } from "./scripPrices";
 import { loadScripIndustries, makeIndustryResolver } from "./scripIndustries";
 import { loadCorporateActions, CorpAction } from "./corporateActions";
+import { loadOpeningHoldings } from "./openingHoldings";
+import { ledgerSide, isSplitType } from "./tradeRowSchema";
 
 export interface UnresolvedScrip {
   name: string;
@@ -82,6 +84,7 @@ function squareOffIntraday(trades: ReplayTrade[], keyOf: (t: ReplayTrade) => str
   const groups = new Map<string, ReplayTrade[]>();
   const out: ReplayTrade[] = [];
   for (const t of trades) {
+    if (t.type === "SPLIT") { out.push(t); continue; }  // a split rescales lots — never a round-trip leg, never netted
     if (t.ts <= 0) { out.push(t); continue; }       // undated row — leave as-is
     const gk = keyOf(t) + "@" + t.ts;
     const g = groups.get(gk);
@@ -101,7 +104,10 @@ function squareOffIntraday(trades: ReplayTrade[], keyOf: (t: ReplayTrade) => str
     else if (net < 0) out.push({ ts: g[0].ts, idx: minIdx, isin: proto.isin, name: proto.name, type: "SELL", qty: -net, price: 0 });
     // net === 0 → fully intraday, contributes nothing to the holding
   }
-  out.sort((a, b) => (a.ts - b.ts) || (a.idx - b.idx));
+  // Same-day order: buy (0) → split (1) → sell (2), so a split rescales lots before a
+  // same-day sell consumes them and after a same-day buy is added.
+  const ordType = (t: ReplayTrade) => (t.type === "BUY" ? 0 : t.type === "SPLIT" ? 1 : 2);
+  out.sort((a, b) => (a.ts - b.ts) || (ordType(a) - ordType(b)) || (a.idx - b.idx));
   return out;
 }
 
@@ -154,8 +160,11 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
     if (!r || r.length === 0) continue;
-    const type = (r[typeIdx] || "").toString().trim().toUpperCase();
-    if (type !== "BUY" && type !== "SELL") continue;
+    // Ledger stores the real action ("Bonus"/"Split"/"IPO"/"Rights"); classify it. A SPLIT
+    // rescales the held lots (kept a distinct type so it's excluded from the intraday
+    // square-off and isn't a ₹0 add); Bonus/IPO/Rights are buy-side.
+    const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
+    if (!type) continue;
     const name = (r[nameIdx] || "").toString().trim();
     const qty = toNum(r[qtyIdx]);
     if (!name || isNaN(qty) || qty <= 0) continue;
@@ -164,6 +173,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     const inclSTT = toNum(r[inclIdx]);
     // Invested = all-in cost incl. expenses: value BUYs by "Total Amount with
     // Expense (Incl STT)" (fallback turnover, then Avg Price). Sells carry no cost.
+    // Bonus/Split rows carry 0 turnover/cost, so this yields ₹0 as intended.
     const price = type === "BUY"
       ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
       : avgPrice;
@@ -196,6 +206,11 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
   const replayed = window.length;
   for (const t of playable) {
     const h = resolve(t.isin, t.name);
+    if (t.type === "SPLIT") {
+      // Subdivide: qty grows by the added shares, total cost unchanged → avg ÷factor.
+      if (h.quantity > 1e-9 && t.qty > 0) { const cost = h.quantity * h.avgBuyPrice; h.quantity += t.qty; h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0; }
+      continue;
+    }
     if (t.type === "BUY") {
       const newQty = h.quantity + t.qty;
       h.avgBuyPrice = newQty > 0 ? (h.quantity < 0 ? t.price : ((h.quantity * h.avgBuyPrice) + (t.qty * t.price)) / newQty) : 0;
@@ -260,8 +275,10 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
     if (!r || r.length === 0) continue;
-    const type = (r[typeIdx] || "").toString().trim().toUpperCase();
-    if (type !== "BUY" && type !== "SELL") continue;
+    // Classify the stored action. A SPLIT rescales held lots (distinct type → excluded from
+    // the intraday square-off, not a ₹0 add); Bonus/IPO/Rights are buy-side.
+    const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
+    if (!type) continue;
     const name = (r[nameIdx] || "").toString().trim();
     const qty = toNum(r[qtyIdx]);
     if (!name || isNaN(qty) || qty <= 0) continue;
@@ -270,6 +287,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     const inclSTT = toNum(r[inclIdx]);
     // Invested = all-in cost incl. expenses: value BUYs by "Total Amount with
     // Expense (Incl STT)" (fallback turnover, then Avg Price). Sells carry no cost.
+    // Bonus/Split rows carry 0 turnover/cost → ₹0, as intended.
     const price = type === "BUY"
       ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
       : avgPrice;
@@ -354,10 +372,26 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   for (const ca of corpActions) hevents.push({ ts: parseDateTs(ca.dateStr) || 0, ord: 1, ca });
   hevents.sort((a, b) => (a.ts - b.ts) || (a.ord - b.ord));
 
+  // Seed opening lots (pre-FY26 basis) as the starting weighted-average position,
+  // so the Holding tab reflects carried-in holdings + FY26 trades. No-op if the
+  // Opening Holdings tab is absent.
+  const openingLots = await loadOpeningHoldings(spreadsheetId).catch(() => []);
+  for (const ol of openingLots) {
+    const h = resolve(ol.isin, ol.name);   // ISIN → name via scrip master, so it merges with FY26 rows
+    const newQty = h.quantity + ol.qty;
+    h.avgBuyPrice = newQty > 0 ? ((h.quantity * h.avgBuyPrice) + (ol.qty * ol.costPerShare)) / newQty : 0;
+    h.quantity = newQty;
+  }
+
   for (const ev of hevents) {
     if (ev.ca) { ev.ca.type === "Merger" ? applyMergerHolding(ev.ca) : applyDemergerHolding(ev.ca); continue; }
     const t = ev.trade!;
     const h = resolve(t.isin, t.name);
+    if (t.type === "SPLIT") {
+      // Subdivide: qty grows by the added shares, total cost unchanged → avg ÷factor.
+      if (h.quantity > 1e-9 && t.qty > 0) { const cost = h.quantity * h.avgBuyPrice; h.quantity += t.qty; h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0; }
+      continue;
+    }
     if (t.type === "BUY") {
       const newQty = h.quantity + t.qty;
       if (newQty > 0) {
@@ -587,8 +621,10 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   const daysBetween = (d1: Date, d2: Date) => Math.floor((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
   const num = (s: string) => { const v = parseFloat((s || "").replace(/,/g, '').trim()); return isNaN(v) ? 0 : v; };
   const r2 = (n: number) => Math.round(n * 100) / 100;
+  // Prices (purchase / sale) keep full precision — cost basis carries many decimals
+  // (e.g. ₹1075.574895); r6 only trims float noise, never rounds the basis to paise.
+  const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
   const fmtDate = (d: Date) => `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
-  const isDelivery = (tc: string) => !tc.toLowerCase().includes("intraday");
 
   // Resolve every (isin, name) to one canonical key via the shared Scrip Master
   // so short codes ("GOODLUCK") and full names ("Goodluck India Ltd") map to the
@@ -625,7 +661,14 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     const tradeDate = fmtDate(dateObj);   // clean DD/MM/YYYY for the LTST output
     const isin = (isinIdx >= 0 ? (r[isinIdx] || "") : "").toString().trim();
     const stockName = (r[nameIdx >= 0 ? nameIdx : 2] || "").toString().trim();
-    const txType = (r[typeIdx >= 0 ? typeIdx : 3] || "").toString().trim().toUpperCase();
+    // Normalize the stored action to a buy/sell SIDE (Bonus/Split/IPO/Rights → BUY at
+    // their sheet cost, ₹0 for Bonus/Split); non-trade rows (Dividend) keep their raw
+    // type and are dropped by the BUY/SELL-only steps below.
+    const rawType = (r[typeIdx >= 0 ? typeIdx : 3] || "").toString().trim().toUpperCase();
+    // A Split RESCALES the held lots (keeps their acquisition dates), so it's kept
+    // distinct from BUY; Bonus/IPO/Rights stay BUY (₹0 or priced add). Dividend etc.
+    // keep their raw type and are dropped by the BUY/SELL/SPLIT steps below.
+    const txType = isSplitType(rawType) ? "SPLIT" : (ledgerSide(rawType) || rawType);
     const qty = num((r[qtyIdx >= 0 ? qtyIdx : 4] || "0").toString());
     const rawAvg = num((r[avgPriceIdx >= 0 ? avgPriceIdx : 5] || "0").toString());
     const turnover = num((r[turnoverIdx >= 0 ? turnoverIdx : 6] || "0").toString());
@@ -642,21 +685,65 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   interface FifoLot { stockName: string; isin: string; buyDate: Date; buyDateStr: string; qty: number; remaining: number; purPrice: number; isOpening: boolean; }
   const fifo: Record<string, FifoLot[]> = {};
 
-  const deliveryBuys = teData.filter(t => t.txType === "BUY" && isDelivery(t.tradeClass)).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
-  const deliverySells = teData.filter(t => t.txType === "SELL" && isDelivery(t.tradeClass)).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
-  const intradayBuys = teData.filter(t => t.txType === "BUY" && !isDelivery(t.tradeClass));
-  const intradaySells = teData.filter(t => t.txType === "SELL" && !isDelivery(t.tradeClass)).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
-
-  interface IntradayLot { qty: number; remaining: number; purPrice: number; tradeDate: string; dateObj: Date; }
-  const intradayQueues: Record<string, IntradayLot[]> = {};
-  for (const buy of intradayBuys) {
-    const key = `${fmtDate(buy.dateObj)}|${secKey(buy.isin, buy.stockName)}`; if (!intradayQueues[key]) intradayQueues[key] = [];
-    intradayQueues[key].push({ qty: buy.qty, remaining: buy.qty, purPrice: buy.avgPrice, tradeDate: buy.tradeDate, dateObj: buy.dateObj });
+  // Seed the FIFO queues with the opening lots (pre-FY26 basis, with acquisition
+  // dates + cost) so FY26 sells match against carried-in holdings first and their
+  // LTCG/STCG is classified from the real acquisition date. No-op if the Opening
+  // Holdings tab is absent. These are the oldest lots, so they sit at the front
+  // of each queue and FIFO consumes them before any FY26 buy.
+  const openingSeed = await loadOpeningHoldings(spreadsheetId).catch(() => []);
+  for (const ol of openingSeed) {
+    const key = secKey(ol.isin, ol.name);   // resolve via scrip master (ISIN → name) so it merges with FY26 rows
+    if (!fifo[key]) fifo[key] = [];
+    const d = parseDate(ol.acqDate) || OPEN_DATE;
+    fifo[key].push({ stockName: ol.name, isin: ol.isin, buyDate: d, buyDateStr: fmtDate(d), qty: ol.qty, remaining: ol.qty, purPrice: ol.costPerShare, isOpening: true });
   }
+  for (const k in fifo) fifo[k].sort((a, b) => a.buyDate.getTime() - b.buyDate.getTime());
+
+  const deliveryBuys: TERow[] = [];
+  const deliverySells: TERow[] = [];
 
   // ── Step 4: FIFO-match delivery sells → STCG / LTCG rows ──
   interface CGRecord { saleDate: string; saleDateObj: Date; assetName: string; isin: string; qtySold: number; salePrice: number; saleAmt: number; purDate: string; purPrice: number; acqCost: number; intradayCg: number; stcg: number; ltcg: number; }
   const allRecords: CGRecord[] = [];
+
+  // Automatic intraday reconciliation per (scrip, day) — ALWAYS ON, tag-independent.
+  // A same-day buy+sell of the same scrip is an intraday round-trip by definition, so the
+  // matched min(buyQty, sellQty) is speculative (→ allRecords.intradayCg) regardless of the
+  // broker Trade Class tag (Zerodha only marks buy==sell, missing partial round-trips like
+  // Park Medi World 12-Feb: bought 1,500, sold 3,000 → 1,500 intraday + 1,500 delivery). The
+  // residual buy/sell is real DELIVERY and joins the FIFO below; a day with only buys OR only
+  // sells for a scrip isn't a round-trip and passes through unchanged. This mirrors the Trx
+  // ledger's §3b so LTST / PnL-Summary match the register. Same-day netting convention: a
+  // pre-existing holding does NOT suppress this — held 500, then same-day buy 100 + sell 200
+  // ⇒ 100 intraday, residual 100 sale drawn from the carried holding via FIFO (its LTCG/STCG).
+  {
+    const groups: Record<string, { buys: TERow[]; sells: TERow[] }> = {};
+    for (const t of teData) {
+      if (t.txType !== "BUY" && t.txType !== "SELL") continue;
+      const gk = `${fmtDate(t.dateObj)}|${secKey(t.isin, t.stockName)}`;
+      (groups[gk] || (groups[gk] = { buys: [], sells: [] }))[t.txType === "BUY" ? "buys" : "sells"].push(t);
+    }
+    for (const gk in groups) {
+      const g = groups[gk];
+      const buyQty = g.buys.reduce((s, t) => s + t.qty, 0), sellQty = g.sells.reduce((s, t) => s + t.qty, 0);
+      const matched = Math.min(buyQty, sellQty);
+      if (matched <= 0) {   // no same-day round-trip → pure delivery, keep the individual rows
+        for (const b of g.buys) deliveryBuys.push(b);
+        for (const s of g.sells) deliverySells.push(s);
+        continue;
+      }
+      const avgBuy = g.buys.reduce((s, t) => s + t.qty * t.avgPrice, 0) / buyQty;
+      const avgSell = g.sells.reduce((s, t) => s + t.qty * t.avgPrice, 0) / sellQty;
+      const proto = g.buys[0] || g.sells[0];
+      const saleAmt = r2(matched * avgSell), acqCost = r2(matched * avgBuy);
+      allRecords.push({ saleDate: fmtDate(proto.dateObj), saleDateObj: proto.dateObj, assetName: proto.stockName, isin: proto.isin, qtySold: matched, salePrice: avgSell, saleAmt, purDate: fmtDate(proto.dateObj), purPrice: avgBuy, acqCost, intradayCg: r2(saleAmt - acqCost), stcg: 0, ltcg: 0 });
+      const resBuy = buyQty - matched, resSell = sellQty - matched;
+      if (resBuy > 0) deliveryBuys.push({ ...proto, txType: "BUY", tradeClass: "Delivery", qty: resBuy, avgPrice: avgBuy, turnover: r2(avgBuy * resBuy) });
+      if (resSell > 0) deliverySells.push({ ...proto, txType: "SELL", tradeClass: "Delivery", qty: resSell, avgPrice: avgSell, turnover: r2(avgSell * resSell) });
+    }
+  }
+  deliveryBuys.sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
+  deliverySells.sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
 
   // Corporate actions transform the delivery lot queues at their date — a merger
   // removes Target's lots (no gain) and adds a fresh Acquirer lot at the carried
@@ -680,11 +767,25 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     fifo[nk].push({ stockName: ca.to, isin: "", buyDate: when, buyDateStr: ca.dateStr, qty: ca.sharesIn, remaining: ca.sharesIn, purPrice: px, isOpening: false });
   };
 
-  // One date-ordered pass: BUY adds a lot, corporate action transforms queues,
-  // SELL consumes lots FIFO. Same-date order: buys, then actions, then sells.
-  type DEv = { ts: number; ord: number; buy?: TERow; sell?: TERow; ca?: CorpAction };
+  // A Split subdivides every lot held on its date: qty ×factor, cost/share ÷factor,
+  // acquisition date UNCHANGED (holding period is continuous — the whole point of a
+  // split vs a bonus). factor is derived from the split row's added qty over the qty
+  // actually held at that point, so it stays exact regardless of intervening trades.
+  const splits = teData.filter(t => t.txType === "SPLIT");
+  const applySplitFifo = (sp: TERow) => {
+    const lots = fifo[secKey(sp.isin, sp.stockName)] || [];
+    const held = lots.reduce((s, l) => s + l.remaining, 0);
+    if (held <= 1e-9 || sp.qty <= 0) return;   // a split on nothing → no-op
+    const factor = (held + sp.qty) / held;
+    for (const l of lots) { l.qty *= factor; l.remaining *= factor; l.purPrice = l.purPrice / factor; }
+  };
+
+  // One date-ordered pass: BUY adds a lot, split/corporate action transforms queues,
+  // SELL consumes lots FIFO. Same-date order: buys, then splits/actions, then sells.
+  type DEv = { ts: number; ord: number; buy?: TERow; sell?: TERow; ca?: CorpAction; split?: TERow };
   const devents: DEv[] = [];
   for (const b of deliveryBuys) devents.push({ ts: b.dateObj.getTime(), ord: 0, buy: b });
+  for (const sp of splits) devents.push({ ts: sp.dateObj.getTime(), ord: 1, split: sp });
   for (const ca of corpActions) { const d = parseDate(ca.dateStr); devents.push({ ts: d ? d.getTime() : 0, ord: 1, ca }); }
   for (const s of deliverySells) devents.push({ ts: s.dateObj.getTime(), ord: 2, sell: s });
   devents.sort((a, b) => (a.ts - b.ts) || (a.ord - b.ord));
@@ -694,6 +795,8 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
       const buy = ev.buy;
       const key = secKey(buy.isin, buy.stockName); if (!fifo[key]) fifo[key] = [];
       fifo[key].push({ stockName: buy.stockName, isin: buy.isin, buyDate: buy.dateObj, buyDateStr: buy.tradeDate, qty: buy.qty, remaining: buy.qty, purPrice: buy.avgPrice, isOpening: false });
+    } else if (ev.split) {
+      applySplitFifo(ev.split);
     } else if (ev.ca) {
       const when = parseDate(ev.ca.dateStr) || OPEN_DATE;
       ev.ca.type === "Merger" ? applyMergerFifo(ev.ca, when) : applyDemergerFifo(ev.ca, when);
@@ -716,30 +819,16 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     }
   }
 
-  // ── Intraday sells: match same-day buys ──
-  for (const sell of intradaySells) {
-    const key = `${fmtDate(sell.dateObj)}|${secKey(sell.isin, sell.stockName)}`;
-    const dayLots = intradayQueues[key] || [];
-    let sellLeft = sell.qty; let matched = false;
-    for (const lot of dayLots) {
-      if (sellLeft <= 0) break; if (lot.remaining <= 0) continue;
-      const matchQty = Math.min(lot.remaining, sellLeft);
-      const saleAmt = r2(matchQty * sell.avgPrice);
-      const acqCost = r2(matchQty * lot.purPrice);
-      allRecords.push({ saleDate: fmtDate(sell.dateObj), saleDateObj: sell.dateObj, assetName: sell.stockName, isin: sell.isin, qtySold: matchQty, salePrice: sell.avgPrice, saleAmt, purDate: fmtDate(lot.dateObj), purPrice: lot.purPrice, acqCost, intradayCg: r2(saleAmt - acqCost), stcg: 0, ltcg: 0 });
-      lot.remaining -= matchQty; sellLeft -= matchQty; matched = true;
-    }
-    if (!matched && sellLeft > 0) {
-      const saleAmt = r2(sellLeft * sell.avgPrice);
-      allRecords.push({ saleDate: fmtDate(sell.dateObj), saleDateObj: sell.dateObj, assetName: sell.stockName, isin: sell.isin, qtySold: sellLeft, salePrice: sell.avgPrice, saleAmt, purDate: fmtDate(sell.dateObj), purPrice: sell.avgPrice, acqCost: saleAmt, intradayCg: 0, stcg: 0, ltcg: 0 });
-    }
-  }
+  // (Intraday round-trips were emitted above; their delivery residuals flowed through
+  // the FIFO with the delivery sells, so there is no separate intraday-sells pass.)
 
   allRecords.sort((a, b) => a.saleDateObj.getTime() - b.saleDateObj.getTime());
 
   // Historical (pre-FY24-25) sells participated in FIFO matching above so lot
   // consumption stays correct — but only FY24-25+ sales get exported.
-  const reportRecords = allRecords.filter(r => r.saleDateObj.getTime() >= EXPORT_FROM.getTime());
+  const reportRecords = allRecords
+    .filter(r => r.saleDateObj.getTime() >= EXPORT_FROM.getTime())
+    .sort((a, b) => a.saleDateObj.getTime() - b.saleDateObj.getTime());   // stable: intraday rows (pushed first) stay ahead of the day's delivery rows
 
   // ── Step 5: Build LTST tab data ──
   const ltstRows: any[][] = [];
@@ -747,8 +836,8 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   for (const rec of reportRecords) {
     ltstRows.push([
       rec.saleDate, rec.assetName, rec.qtySold,
-      r2(rec.salePrice), r2(rec.saleAmt),
-      rec.purDate, r2(rec.purPrice), r2(rec.acqCost),
+      r6(rec.salePrice), r2(rec.saleAmt),
+      rec.purDate, r6(rec.purPrice), r2(rec.acqCost),
       rec.intradayCg !== 0 ? rec.intradayCg : "",
       rec.stcg !== 0 ? rec.stcg : "",
       rec.ltcg !== 0 ? rec.ltcg : "",
