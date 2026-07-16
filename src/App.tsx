@@ -27,7 +27,7 @@ import Dashboard from './components/Dashboard';
 import Holdings from './components/Holdings';
 import ImportHistory from './components/ImportHistory';
 import Login from './components/Login';
-import Reports from './components/Reports';
+import Reports, { StockFocus } from './components/Reports';
 import ScreenerImport from './components/ScreenerImport';
 import OpeningBasisImport from './components/OpeningBasisImport';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
@@ -542,6 +542,9 @@ export default function App() {
     const saved = localStorage.getItem('portfolio_current_view');
     return (saved as any) || 'dashboard';
   });
+  // When set (via the "Report" button on a stock's detail page), the Reports view
+  // opens locked to that stock + account. Cleared when Reports is opened normally.
+  const [reportsFocus, setReportsFocus] = useState<StockFocus | null>(null);
 
   const [activePortfolio, setActivePortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
   const [isDetailView, setIsDetailView] = useState(false);
@@ -1761,7 +1764,7 @@ export default function App() {
                     <Upload className="w-4 h-4" /> Imports
                   </button>
                   <button
-                    onClick={() => { setCurrentView('reports'); setIsSidebarOpen(false); }}
+                    onClick={() => { setReportsFocus(null); setCurrentView('reports'); setIsSidebarOpen(false); }}
                     className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'reports' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                   >
                     <BarChart3 className="w-4 h-4" /> Reports
@@ -2230,9 +2233,13 @@ export default function App() {
             setActivePortfolio={setActivePortfolio}
             isDetailView={isDetailView}
             setIsDetailView={setIsDetailView}
+            onOpenReport={(f) => { setReportsFocus(f); setCurrentView('reports'); }}
           />
         ) : currentView === 'reports' ? (
-          <Reports />
+          <Reports
+            focus={reportsFocus}
+            onClearFocus={() => setReportsFocus(null)}
+          />
         ) : (
           <>
             {/* Imports sub-view toggle: Import vs Import History */}

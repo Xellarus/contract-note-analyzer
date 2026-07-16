@@ -19,7 +19,7 @@ import { ledgerSide, isSplitType } from "./tradeRowSchema";
  *   • splits every FY SALE into LTCG / STCG parcels  → **turnover** cost basis
  *     (same convention as syncCapitalGains / the LTST tab), and
  *   • snapshots the remaining dated lots at the FY boundaries for the OPENING and
- *     CLOSING blocks → **all-in Incl-STT** valuation (same as the Holding tab).
+ *     CLOSING blocks → **turnover** (charge-free) valuation (same as the Holding tab).
  * Corporate actions (Merger / Demerger from the Corporate Actions tab) are
  * interleaved by date so lot cost + acquisition dates are right at each event.
  *
@@ -107,10 +107,21 @@ interface Trade {
   isIntraday: boolean;
 }
 
-// A dated cost lot. purPrice = turnover/qty (capital-gains basis); inclPrice =
-// Incl-STT/qty (holding-valuation basis for opening/closing).
+// A dated cost lot. purPrice = turnover/qty; inclPrice = Incl-STT/qty. Both bases
+// are kept so we can always recover the charge-free TURNOVER (see turnoverPrice).
 interface Lot { buyTs: number; qty: number; remaining: number; purPrice: number; inclPrice: number; charges: Charges; }
 interface LotSnap { ts: number; dateStr: string; qty: number; inclPrice: number; purPrice: number; charges: Charges; }
+
+// Charge-free TURNOVER per share for a HELD lot — the basis the OPENING / CLOSING
+// blocks (and the Holding tab) value at. A held lot is always a buy / opening-seed /
+// corporate-action lot, so its all-in (Incl-STT) price = turnover + non-negative
+// charges ≥ its turnover price. Turnover is therefore ALWAYS the smaller of the two,
+// regardless of which physical column a given import happened to drop it in (some
+// brokers land turnover in the Incl-STT column and the all-in in the turnover column
+// — the values are reversed, but min() still recovers turnover). Seed / CA lots set
+// the two equal, so min() is a no-op there.
+const turnoverPrice = (l: { purPrice: number; inclPrice: number }): number =>
+  Math.min(l.purPrice, l.inclPrice);
 // One consolidated opening/closing line per calendar date (weighted-avg rate,
 // exact summed amount — the source shows opening/closing date-wise, not lot-wise).
 interface DateAgg { ts: number; dateStr: string; qty: number; amount: number; rate: number; }
@@ -430,7 +441,7 @@ export async function generateTrxRegister(
           // Restate the holding after the split: post-split qty, weighted-avg rescaled
           // rate, and the (unchanged) total cost — shown as a "SPLIT" line in the ledger.
           const newQty = lots.reduce((s, l) => s + l.remaining, 0);
-          const amt = lots.reduce((s, l) => s + l.remaining * l.inclPrice, 0);
+          const amt = lots.reduce((s, l) => s + l.remaining * turnoverPrice(l), 0);
           block(ev.key).splits.push({ ts: ev.ts, qty: newQty, rate: newQty > 0 ? amt / newQty : 0, amount: amt });
         }
       }
@@ -527,13 +538,14 @@ export async function generateTrxRegister(
   };
 
   // Consolidate opening/closing lots into ONE line per calendar date: summed qty,
-  // exact summed amount (Incl-STT basis), weighted-avg rate. Sorted by date. The
-  // amount is the true sum of lot amounts (accurate to the decimal), not qty ×
-  // rounded-rate, so it can't drift when several fills share a date.
+  // exact summed amount (TURNOVER basis — charge-free, matching the PURCHASE rows and
+  // the Holding tab), weighted-avg rate. Sorted by date. The amount is the true sum of
+  // lot amounts (accurate to the decimal), not qty × rounded-rate, so it can't drift
+  // when several fills share a date.
   const consolidateByDate = (lots: LotSnap[]): DateAgg[] => {
     const map = new Map<number, DateAgg>();
     for (const l of lots) {
-      const amt = l.qty * l.inclPrice;
+      const amt = l.qty * turnoverPrice(l);
       const e = map.get(l.ts);
       if (e) { e.qty += l.qty; e.amount += amt; }
       else map.set(l.ts, { ts: l.ts, dateStr: l.dateStr, qty: l.qty, amount: amt, rate: 0 });
@@ -775,8 +787,8 @@ export async function generateTrxRegister(
       const m = new Map<number, HAgg>();
       for (const l of snaps) {
         // Closing amount uses the SAME basis as the Capital Gains tab's CLOSING
-        // (consolidateByDate → inclPrice), so the two tabs reconcile to the rupee.
-        const amt = l.qty * l.inclPrice;
+        // (consolidateByDate → turnoverPrice), so the two tabs reconcile to the rupee.
+        const amt = l.qty * turnoverPrice(l);
         const e = m.get(l.ts);
         if (e) { e.qty += l.qty; e.amt += amt; e.ch = addCharges(e.ch, l.charges); }
         else m.set(l.ts, { ts: l.ts, dateStr: l.dateStr, qty: l.qty, amt, ch: { ...l.charges } });

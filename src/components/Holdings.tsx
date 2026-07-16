@@ -67,6 +67,9 @@ interface HoldingsProps {
   setActivePortfolio: (id: string) => void;
   isDetailView: boolean;
   setIsDetailView: (val: boolean) => void;
+  // Open the Reports view locked to one stock + account (the "Report" button on a
+  // stock's detail page). Structurally matches Reports' StockFocus.
+  onOpenReport?: (focus: { portfolioId: string; scripName: string; isin: string }) => void;
 }
 
 interface SheetHolding {
@@ -122,7 +125,8 @@ export default function Holdings({
   activePortfolio,
   setActivePortfolio,
   isDetailView,
-  setIsDetailView
+  setIsDetailView,
+  onOpenReport
 }: HoldingsProps) {
   const [sheetCmpOverrides, setSheetCmpOverrides] = useState<Record<string, number>>({});
 
@@ -1858,7 +1862,18 @@ export default function Holdings({
             <div className="pl-5 pt-4 space-y-3">
               <div className="space-y-1">
                 <span className="text-[10px] text-transparent select-none font-black uppercase block">_</span>
-                <span className="text-sm font-black text-transparent select-none block">_</span>
+                {onOpenReport ? (
+                  <button
+                    onClick={() => onOpenReport({ portfolioId: activePortfolio === 'local' ? DEFAULT_PORTFOLIO_ID : activePortfolio, scripName: name, isin })}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-black uppercase tracking-wider rounded-lg transition-colors cursor-pointer shadow-sm"
+                    title={`Open reports for ${name} in this account`}
+                    id="detail-open-report"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" /> Report
+                  </button>
+                ) : (
+                  <span className="text-sm font-black text-transparent select-none block">_</span>
+                )}
               </div>
               <div className="space-y-1 border-t border-slate-100 pt-3">
                 <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider block">Dividend</span>

@@ -1,12 +1,27 @@
-import { useState } from 'react';
-import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Download, Briefcase, CalendarDays, TrendingUp, Receipt, Coins, Layers } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Download, Briefcase, CalendarDays, TrendingUp, Receipt, Coins, Layers, X } from 'lucide-react';
 import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
+import { normName } from '../lib/scripMaster';
 import { useVirtualRows } from './ui/useVirtualRows';
 
 type Step = 'home' | 'portfolio' | 'config' | 'result';
 type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expenses-detailed';
+
+// A single stock the report should be scoped to (set when the user clicks "Report"
+// on a stock's detail page). Portfolio is locked; every report is filtered to it.
+export interface StockFocus { portfolioId: string; scripName: string; isin: string; }
+
+// A sheet/position row matches the focused scrip by ISIN when both sides carry one,
+// else by canonical name (names are canonicalized on import, so this is exact). Some
+// target tabs (LTST / True Entry) no longer keep an ISIN column, so name is the usual
+// path — `isin` is just a bonus when present.
+const scripMatches = (name: string, isin: string, focus: StockFocus): boolean => {
+  const fi = (focus.isin || '').trim().toUpperCase();
+  if (fi && (isin || '').trim().toUpperCase() === fi) return true;
+  return normName(name || '') === normName(focus.scripName || '');
+};
 
 const REPORTS: { type: ReportType; title: string; desc: string; Icon: typeof FileBarChart2; needsDate: boolean }[] = [
   { type: 'holding', title: 'Historical Holding Report', desc: 'Holdings of a portfolio as they stood on any past date — quantity, average cost and invested value.', Icon: FileBarChart2, needsDate: true },
@@ -31,11 +46,12 @@ const EXPENSE_COLS: { label: string; names: string[] }[] = [
 ];
 
 // Build a date-wise (or date+company-wise) expense report from a True Entry grid.
-function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, toDate: string): { header: string[]; rows: string[][] } {
+function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, toDate: string, focus?: StockFocus | null): { header: string[]; rows: string[][] } {
   const hdr = (vals[0] || []).map((c: any) => (c ?? '').toString().trim());
   const findCol = (...names: string[]) => { for (const n of names) { const i = hdr.indexOf(n); if (i >= 0) return i; } return -1; };
   const dateIdx = findCol('Trade Date', 'Date');
   const nameIdx = findCol('Stock Name', 'Security Name');
+  const isinIdx = findCol('ISIN');
   const expIdx = EXPENSE_COLS.map(e => findCol(...e.names));
   const num = (v: any) => { const n = parseFloat((v ?? '').toString().replace(/,/g, '').trim()); return isNaN(n) ? 0 : n; };
   const fromTs = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : -Infinity;
@@ -48,6 +64,8 @@ function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, 
     const ts = parseCellDate(dateCell);
     if (ts === null || ts < fromTs || ts > toTs) continue;   // a date report needs a dated row in range
     const company = (r[nameIdx] ?? '').toString().trim();
+    // Scoped to a single stock → drop every other scrip's rows before summing.
+    if (focus && !scripMatches(company, isinIdx >= 0 ? (r[isinIdx] ?? '').toString() : '', focus)) continue;
     const key = detailed ? `${ts}|${company}` : `${ts}`;
     let g = groups.get(key);
     if (!g) { g = { ts, dateStr: dateCell, company, sums: EXPENSE_COLS.map(() => 0) }; groups.set(key, g); }
@@ -102,7 +120,7 @@ const parseCellDate = (s: string): number | null => {
   const t = Date.parse(c); return isNaN(t) ? null : t;
 };
 
-export default function Reports() {
+export default function Reports({ focus = null, onClearFocus }: { focus?: StockFocus | null; onClearFocus?: () => void }) {
   const [step, setStep] = useState<Step>('home');
   const [reportType, setReportType] = useState<ReportType>('holding');
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
@@ -126,6 +144,17 @@ export default function Reports() {
 
   const meta = REPORTS.find(r => r.type === reportType)!;
 
+  // Scoped-to-a-stock mode: lock the portfolio to the stock's account and start on
+  // the report picker (the portfolio-choose step is skipped). Clearing focus (e.g.
+  // "Show all reports") resets to a normal, unscoped Reports home. Re-runs whenever
+  // focus changes — App passes a fresh focus object per stock-Report click.
+  useEffect(() => {
+    setPortfolio(focus ? (PORTFOLIOS.find(p => p.id === focus.portfolioId) || null) : null);
+    setStep('home');
+    setError(null);
+    setPositions([]); setGenHeader([]); setGenRows([]);
+  }, [focus]);
+
   const readTab = async (sheetId: string, range: string): Promise<any[][]> => {
     const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
     return (res?.result?.values || []) as any[][];
@@ -141,13 +170,14 @@ export default function Reports() {
       if (reportType === 'holding') {
         const asOfTs = new Date(`${asOf}T23:59:59`).getTime();
         const res = await computeHoldingsAsOf(portfolio.sheetId, asOfTs);
-        setPositions(res.positions);
-        setTotalInvested(res.totalInvested);
+        const positions = focus ? res.positions.filter(p => scripMatches(p.securityName, p.isin, focus)) : res.positions;
+        setPositions(positions);
+        setTotalInvested(focus ? positions.reduce((s, p) => s + p.invested, 0) : res.totalInvested);
         setTradeRows(res.tradeRows);
       } else if (reportType === 'expenses' || reportType === 'expenses-detailed') {
         const vals = await readTab(portfolio.sheetId, 'True Entry!A:Z');
         if (vals.length < 2) throw new Error("No transactions found in True Entry — import a contract note or transaction report first.");
-        const { header, rows } = buildExpenseReport(vals, reportType === 'expenses-detailed', fromDate, toDate);
+        const { header, rows } = buildExpenseReport(vals, reportType === 'expenses-detailed', fromDate, toDate, focus);
         setGenHeader(header);
         setGenRows(rows);
       } else {
@@ -173,6 +203,14 @@ export default function Reports() {
             const ts = parseCellDate(r[dateCol]);
             return ts === null ? true : (ts >= fromTs && ts <= toTs);  // keep undated rows
           });
+        }
+        // Scoped to a single stock → keep only its rows (by ISIN or canonical name).
+        // Note the column names differ per tab: True Entry uses "Stock Name", the LTST
+        // capital-gains tab uses "Asset Name".
+        if (focus) {
+          const nameCol = header.findIndex(h => /stock name|security name|asset name|scrip|company|^name$/i.test(h));
+          const isinCol = header.findIndex(h => /isin/i.test(h));
+          if (nameCol >= 0) body = body.filter(r => scripMatches(r[nameCol] ?? '', isinCol >= 0 ? (r[isinCol] ?? '') : '', focus));
         }
         setGenHeader(header);
         setGenRows(body);
@@ -210,7 +248,14 @@ export default function Reports() {
   };
 
   const reset = () => { setStep('home'); setPortfolio(null); setError(null); setPositions([]); setGenHeader([]); setGenRows([]); };
-  const openReport = (t: ReportType) => { setReportType(t); setPortfolio(null); setError(null); setStep('portfolio'); };
+  const openReport = (t: ReportType) => {
+    setReportType(t); setError(null); setPositions([]); setGenHeader([]); setGenRows([]);
+    // Scoped mode: portfolio is already locked to the stock's account → jump straight
+    // to date/period config. Otherwise fall through to the portfolio picker.
+    if (focus && portfolio) setStep('config');
+    else { setPortfolio(null); setStep('portfolio'); }
+  };
+  const exitFocus = () => { onClearFocus?.(); setPortfolio(null); setStep('home'); setError(null); setPositions([]); setGenHeader([]); setGenRows([]); };
 
   const hasResult = reportType === 'holding' ? positions.length > 0 : genRows.length > 0;
 
@@ -219,10 +264,25 @@ export default function Reports() {
       {/* ── Home: report catalogue ── */}
       {step === 'home' && (
         <div className="space-y-4">
-          <div>
-            <h2 className="text-lg font-black text-slate-800 tracking-tight">Reports</h2>
-            <p className="text-xs text-slate-500 mt-0.5">Generate and download reports from your portfolio ledgers.</p>
-          </div>
+          {focus ? (
+            <div className="flex items-start justify-between gap-3 p-4 rounded-2xl bg-indigo-50 border border-indigo-200">
+              <div className="min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Reports for</span>
+                <h2 className="text-base font-black text-indigo-900 tracking-tight truncate">{focus.scripName}</h2>
+                <p className="text-[11px] text-indigo-600 font-medium mt-0.5">
+                  {portfolio ? <>Portfolio {portfolio.code} · {portfolio.label}</> : 'this account'} · every report below is filtered to this stock
+                </p>
+              </div>
+              <button onClick={exitFocus} className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-indigo-600 hover:bg-indigo-100 rounded-lg transition-colors cursor-pointer shrink-0">
+                <X className="w-3.5 h-3.5" /> Show all reports
+              </button>
+            </div>
+          ) : (
+            <div>
+              <h2 className="text-lg font-black text-slate-800 tracking-tight">Reports</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Generate and download reports from your portfolio ledgers.</p>
+            </div>
+          )}
           <div className="space-y-3">
             {REPORTS.map(({ type, title, desc, Icon }) => (
               <button
@@ -278,13 +338,14 @@ export default function Reports() {
       {/* ── Step 2: configure & generate ── */}
       {step === 'config' && portfolio && (
         <div className="space-y-5">
-          <button onClick={() => setStep('portfolio')} className="flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-indigo-600 cursor-pointer transition-colors">
-            <ArrowLeft className="w-4 h-4" /> Choose portfolio
+          <button onClick={() => setStep(focus ? 'home' : 'portfolio')} className="flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-indigo-600 cursor-pointer transition-colors">
+            <ArrowLeft className="w-4 h-4" /> {focus ? 'Choose report' : 'Choose portfolio'}
           </button>
           <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6 max-w-md">
             <h2 className="text-base font-black text-slate-800 tracking-tight">{meta.title}</h2>
             <p className="text-xs text-slate-500 mt-0.5">
               <strong className="text-slate-700">{portfolio.label}</strong> · Portfolio {portfolio.code}
+              {focus && <> · <strong className="text-indigo-700">{focus.scripName}</strong></>}
             </p>
 
             {reportType === 'holding' ? (
@@ -363,6 +424,7 @@ export default function Reports() {
                 <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight">{meta.title} — {portfolio.label}</h3>
                 <p className="text-[11px] text-slate-500 font-medium mt-0.5">
                   Portfolio {portfolio.code}
+                  {focus && <> · <strong className="text-indigo-700">{focus.scripName}</strong></>}
                   {reportType === 'holding'
                     ? ` · as of ${asOf} · ${positions.length} position${positions.length === 1 ? '' : 's'} · ${tradeRows} trades replayed`
                     : ` · ${fromDate || 'start'} → ${toDate || 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
