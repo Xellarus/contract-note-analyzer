@@ -280,7 +280,12 @@ export function classifyTxn(type: string): "BUY" | "SELL" | "BONUS" | "SPLIT" | 
   return "OTHER";
 }
 
-const actionKey = (scripKey: string, kind: string, occ: number) => `${scripKey}#${kind}#${occ}`;
+// Corp-action resolution key. DATE-BASED (scrip#kind#iso) so it's stable and unique
+// regardless of how the transaction history is sliced across batch imports. An
+// occurrence-index key (scrip#kind#N) collides across date-sliced batches — a scrip's
+// 2nd-ever bonus is "occurrence 0" within its own slice — and would silently inherit
+// the wrong ratio. Real corp actions are never same-scrip · same-kind · same-day.
+export const corpActionKey = (scripKey: string, kind: string, iso: string): string => `${scripKey}#${kind}#${iso}`;
 
 // gcd on rounded ints, for turning a balance jump into a tidy prefill ratio.
 const gcd = (a: number, b: number): number => { a = Math.abs(Math.round(a)); b = Math.abs(Math.round(b)); while (b) { [a, b] = [b, a % b]; } return a || 1; };
@@ -299,14 +304,12 @@ function collectPendingActions(byName: Map<string, TxnStatementRow[]>): PendingA
     const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
     const hasBal = rows.some(r => r.balQty !== 0);
     let runQty = 0;
-    const occ = new Map<string, number>();
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const kind = classifyTxn(row.type);
       const heldBefore = hasBal ? (i > 0 ? rows[i - 1].balQty : 0) : runQty;
       if (kind === "BONUS" || kind === "SPLIT" || kind === "RIGHT") {
         const balAfter = hasBal ? row.balQty : 0;
-        const n = occ.get(kind) || 0; occ.set(kind, n + 1);
         let suggest: { num: number; den: number };
         if (kind === "SPLIT") {
           suggest = (heldBefore > 0 && balAfter > heldBefore) ? reduceRatio(balAfter, heldBefore, 2, 1) : { num: 1, den: 1 };
@@ -315,7 +318,7 @@ function collectPendingActions(byName: Map<string, TxnStatementRow[]>): PendingA
           suggest = (added > 0 && heldBefore > 0) ? reduceRatio(added, heldBefore) : { num: 1, den: 1 };
         }
         out.push({
-          key: actionKey(scripKey, kind, n), name: row.name, type: kind,
+          key: corpActionKey(scripKey, kind, row.iso), name: row.name, type: kind,
           dateStr: row.dateStr, iso: row.iso, heldBefore, balAfter,
           suggestNum: suggest.num, suggestDen: suggest.den, suggestPrice: row.price > 0 ? row.price : 0,
         });
@@ -331,10 +334,12 @@ function collectPendingActions(byName: Map<string, TxnStatementRow[]>): PendingA
  *  action for this scrip has a resolution (caller guarantees it). */
 function replayScrip(
   scripKey: string, rowsRaw: TxnStatementRow[], resolutions: Record<string, ActionResolution>,
+  seed: FifoLot[] = [],
 ): { lots: FifoLot[]; buys: number; sells: number; oversold: number; unknown: string[] } {
   const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
-  const lots: FifoLot[] = [];
-  const occ = new Map<string, number>();
+  // Carried-in lots (batch accumulate) seed the queue oldest-first, so a SELL in this
+  // slice consumes them before any BUY made in the slice — FIFO continues across the seam.
+  const lots: FifoLot[] = seed.slice().sort((a, b) => a.ts - b.ts).map(l => ({ ...l }));
   const unknown = new Set<string>();
   let buys = 0, sells = 0, oversold = 0;
 
@@ -357,8 +362,7 @@ function replayScrip(
       }
       if (need > 1e-9) oversold += need;
     } else if (kind === "BONUS" || kind === "RIGHT") {
-      const n = occ.get(kind) || 0; occ.set(kind, n + 1);
-      const res = resolutions[actionKey(scripKey, kind, n)];
+      const res = resolutions[corpActionKey(scripKey, kind, row.iso)];
       if (res && res.den > 0) {
         const add = heldNow() * (res.num / res.den);
         if (add > 1e-9) {
@@ -367,8 +371,7 @@ function replayScrip(
         }
       }
     } else if (kind === "SPLIT") {
-      const n = occ.get(kind) || 0; occ.set(kind, n + 1);
-      const res = resolutions[actionKey(scripKey, kind, n)];
+      const res = resolutions[corpActionKey(scripKey, kind, row.iso)];
       if (res && res.den > 0 && res.num > 0) {
         const f = res.num / res.den;
         for (const l of lots) { l.qty *= f; l.cps /= f; l.note += ` ·split ${res.num}:${res.den}`; }
@@ -547,6 +550,218 @@ export function reconstructOpeningLots(
     summary: {
       holdings: holdings.length, lots: lots.length, shortLots, longLots, zeroCost,
       buys, sells, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides,
+    },
+  };
+}
+
+/** A carried-in opening lot (the current Opening Holdings row) used to seed a batch. */
+export interface SeedLot { name: string; isin: string; acqDate: string; qty: number; costPerShare: number; note?: string; }
+
+/**
+ * BATCH (date-sliced) accumulate. For an account whose inception→31-Mar-2025 history
+ * is too large to import in one pass, the history is fed in chronological, non-overlapping
+ * slices. Each call:
+ *   1. seeds every scrip's FIFO from the running position (`prevLots` = current Opening
+ *      Holdings — the exact surviving lots left by the previous slice),
+ *   2. replays ONLY this slice's transactions on top (BUY adds, SELL consumes oldest-first
+ *      — i.e. the carried-in lots first; BONUS/SPLIT/RIGHT from `resolutions`), and
+ *   3. re-emits the WHOLE position (touched + untouched scrips) so the result can safely
+ *      OVERWRITE the tab — untouched scrips pass through unchanged; a scrip fully sold in
+ *      this slice drops out.
+ *
+ * A split/bonus in a later slice correctly rescales lots bought in an earlier slice,
+ * because those lots are seeded back in first. Slices MUST be chronological and
+ * non-overlapping (the caller enforces this with the processed-through guard).
+ *
+ * Names in `prevLots` and `txns` must already be resolved to the SAME canonical form
+ * (the caller maps both through the scrip master) so a scrip's FIFO continues across the
+ * seam instead of forking into a new entry. `holdings` is optional — supply the 31-Mar
+ * statement only on the FINAL slice to reconcile the finished position + capture sectors.
+ * Pure (no gapi).
+ */
+export function accumulateOpeningLots(
+  prevLots: SeedLot[],
+  txns: TxnStatementRow[],
+  resolutions: Record<string, ActionResolution> = {},
+  holdings: HoldingStatementRow[] = [],
+): ReconstructResult {
+  const byName = new Map<string, TxnStatementRow[]>();
+  for (const t of txns) { const k = obKey(t.name); (byName.get(k) || byName.set(k, []).get(k)!).push(t); }
+
+  // Carried-in running position → FIFO seed lots per scrip.
+  const seedByScrip = new Map<string, FifoLot[]>();
+  const seedName = new Map<string, string>();
+  for (const l of prevLots) {
+    if (!(l.qty > 0)) continue;
+    const k = obKey(l.name);
+    const { iso, ts } = parseDmy(l.acqDate);
+    (seedByScrip.get(k) || seedByScrip.set(k, []).get(k)!).push({ ts, iso: iso || l.acqDate, qty: l.qty, cps: l.costPerShare, note: l.note || `Opening (${iso || l.acqDate})` });
+    if (!seedName.has(k)) seedName.set(k, l.name);
+  }
+
+  const sectors: { name: string; sector: string }[] = [];
+  for (const h of holdings) if (h.sector) sectors.push({ name: h.name, sector: h.sector });
+
+  const pendingActions = collectPendingActions(byName);
+  const unresolved = pendingActions.filter(a => !resolutions[a.key]);
+
+  const lots: OpeningLot[] = [];
+  const issues: ReconIssue[] = [];
+  let shortLots = 0, longLots = 0, zeroCost = 0, buys = 0, sells = 0;
+  let reconciled = 0, mismatched = 0, noTxn = 0;
+
+  // Don't emit anything until every corp action in this slice has a ratio (a missed
+  // split/bonus corrupts everything after it). The write is blocked meanwhile, so the
+  // existing Opening Holdings on the sheet is left untouched.
+  if (unresolved.length > 0) {
+    return {
+      lots, issues, sectors, pendingActions,
+      summary: { holdings: holdings.length, lots: 0, shortLots, longLots, zeroCost, buys, sells, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides: 0 },
+    };
+  }
+
+  const survByScrip = new Map<string, { qty: number; inv: number }>();
+  const emit = (key: string, displayName: string, fifo: FifoLot[]): void => {
+    let q = 0, inv = 0;
+    for (const l of fifo) {
+      const ts = l.ts > 0 ? l.ts : 0;
+      const iso = ts > 0 ? l.iso : PRE_FY_DATE;
+      const longTerm = ts > 0 ? ts < LT_CUTOFF_TS : true;
+      const cps = r6(l.cps);
+      if (cps === 0) zeroCost++;
+      longTerm ? longLots++ : shortLots++;
+      const lotInv = r2(l.qty * cps);
+      q += l.qty; inv += lotInv;
+      lots.push({ name: displayName, isin: "", acqDate: iso, qty: r6(l.qty), costPerShare: cps, invested: lotInv, longTerm, note: l.note });
+    }
+    survByScrip.set(key, { qty: q, inv });
+  };
+
+  // Every scrip that has a carried-in position OR new activity this slice.
+  const keys = new Set<string>([...seedByScrip.keys(), ...byName.keys()]);
+  for (const key of keys) {
+    const seed = seedByScrip.get(key) || [];
+    const rows = byName.get(key);
+    const name = (rows && rows[0].name) || seedName.get(key) || key;
+    if (rows && rows.length) {
+      const rep = replayScrip(key, rows, resolutions, seed);
+      buys += rep.buys; sells += rep.sells;
+      emit(key, name, rep.lots);
+      if (rep.oversold > 1e-6) issues.push({ name, message: `sells exceed the carried-in + bought quantity by ${round0(rep.oversold)} sh — check the previous slice ended exactly where this one begins.` });
+      if (rep.unknown.length) issues.push({ name, message: `unrecognised transaction type(s): ${rep.unknown.join(", ")} — ignored.` });
+    } else {
+      emit(key, name, seed);   // no activity this slice → carry the position forward unchanged
+    }
+  }
+
+  // Final-slice reconciliation against the 31-Mar-2025 holding statement (optional).
+  if (holdings.length) {
+    for (const h of holdings) {
+      const key = obKey(h.name);
+      const surv = survByScrip.get(key);
+      if (!surv || surv.qty <= 0.001) { noTxn++; issues.push({ name: h.name, message: `nothing carried in and no transactions across the slices — no opening lot created. Include its history in one of the slices.` }); continue; }
+      if (Math.abs(surv.qty - h.qty) > 0.001) {
+        mismatched++;
+        issues.push({ name: h.name, message: `qty mismatch — running position ${fmt(surv.qty)} vs holding ${fmt(h.qty)} (Δ ${fmt(surv.qty - h.qty)}). Check a slice boundary or a bonus/split/rights ratio.` });
+      } else {
+        reconciled++;
+        if (h.invested > 0 && Math.abs(surv.inv - h.invested) > Math.max(1, 0.005 * h.invested)) {
+          issues.push({ name: h.name, message: `qty ties out; value ₹${fmt(r2(surv.inv))} vs holding ₹${fmt(h.invested)} — brokerage/charges convention.` });
+        }
+      }
+    }
+  }
+
+  return {
+    lots, issues, sectors, pendingActions,
+    summary: {
+      holdings: holdings.length, lots: lots.length, shortLots, longLots, zeroCost,
+      buys, sells, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides: 0,
+    },
+  };
+}
+
+/**
+ * BATCH accumulate from a **Holding Period Report** delivered in slices. Unlike the
+ * transaction replay, HPR lots are the broker's AUTHORITATIVE surviving lots as of
+ * 31-Mar-2025 (real date + qty + cost, already net of every rights/bonus/split/intraday
+ * event) — so there's no FIFO, no seam, and no corp actions. Each slice simply APPENDS
+ * its lots to the running position (`prevLots` = current Opening Holdings) and the whole
+ * union is re-emitted to overwrite the tab.
+ *
+ * Deduped by an exact lot signature (scrip · date · qty · cost) so re-uploading a slice
+ * is idempotent and an accidental cross-slice overlap can't double-count. (Trade-off: two
+ * genuinely identical lots collapse to one — rare, and the final-slice reconciliation
+ * against the 31-Mar holding statement flags it as a qty shortfall.)
+ *
+ * Names in `prevLots` and `hprLots` must already be canonicalized by the caller (scrip
+ * master) so dedup + per-scrip reconciliation line up. `holdings` is supplied only on the
+ * FINAL slice to reconcile the finished position + capture sectors. Pure (no gapi).
+ */
+export function accumulateReportLots(
+  prevLots: SeedLot[],
+  hprLots: HoldingPeriodLot[],
+  holdings: HoldingStatementRow[] = [],
+): ReconstructResult {
+  const sectors: { name: string; sector: string }[] = [];
+  for (const h of holdings) if (h.sector) sectors.push({ name: h.name, sector: h.sector });
+
+  const lots: OpeningLot[] = [];
+  const issues: ReconIssue[] = [];
+  let shortLots = 0, longLots = 0, zeroCost = 0, mismatched = 0, reconciled = 0, noTxn = 0;
+  const seen = new Set<string>();
+  const survByScrip = new Map<string, { qty: number; inv: number }>();
+
+  const add = (name: string, isin: string, iso: string, qty: number, cps: number, note: string): boolean => {
+    if (!(qty > 0)) return false;
+    const c = r6(cps);
+    const s = `${obKey(name)}|${iso}|${r6(qty)}|${c}`;
+    if (seen.has(s)) return false;
+    seen.add(s);
+    const ts = parseDmy(iso).ts;
+    const longTerm = ts > 0 ? ts < LT_CUTOFF_TS : true;
+    if (c === 0) zeroCost++;
+    longTerm ? longLots++ : shortLots++;
+    const inv = r2(qty * c);
+    lots.push({ name, isin: isin || "", acqDate: iso, qty: r6(qty), costPerShare: c, invested: inv, longTerm, note });
+    const k = obKey(name); const cur = survByScrip.get(k) || { qty: 0, inv: 0 };
+    cur.qty += qty; cur.inv += inv; survByScrip.set(k, cur);
+    return true;
+  };
+
+  // Carried-in running position first, so this slice's rows dedup against it.
+  for (const l of prevLots) add(l.name, l.isin, l.acqDate, l.qty, l.costPerShare, l.note || "cost & lot from holding-period report");
+
+  // This slice's HPR lots (verbatim; already net of corp actions).
+  let dup = 0;
+  for (const hp of hprLots) {
+    const iso = hp.ts > 0 ? hp.iso : PRE_FY_DATE;
+    if (!add(hp.name, "", iso, hp.qty, hp.costPerShare, "cost & lot from holding-period report")) dup++;
+  }
+  if (dup > 0) issues.push({ name: "—", message: `${dup} lot(s) in this slice were already in the running position — skipped (re-uploading a slice is safe).` });
+
+  // Final-slice reconciliation against the 31-Mar-2025 holding statement (optional).
+  if (holdings.length) {
+    for (const h of holdings) {
+      const k = obKey(h.name); const surv = survByScrip.get(k);
+      if (!surv || surv.qty <= 0.001) { noTxn++; issues.push({ name: h.name, message: `not in any Holding Period Report slice yet — no opening lot created. Include it in a slice.` }); continue; }
+      if (Math.abs(surv.qty - h.qty) > 0.001) {
+        mismatched++;
+        issues.push({ name: h.name, message: `qty mismatch — report lots ${fmt(surv.qty)} vs holding ${fmt(h.qty)} (Δ ${fmt(surv.qty - h.qty)}). A slice is missing lots, or a lot was duplicated/collapsed.` });
+      } else {
+        reconciled++;
+        if (h.invested > 0 && Math.abs(surv.inv - h.invested) > Math.max(1, 0.005 * h.invested)) {
+          issues.push({ name: h.name, message: `qty ties out; report value ₹${fmt(r2(surv.inv))} vs holding ₹${fmt(h.invested)} — brokerage/charges convention.` });
+        }
+      }
+    }
+  }
+
+  return {
+    lots, issues, sectors, pendingActions: [],
+    summary: {
+      holdings: holdings.length, lots: lots.length, shortLots, longLots, zeroCost,
+      buys: 0, sells: 0, corpActions: 0, reconciled, mismatched, noTxn, costOverrides: lots.length,
     },
   };
 }

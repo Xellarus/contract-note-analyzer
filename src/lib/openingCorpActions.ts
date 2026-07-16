@@ -43,9 +43,10 @@ export async function saveOpeningCorpActions(spreadsheetId: string, actions: Sav
   return { written: actions.length };
 }
 
-/** Read the Opening Corp Actions tab → a resolutions map keyed by PendingAction.key
- *  ({} if the tab doesn't exist yet). */
-export async function loadOpeningCorpActions(spreadsheetId: string): Promise<Record<string, ActionResolution>> {
+/** Read the Opening Corp Actions tab as full rows ([] if the tab doesn't exist yet).
+ *  Used both to build the resolutions map and to MERGE across batch imports (a later
+ *  slice's write must not wipe an earlier slice's resolved actions). */
+export async function loadOpeningCorpActionRows(spreadsheetId: string): Promise<SavedCorpAction[]> {
   let res: any;
   try {
     res = await (gapi.client as any).sheets.spreadsheets.values.get({
@@ -53,19 +54,31 @@ export async function loadOpeningCorpActions(spreadsheetId: string): Promise<Rec
     });
   } catch (e: any) {
     const msg = e?.result?.error?.message || e?.message || "";
-    if (/unable to parse range/i.test(msg)) return {};   // tab not created yet
+    if (/unable to parse range/i.test(msg)) return [];   // tab not created yet
     throw e;
   }
   const rows: any[][] = res?.result?.values || [];
-  if (rows.length < 2) return {};
+  if (rows.length < 2) return [];
   const start = /^key$/i.test((rows[0]?.[0] ?? "").toString().trim()) ? 1 : 0;
-  const out: Record<string, ActionResolution> = {};
+  const out: SavedCorpAction[] = [];
   for (let i = start; i < rows.length; i++) {
     const r = rows[i]; if (!r) continue;
     const key = (r[0] || "").toString().trim();
     const num = toNum(r[4]), den = toNum(r[5]), price = toNum(r[6]);
     if (!key || isNaN(num) || isNaN(den) || den <= 0) continue;
-    out[key] = { num, den, price: isNaN(price) ? 0 : price };
+    out.push({
+      key, name: (r[1] ?? "").toString().trim(), type: ((r[2] ?? "").toString().trim().toUpperCase() as CorpActionKind),
+      date: (r[3] ?? "").toString().trim(), num, den, price: isNaN(price) ? 0 : price,
+    });
   }
+  return out;
+}
+
+/** Read the Opening Corp Actions tab → a resolutions map keyed by PendingAction.key
+ *  ({} if the tab doesn't exist yet). */
+export async function loadOpeningCorpActions(spreadsheetId: string): Promise<Record<string, ActionResolution>> {
+  const rows = await loadOpeningCorpActionRows(spreadsheetId);
+  const out: Record<string, ActionResolution> = {};
+  for (const a of rows) out[a.key] = { num: a.num, den: a.den, price: a.price };
   return out;
 }
