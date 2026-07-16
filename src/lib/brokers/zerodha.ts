@@ -6,7 +6,8 @@ import {
   isFootnoteOrDisclaimer,
   getTradeDate,
   getUCC,
-  calculateReconciliation
+  calculateReconciliation,
+  extractIsin
 } from './utils';
 
 export class ZerodhaBrokerStrategy implements BrokerStrategy {
@@ -123,11 +124,8 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
 
             const rowText = cells.map(c => c.textContent).join(" ");
             
-            let isin = "";
-            const isinMatch = rowText.match(/(IN[A-Z0-9]{10})/i);
-            if (isinMatch) {
-              isin = isinMatch[1].toUpperCase();
-            }
+            // Check-digit ISIN match — skips name words like "INfrastructu"/"INTERNATIONA".
+            let isin = extractIsin(rowText);
 
             let name = originalName;
             if (name.includes("-")) {
@@ -177,7 +175,7 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     
     // Extract ISIN mapping from the entire text
     const isinMap = new Map<string, string>();
-    const isinRegex = /(IN[A-Z0-9]{10})\s+([A-Z0-9\-]+)/gi;
+    const isinRegex = /(IN[A-Z0-9]{9}[0-9])\s+([A-Z0-9\-]+)/gi;   // check-digit ISIN + trailing symbol
     let match;
     while ((match = isinRegex.exec(text)) !== null) {
       let sym = match[2];
@@ -229,11 +227,8 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
             security = nameTokens.join(" ").trim();
           }
           
-          let isin = "";
-          const isinMatch = line.match(/(IN[A-Z0-9]{10})/i);
-          if (isinMatch) {
-            isin = isinMatch[1].toUpperCase();
-          }
+          // Check-digit ISIN match — skips name words like "INfrastructu"/"INTERNATIONA".
+          let isin = extractIsin(line);
 
           if (security.includes("-")) {
             security = security.split("-")[0].trim();

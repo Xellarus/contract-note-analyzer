@@ -15,6 +15,19 @@ export default defineConfig(({mode}) => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        // Silence ONLY the "Use of eval" warning from the vendored gapi-script
+        // package (Google's minified platform script has a legacy JSON-parse
+        // fallback that uses eval; it's third-party dead-code, not our app code).
+        // Every other warning still passes through to Rollup's default handler.
+        onwarn(warning, warn) {
+          const file = warning.id || warning.loc?.file || '';
+          if (warning.code === 'EVAL' && /gapi-script/.test(file)) return;
+          warn(warning);
+        },
+      },
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.

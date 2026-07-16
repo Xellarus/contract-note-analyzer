@@ -21,8 +21,43 @@ export const parseNumber = (str: string | null): number => {
   return isNaN(parsed) ? 0 : parsed;
 };
 
-export const cleanText = (str: string | null): string => 
+export const cleanText = (str: string | null): string =>
   (str?.toLowerCase().replace(/\s+/g, ' ').trim()) || "";
+
+// ── ISIN extraction (shared by every broker parser) ──────────────────────────
+// A valid ISIN is 12 chars: 2 country letters + 9 alphanumeric + a NUMERIC check
+// digit ([A-Z]{2}[A-Z0-9]{9}[0-9]). Requiring that trailing digit is essential.
+// The naive /IN[A-Z0-9]{10}/ (no check digit) matches the FIRST "IN…" run in a
+// string — which, on a name+ISIN cell, is often a NAME word: "INfrastructu" inside
+// "Infrastructures", "INTERNATIONA" inside "International" — landing on a bogus
+// 12-char code BEFORE the real ISIN. That fake code passes length guards, is absent
+// from the Scrip Master, so the ISIN lookup misses and the scrip silently resolves
+// by name (how Genus Power → "Larsen & Toubro"). Indian ISINs start "IN".
+export const ISIN_RE = /IN[A-Z0-9]{9}[0-9]/i;
+
+/** The first real ISIN in `s` (a trade row, a "Name-(ISIN)" cell, etc.), upper-cased,
+ *  or "" if none. Tolerates a stray space pdf.js can inject inside the code. */
+export const extractIsin = (s: string | null | undefined): string => {
+  const str = (s || "").toString();
+  const direct = str.match(ISIN_RE);
+  if (direct) return direct[0].toUpperCase();
+  const stripped = str.replace(/\s+/g, "").match(ISIN_RE);
+  return stripped ? stripped[0].toUpperCase() : "";
+};
+
+/** True when `s` (trimmed) is EXACTLY an ISIN — for legend/summary cells whose
+ *  whole content is the bare code. */
+export const isIsin = (s: string | null | undefined): boolean =>
+  new RegExp(`^${ISIN_RE.source}$`, "i").test((s || "").toString().trim());
+
+/** Strip an ISIN (with any surrounding "-", "(", ")" and spaces) out of a security
+ *  name: "Genus Power Infrastructures Lt-(INE955D01029)" → "Genus Power
+ *  Infrastructures Lt". Returns the name unchanged when it carries no ISIN. */
+export const stripIsin = (name: string | null | undefined): string =>
+  (name || "").toString()
+    .replace(new RegExp(`\\s*-?\\s*\\(?\\s*${ISIN_RE.source}\\s*\\)?`, "i"), " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 export const isFootnoteOrDisclaimer = (text: string | null): boolean => {
   if (!text) return false;

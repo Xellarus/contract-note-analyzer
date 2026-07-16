@@ -5,7 +5,8 @@ import {
   cleanText,
   isFootnoteOrDisclaimer,
   getTradeDate,
-  calculateReconciliation
+  calculateReconciliation,
+  extractIsin
 } from './utils';
 
 export class StandardBrokerStrategy implements BrokerStrategy {
@@ -43,7 +44,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
 
       const lDown = line.toLowerCase();
       const tokens = line.split(/\s+/);
-      const isinMatch = tokens.findIndex(t => t.match(/IN[a-zA-Z0-9]{10}/));
+      const isinMatch = tokens.findIndex(t => extractIsin(t) !== "");   // check-digit ISIN token
       
       const cleanL = lDown.replace(/[^a-z]/g, '');
       if (cleanL.includes("annexurea") || lDown.includes("annexure-a") || lDown.includes("annexure a")) {
@@ -107,7 +108,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
 
       // ISIN / Aggregate Table fallback
       if (isinMatch !== -1) {
-        const isin = tokens[isinMatch].match(/IN[a-zA-Z0-9]{10}/)?.[0];
+        const isin = extractIsin(tokens[isinMatch]);
         let numStartIdx = isinMatch + 1;
         while (numStartIdx < tokens.length && !tokens[numStartIdx].match(/^\(?[0-9,.-−]+\)?$/)) {
           numStartIdx++;
@@ -118,7 +119,7 @@ export class StandardBrokerStrategy implements BrokerStrategy {
           const sellQty = numStartIdx + 5 < tokens.length ? Math.abs(parseNumber(tokens[numStartIdx + 5])) : 0;
           
           if (buyQty > 0 || sellQty > 0) {
-            const name = tokens.slice(isinMatch + (tokens[isinMatch] === isin ? 1 : 0), numStartIdx).join(" ");
+            const name = tokens.slice(isinMatch + (tokens[isinMatch].toUpperCase() === isin ? 1 : 0), numStartIdx).join(" ");
             if (buyQty > 0) {
               const price = numStartIdx + 1 < tokens.length ? parseNumber(tokens[numStartIdx + 1]) : 0;
               const brok = numStartIdx + 2 < tokens.length ? parseNumber(tokens[numStartIdx + 2]) : 0;

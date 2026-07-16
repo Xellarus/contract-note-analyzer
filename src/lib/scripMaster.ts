@@ -223,7 +223,16 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
         const nse = (r[ci.nse] || "").toString().trim();
         if (!isin && !name && bseParts.length === 0 && !bsecode && !nse) continue;
         const aliasCol = (r[ci.alias] || "").toString().split("|").map((a: string) => a.trim()).filter(Boolean);
-        const aliases = [...bseParts, bsecode, nse, ...aliasCol].filter(Boolean);
+        // A ≤2-char exchange symbol (e.g. NSE "LT" for Larsen & Toubro) is too short to
+        // fuzzy-match on: indexed as an alias it token-subset-matches ANY name containing
+        // "lt" — including the ubiquitous "Limited" abbreviation ("Genus Power
+        // Infrastructures Lt") — silently mis-resolving that scrip to L&T. Keep such
+        // symbols for DISPLAY (entry.nse/bse are set separately below) but drop them from
+        // the match-alias index. Multi-char symbols/codes and alias names are unaffected,
+        // and any scrip is still matched by its full name or ISIN.
+        const aliases = [...bseParts, bsecode, nse, ...aliasCol]
+          .filter(Boolean)
+          .filter((a: string) => a.replace(/[^a-z0-9]/gi, "").length > 2);
 
         // Fold append/duplicate rows into one entry, by ISIN then normalized name.
         const existing = (isin && master.byIsin.get(isin)) || (name && master.byAliasNorm.get(normName(name))) || null;

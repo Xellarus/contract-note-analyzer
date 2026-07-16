@@ -6,7 +6,10 @@ import {
   isFootnoteOrDisclaimer,
   getTradeDate,
   getUCC,
-  calculateReconciliation
+  calculateReconciliation,
+  extractIsin,
+  stripIsin,
+  isIsin
 } from './utils';
 
 export class IntegratedBrokerStrategy implements BrokerStrategy {
@@ -232,9 +235,8 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
 
       const lowerLine = line.toLowerCase();
       if (lowerLine.includes("scrip total") || lowerLine.includes("isin code")) {
-        const m = line.match(/\b(IN[A-Z0-9]{10})\b/i);
-        if (m) {
-          const code = m[1].toUpperCase();
+        const code = extractIsin(line);
+        if (code) {
           for (let k = blockStart; k < trades.length; k++) if (!trades[k].isin) trades[k].isin = code;
         }
         blockStart = trades.length;
@@ -287,16 +289,12 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
 
       securityPart = securityPart.replace(/^[\d\s\-\,\.\/]+/, "").trim();
 
-      // Capture the ISIN embedded in the security column before stripping it
-      // from the name (matches ShareIndia's behaviour; the note carries it).
-      const isinMatch = securityPart.match(/(IN[A-Z0-9]{10})/i);
-      const isin = isinMatch ? isinMatch[1].toUpperCase() : "";
-
-      const name = securityPart
-        .replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "")
-        .replace(/\s*-?\s*\(?IN[A-Z0-9]{11}\)?/i, "")
-        .replace(/\s*-?\s*\(?IN[A-Z0-9]{13}\)?/i, "")
-        .trim();
+      // Capture the ISIN embedded in the security column, then strip it from the name.
+      // Shared extractIsin/stripIsin require the ISIN's check digit, so a name word like
+      // "INfrastructu" inside "Infrastructures" can't masquerade as the ISIN (which used
+      // to produce a bogus code that missed the master and mis-resolved the scrip by name).
+      const isin = extractIsin(securityPart);
+      const name = stripIsin(securityPart);
 
       const lowerName = name.toLowerCase();
 
@@ -1054,9 +1052,8 @@ function xmExtractTradesIntegrated(doc: Document): any[] {
         continue;
       }
       if (T.includes("scrip total")) {
-        const m = (row.textContent || "").match(/\b(IN[A-Z0-9]{10})\b/i);
-        if (m) {
-          const code = m[1].toUpperCase();
+        const code = extractIsin(row.textContent || "");
+        if (code) {
           for (let k = blockStart; k < g.length; k++) if (!g[k].isin) g[k].isin = code;
         }
         blockStart = g.length;   // close the block whether or not it carried an ISIN (F&O totals don't)
@@ -1086,9 +1083,8 @@ function xmExtractTradesIntegrated(doc: Document): any[] {
         const Braw = securityCell?.textContent?.trim();
         if (!Braw || cleanTextLower(Braw).includes("total")) continue;
         // Capture an ISIN embedded in the security/contract cell, then strip it
-        const isinM = Braw.match(/(IN[A-Z0-9]{10})/i);
-        const isin = isinM ? isinM[1].toUpperCase() : "";
-        const B = Braw.replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "").trim() || Braw;
+        const isin = extractIsin(Braw);
+        const B = stripIsin(Braw) || Braw;
         const typeStr = cells[N.type] ? cleanTextLower(cells[N.type].textContent) : "";
         const q = typeStr.includes("buy") ? "Buy" : typeStr.includes("sell") ? "Sell" : null;
         const qtyVal = cells[N.qty] ? cleanNumValue(cells[N.qty].textContent) : 0;
@@ -1124,7 +1120,7 @@ function xmExtractTradesIntegrated(doc: Document): any[] {
       const cells = Array.from(row.querySelectorAll("td, th"));
       if (cells.length < 2) continue;
       const c0 = (cells[0].textContent || "").trim();
-      if (!/^IN[A-Z0-9]{10}$/i.test(c0)) continue;
+      if (!isIsin(c0)) continue;
       const nm = (cells[1].textContent || "").trim().toUpperCase();
       if (nm) legend.set(nm, c0.toUpperCase());
     }

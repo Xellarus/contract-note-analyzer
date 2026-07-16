@@ -6,7 +6,9 @@ import {
   isFootnoteOrDisclaimer,
   getTradeDate,
   getUCC,
-  calculateReconciliation
+  calculateReconciliation,
+  extractIsin,
+  stripIsin
 } from './utils';
 
 export class ShareIndiaBrokerStrategy implements BrokerStrategy {
@@ -540,13 +542,8 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
             const fullName = cells[colMap.security]?.textContent?.trim() || "";
             if (!fullName || cleanText(fullName).toLowerCase().startsWith("total") || cleanText(fullName).toLowerCase().startsWith("subtotal")) continue;
 
-            let isin = "";
-            const isinMatch = fullName.match(/(IN[A-Z0-9]{10})/i);
-            if (isinMatch) {
-              isin = isinMatch[1].toUpperCase();
-            }
-
-            const name = fullName.replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "").trim();
+            const isin = extractIsin(fullName);
+            const name = stripIsin(fullName);
 
             const typeStr = cleanText(cells[colMap.type]?.textContent).toLowerCase();
             const side = (typeStr.includes("buy") || typeStr === "b") ? "Buy" : (typeStr.includes("sell") || typeStr === "s") ? "Sell" : null;
@@ -572,9 +569,45 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     return trades;
   }
 
+  // Build an ISIN → full security-name map from the whole note. The Equity Segment
+  // summary at the top lists each holding as "<ISIN> <Name words…> <numbers>", so
+  // after every standalone ISIN token we collect the following alphabetic words
+  // (stopping at the first number or a BUY/SELL keyword). This recovers the complete
+  // name even when it wraps across PDF lines — e.g. "Genus Power Infrastructures" on
+  // one line and "Lt-(INE955D01029)" on the next, where the annexure trade line alone
+  // would only yield "Lt". The annexure occurrences (where the ISIN is glued to the
+  // name as "Lt-(INE955D01029)") are NOT standalone tokens, so they're skipped and
+  // only the clean Equity-Segment listing feeds the map. Longest name per ISIN wins.
+  private buildIsinNameMap(text: string): Map<string, string> {
+    const map = new Map<string, string>();
+    const tokens = text.split(/\s+/);
+    const isinRe = /^\(?(IN[A-Z0-9]{9}[0-9])\)?[,.;:]?$/i;   // a token that IS an ISIN (12 chars, check digit; not "Lt-(ISIN)")
+    for (let i = 0; i < tokens.length; i++) {
+      const m = tokens[i].match(isinRe);
+      if (!m) continue;
+      const isin = m[1].toUpperCase();
+      const words: string[] = [];
+      for (let j = i + 1; j < tokens.length && words.length < 10; j++) {
+        const tk = tokens[j];
+        if (/\d/.test(tk)) break;                         // reached the numeric columns → name ended
+        const u = tk.toUpperCase();
+        if (u === 'BUY' || u === 'SELL' || u === 'B' || u === 'S') break;
+        const clean = tk.replace(/[^A-Za-z&./-]/g, '').trim();
+        if (!clean) break;
+        words.push(clean);
+      }
+      const name = words.join(' ').replace(/[\s-]+$/, '').trim();
+      if (name.length >= 3 && name.length > (map.get(isin)?.length || 0)) map.set(isin, name);
+    }
+    return map;
+  }
+
   private extractTradesFromText(text: string): any[] {
     const trades: any[] = [];
     const lines = text.split('\n');
+    // Authoritative ISIN→name lookup (repairs names that wrap across lines in the
+    // per-trade annexure). Keyed by the ISIN, which the trade line always carries.
+    const isinToName = this.buildIsinNameMap(text);
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
@@ -618,20 +651,30 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       // Strip leading numbers e.g. trade numbers
       securityPart = securityPart.replace(/^[\d\s\-\,\.\/]+/, "").trim();
 
-      let isin = "";
-      const isinMatch = securityPart.match(/(IN[A-Z0-9]{10})/i);
-      if (isinMatch) {
-         isin = isinMatch[1].toUpperCase();
+      // ISIN capture — the identifier the Scrip Master is keyed on (getting it right is
+      // what lets the master resolve the canonical name, which wins over any name match).
+      // `extractIsin` (shared) requires the ISIN's trailing check digit, so it skips name
+      // words like "INfrastructu" inside "Infrastructures", and tolerates a stray space
+      // pdf.js can inject. If this BUY/SELL line carries no ISIN (the name+ISIN wrapped and
+      // only the tail is on this line), recover it from the previous line.
+      let isin = extractIsin(securityPart);
+      if (!isin && i > 0) {
+        const prevRaw = (lines[i - 1] || "").trim();
+        if (prevRaw && !/\b(BUY|SELL)\b/i.test(prevRaw)) isin = extractIsin(`${prevRaw} ${securityPart}`);
       }
 
-      // Clean ISIN suffix variations
-      const name = securityPart
-        .replace(/\s*-?\s*\(?IN[A-Z0-9]{10}\)?/i, "")
-        .replace(/\s*-?\s*\(?IN[A-Z0-9]{11}\)?/i, "")
-        .replace(/\s*-?\s*\(?IN[A-Z0-9]{13}\)?/i, "")
-        .trim();
+      // Reconstructed name (ISIN + leading trade-number junk stripped). The authoritative
+      // name comes from the ISIN→Scrip-Master lookup at write time; the Equity-Segment
+      // ISIN→name map (below) supplies it when this line's name is a bare wrapped tail.
+      const name = stripIsin(securityPart).replace(/^[\d\s\-\,\.\/:]+/, "").replace(/\s+/g, " ").trim();
 
-      const lowerName = name.toLowerCase();
+      // Prefer the full name from the note's Equity-Segment listing (keyed by ISIN)
+      // when the line-reconstructed name is broken by a wrap (e.g. bare "Lt"). Falls
+      // back to the reconstructed name when the ISIN isn't in the map.
+      const mappedName = isin ? isinToName.get(isin) : "";
+      const finalName = (mappedName && mappedName.length >= name.length) ? mappedName : (name || mappedName || "");
+
+      const lowerName = finalName.toLowerCase();
 
       // Skip common header strings and artifacts
       if (lowerName.length < 2) continue;
@@ -639,7 +682,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       if (lowerName === "total" || lowerName === "subtotal" || lowerName.startsWith("page no")) continue;
 
       trades.push({
-        securityName: name,
+        securityName: finalName,
         isin: isin,
         quantity: qty,
         price: price,
