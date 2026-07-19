@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
-  Compass, Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
+  Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
   ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save
 } from 'lucide-react';
 import { PortfolioHolding, ContractNoteResult } from '../types';
@@ -113,12 +113,34 @@ interface DisplayHolding {
   currentValue: number;
   unrealizedGain: number;
   unrealizedGainPct: number;
+  todayGain: number;   // qty × (CMP − previous-day price); 0 when no prev price recorded
   type: string;
   sold?: boolean;   // exited position (traded historically, no current holding)
   original: any;
 }
 
-export default function Holdings({ 
+// Screener.in company URL from a scrip's exchange identifiers. Screener's page slug
+// is the NSE symbol when the company is listed there, else the numeric BSE scrip code
+// — both live in the scrip master (entry.nse / entry.bse). "" when neither is known,
+// since Screener has no ISIN-based URL. The bare /company/<code>/ form redirects to the
+// consolidated or standalone view automatically.
+const screenerUrl = (nse?: string, bse?: string): string => {
+  const code = ((nse || '').trim() || (bse || '').trim()).split(/[\s,|]/)[0].trim();
+  return code ? `https://www.screener.in/company/${encodeURIComponent(code)}/` : '';
+};
+
+// Screener.in mark — the ascending green bar chart on a dark tile. Inline SVG so it's
+// crisp at any size and needs no external request.
+const ScreenerLogo = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <rect width="32" height="32" rx="7" fill="#0e1526" />
+    <rect x="6.5" y="17" width="4.5" height="8.5" rx="1.3" fill="#3fae46" />
+    <rect x="13.75" y="11.5" width="4.5" height="14" rx="1.3" fill="#54c65a" />
+    <rect x="21" y="6.5" width="4.5" height="19" rx="1.3" fill="#6ddc71" />
+  </svg>
+);
+
+export default function Holdings({
   holdings, 
   setHoldings, 
   parsedContractNote,
@@ -161,6 +183,27 @@ export default function Holdings({
     return priceMap.get('name:' + normName(name));
   };
 
+  // Previous-day price baseline (Prices tab "Previous Price" column, rolled once per
+  // day at import) → powers "today's gain". Indexed the same way as the CMP map.
+  const prevPriceMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of priceRows) {
+      const pp = p.previousPrice || 0;
+      if (!(pp > 0)) continue;
+      if (p.isin) m.set('isin:' + p.isin.toUpperCase(), pp);
+      if (p.name) m.set('name:' + normName(p.name), pp);
+      if (scrip) { const e = lookupScrip(scrip, p.isin, p.name).entry; if (e) m.set('key:' + e.key, pp); }
+    }
+    return m;
+  }, [priceRows, scrip]);
+
+  // Previous-day price for a holding (undefined when none is recorded yet).
+  const getRealPrevCmp = (isin: string, name: string): number | undefined => {
+    if (scrip) { const e = lookupScrip(scrip, isin, name).entry; if (e) { const v = prevPriceMap.get('key:' + e.key); if (v !== undefined) return v; } }
+    if (isin) { const v = prevPriceMap.get('isin:' + isin.toUpperCase()); if (v !== undefined) return v; }
+    return prevPriceMap.get('name:' + normName(name));
+  };
+
   // The most recent "Updated" stamp across imported prices — shown top-right.
   const lastPriceUpdate = useMemo(() => {
     const stamps = priceRows.map(p => p.updated).filter(Boolean);
@@ -190,6 +233,7 @@ export default function Holdings({
   const [isEditingCmp, setIsEditingCmp] = useState(false);
   const [cmpInputVal, setCmpInputVal] = useState('');
   const [txSearchTerm, setTxSearchTerm] = useState('');
+  const [txSort, setTxSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'tradeDate', dir: 'desc' });
   
   // States for fetching spreadsheet holdings
   const [sheetHoldings, setSheetHoldings] = useState<SheetHolding[]>([]);
@@ -967,7 +1011,7 @@ export default function Holdings({
   const editEntryModal = (
       <ModalShell open={!!editingTx} onClose={() => !savingEdit && setEditingTx(null)} busy={savingEdit} labelledBy="edit-entry-title">
         <div className="relative z-10 w-full max-w-xl max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn">
-          <div className="flex items-start justify-between px-5 py-4 border-b border-slate-150">
+          <div className="flex items-start justify-between px-5 py-4 border-b border-slate-200">
             <div>
               <h3 id="edit-entry-title" className="text-sm font-black text-slate-800 flex items-center gap-2"><Edit2 className="w-4 h-4 text-indigo-600" /> Edit Entry</h3>
               <p className="text-[11px] text-slate-500 mt-0.5">
@@ -1043,7 +1087,7 @@ export default function Holdings({
             )}
           </div>
 
-          <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-150">
+          <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200">
             <button onClick={() => setEditingTx(null)} disabled={savingEdit} className="px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer disabled:opacity-50">Cancel</button>
             <button onClick={saveEdit} disabled={savingEdit} data-autofocus
               className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer disabled:opacity-50">
@@ -1308,6 +1352,7 @@ export default function Holdings({
           currentValue: totalValue,
           unrealizedGain: profit,
           unrealizedGainPct: profitPct,
+          todayGain: 0,   // local sandbox has no imported previous-day price
           type,
           original: h
         };
@@ -1342,6 +1387,11 @@ export default function Holdings({
         const profit = totalValue - h.investedValue;
         const profitPct = h.investedValue > 0 ? (profit / h.investedValue) * 105 / 105 * 100 : 0; // standard format
 
+        // Today's gain = qty × (CMP − previous-day price). 0 until a previous-day
+        // baseline exists (i.e. after the first import on a later day).
+        const prevCmp = getRealPrevCmp(h.isin, h.companyName);
+        const todayGain = (cmp > 0 && prevCmp !== undefined && prevCmp > 0) ? h.quantity * (cmp - prevCmp) : 0;
+
         return {
           id: `sheet-${index}`,
           symbol,
@@ -1354,6 +1404,7 @@ export default function Holdings({
           currentValue: totalValue,
           unrealizedGain: profit,
           unrealizedGainPct: profitPct,
+          todayGain,
           type,
           sold: h.quantity <= 0,
           original: h
@@ -1465,6 +1516,9 @@ export default function Holdings({
     const nseSymbol = scripEntry?.nse || (selectedStock as any).symbol || inferredSymbol;
     const bseCode = scripEntry?.bse || '';
     const displayIsin = isin || scripEntry?.isin || '';
+    // Real exchange identifiers only (never the inferred first-word symbol) — so the
+    // Screener link is either correct or absent, never a 404-y guess.
+    const screenerHref = screenerUrl(scripEntry?.nse, scripEntry?.bse);
 
     // Compute CMP values — prefer the imported screener price; otherwise value at
     // cost once any prices exist, else fall back to the legacy placeholder.
@@ -1638,12 +1692,58 @@ export default function Holdings({
       return new Intl.NumberFormat('en-IN').format(v);
     };
 
-    // Filter transaction list inside granular view searching block
-    const filteredTxs = transactions.filter(t => 
-      t.tradeDate.toLowerCase().includes(txSearchTerm.toLowerCase()) ||
-      t.transactionType.toLowerCase().includes(txSearchTerm.toLowerCase()) ||
-      t.price.toString().includes(txSearchTerm) ||
-      t.quantity.toString().includes(txSearchTerm)
+    // Filter the ledger — every column is searchable (date, type, qty, price,
+    // brokerage, amount, bal qty).
+    const q = txSearchTerm.trim().toLowerCase();
+    const filteredTxs = transactions.filter(t =>
+      !q ||
+      t.tradeDate.toLowerCase().includes(q) ||
+      t.transactionType.toLowerCase().includes(q) ||
+      t.price.toString().includes(q) ||
+      t.quantity.toString().includes(q) ||
+      t.brokerage.toString().includes(q) ||
+      t.amount.toString().includes(q) ||
+      (t.balanceQuantity !== undefined && t.balanceQuantity.toString().includes(q))
+    );
+
+    // Sort by any column (headers are clickable). Date sorts chronologically, text
+    // columns alphabetically, the rest numerically.
+    const txSortVal = (t: Transaction, key: string): number | string => {
+      switch (key) {
+        case 'transactionType': return t.transactionType.toLowerCase();
+        case 'quantity': return t.quantity;
+        case 'price': return t.price;
+        case 'brokerage': return t.brokerage;
+        case 'amount': return t.amount;
+        case 'balanceQuantity': return t.balanceQuantity ?? -Infinity;
+        case 'tradeDate':
+        default: return parseDateStr(t.tradeDate);
+      }
+    };
+    const sortedTxs = [...filteredTxs].sort((a, b) => {
+      const av = txSortVal(a, txSort.key), bv = txSortVal(b, txSort.key);
+      const c = (typeof av === 'string' || typeof bv === 'string')
+        ? String(av).localeCompare(String(bv))
+        : (av as number) - (bv as number);
+      return txSort.dir === 'asc' ? c : -c;
+    });
+    const toggleTxSort = (key: string) =>
+      setTxSort(s => s.key === key
+        ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'tradeDate' ? 'desc' : 'asc' });
+    const sortTh = (label: string, sortKey: string, align: 'left' | 'right' = 'left') => (
+      <th className={`px-6 py-3 ${align === 'right' ? 'text-right' : 'text-left'}`}>
+        <button
+          onClick={() => toggleTxSort(sortKey)}
+          className="inline-flex items-center gap-1 uppercase tracking-wider hover:text-indigo-600 transition-colors cursor-pointer select-none"
+          title={`Sort by ${label.toLowerCase()}`}
+        >
+          <span>{label}</span>
+          {txSort.key === sortKey
+            ? <span className="text-indigo-500 text-[9px] leading-none">{txSort.dir === 'asc' ? '▲' : '▼'}</span>
+            : <ArrowUpDown className="w-3 h-3 opacity-40" />}
+        </button>
+      </th>
     );
 
     const handleEditCmpClick = () => {
@@ -1665,12 +1765,15 @@ export default function Holdings({
         {/* Breadcrumb row and visual headers */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="space-y-1">
-            <button 
+            <button
               onClick={() => { setSelectedStock(null); setCustomCmp(null); }}
-              className="group flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-indigo-600 cursor-pointer transition-colors"
+              className="group inline-flex items-center gap-2 mb-2 px-3.5 py-2 rounded-xl text-xs font-black tracking-wide shadow-sm border transition-all cursor-pointer active:scale-[0.98] text-indigo-700 bg-indigo-500/10 border-indigo-300/60 hover:bg-indigo-500/20 hover:border-indigo-400 dark:bg-[#d9a441]/10 dark:border-[#d9a441]/40 dark:hover:bg-[#d9a441]/20"
               id="back-to-consolidated-btn"
             >
-              <ArrowLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" /> Back to Consolidated Holdings
+              <span className="flex items-center justify-center w-5 h-5 rounded-lg border border-indigo-300/50 bg-indigo-500/15 text-indigo-700 transition-transform group-hover:-translate-x-0.5 dark:bg-[#d9a441]/20 dark:border-[#d9a441]/30">
+                <ArrowLeft className="w-3.5 h-3.5" />
+              </span>
+              Back to Portfolios
             </button>
             <div className="flex items-center gap-2 mt-2">
               <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight" id="detail-company-heading">
@@ -1683,6 +1786,19 @@ export default function Holdings({
               }`} id="detail-series-badge">
                 {seriesType}
               </span>
+              {screenerHref && (
+                <a
+                  href={screenerHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  id="detail-screener-link"
+                  title="Open on Screener.in"
+                  aria-label="Open on Screener.in"
+                  className="inline-flex items-center shrink-0 rounded-md opacity-85 hover:opacity-100 hover:scale-105 transition-all cursor-pointer"
+                >
+                  <ScreenerLogo size={20} />
+                </a>
+              )}
             </div>
             
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 font-medium pt-1">
@@ -1711,7 +1827,7 @@ export default function Holdings({
             </div>
 
             {/* CMP Interactive Panel */}
-            <div className="flex items-center gap-2 bg-slate-50 border border-slate-150 px-3 py-1.5 rounded-xl mt-1">
+            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl mt-1">
               <span className="text-[10px] uppercase font-black text-slate-400">CMP</span>
               {isEditingCmp ? (
                 <div className="flex items-center gap-1">
@@ -1757,7 +1873,7 @@ export default function Holdings({
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6" id="stock-detail-stats-grid">
           
           {/* Container 1: Position details */}
-          <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5 grid grid-cols-3 gap-y-4 divide-x divide-slate-150 relative" id="holding-metrics-panel">
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5 grid grid-cols-3 gap-y-4 divide-x divide-slate-200 relative" id="holding-metrics-panel">
             <div className="absolute top-3 left-3 bg-indigo-50/70 border border-indigo-100 text-indigo-805 text-[8px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded">
               Position size
             </div>
@@ -1814,7 +1930,7 @@ export default function Holdings({
           </div>
 
           {/* Container 2: Returns details */}
-          <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5 grid grid-cols-3 gap-y-4 divide-x divide-slate-150 relative" id="returns-metrics-panel">
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5 grid grid-cols-3 gap-y-4 divide-x divide-slate-200 relative" id="returns-metrics-panel">
             <div className="absolute top-3 left-3 bg-emerald-50/70 border border-emerald-100 text-emerald-850 text-[8px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded">
               Performance & Yield
             </div>
@@ -1828,14 +1944,9 @@ export default function Holdings({
               </div>
               <div className="space-y-1 border-t border-slate-100 pt-3">
                 <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider block">Unrealized Gain</span>
-                <div className="flex items-center justify-between gap-1">
-                  <span className={`text-sm font-black font-mono truncate ${unrealizedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="detail-unrealized-gain">
-                    {unrealizedGain >= 0 ? '+' : ''}{formatINR(unrealizedGain)}
-                  </span>
-                  <button className="bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-400 hover:text-indigo-600 rounded p-0.5 cursor-pointer shrink-0 transition-colors" title="Sync unrealized snapshot to Ledger">
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                <span className={`text-sm font-black font-mono truncate block ${unrealizedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="detail-unrealized-gain">
+                  {unrealizedGain >= 0 ? '+' : ''}{formatINR(unrealizedGain)}
+                </span>
               </div>
             </div>
 
@@ -1848,14 +1959,9 @@ export default function Holdings({
               </div>
               <div className="space-y-1 border-t border-slate-100 pt-3">
                 <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider block">Realised Gain</span>
-                <div className="flex items-center justify-between gap-1">
-                  <span className={`text-sm font-black font-mono truncate ${realisedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="detail-realised-gain">
-                    {realisedGain >= 0 ? '+' : ''}{formatINR(realisedGain)}
-                  </span>
-                  <button className="bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-400 hover:text-indigo-600 rounded p-0.5 cursor-pointer shrink-0 transition-colors" title="Export matching block details">
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                <span className={`text-sm font-black font-mono truncate block ${realisedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="detail-realised-gain">
+                  {realisedGain >= 0 ? '+' : ''}{formatINR(realisedGain)}
+                </span>
               </div>
             </div>
 
@@ -1923,7 +2029,7 @@ export default function Holdings({
             </button>
           </div>
 
-          <div className="p-4 bg-slate-50/50 border-b border-slate-150 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="p-4 bg-slate-50/50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="relative max-w-xs w-full">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
               <input
@@ -1931,7 +2037,7 @@ export default function Holdings({
                 placeholder="Search ledger details..."
                 value={txSearchTerm}
                 onChange={(e) => setTxSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-3 py-1.5 border border-slate-205 rounded-lg outline-none text-xs bg-white focus:ring-1 focus:ring-indigo-500 font-medium"
+                className="w-full pl-9 pr-3 py-1.5 border border-slate-200 rounded-lg outline-none text-xs bg-white focus:ring-1 focus:ring-indigo-500 font-medium"
                 id="tab-search-input"
               />
             </div>
@@ -1955,27 +2061,27 @@ export default function Holdings({
               <>
                 {activeDetailTab === 'trade_book' && (
                   <table className="w-full text-xs text-left" id="trade-book-table">
-                    <thead className="bg-[#f8fafc] border-b border-slate-205 font-bold text-slate-600 uppercase tracking-wider">
+                    <thead className="bg-[#f8fafc] border-b border-slate-200 font-bold text-slate-600 uppercase tracking-wider">
                       <tr>
-                        <th className="px-6 py-3">DATE</th>
-                        <th className="px-6 py-3">TRANSACTION TYPE</th>
-                        <th className="px-6 py-3 text-right">QUANTITY</th>
-                        <th className="px-6 py-3 text-right">PRICE</th>
-                        <th className="px-6 py-3 text-right">BROKERAGE</th>
-                        <th className="px-6 py-3 text-right">AMOUNT</th>
-                        <th className="px-6 py-3 text-right">BAL QTY</th>
+                        {sortTh('DATE', 'tradeDate')}
+                        {sortTh('TRANSACTION TYPE', 'transactionType')}
+                        {sortTh('QUANTITY', 'quantity', 'right')}
+                        {sortTh('PRICE', 'price', 'right')}
+                        {sortTh('BROKERAGE', 'brokerage', 'right')}
+                        {sortTh('AMOUNT', 'amount', 'right')}
+                        {sortTh('BAL QTY', 'balanceQuantity', 'right')}
                         <th className="px-6 py-3 text-center">EDIT</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-150">
-                      {filteredTxs.length === 0 ? (
+                    <tbody className="divide-y divide-slate-200">
+                      {sortedTxs.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="px-6 py-12 text-center text-slate-400 italic font-medium">
                             No matching ledger line items found.
                           </td>
                         </tr>
                       ) : (
-                        filteredTxs.map((t, idx) => {
+                        sortedTxs.map((t, idx) => {
                           const type = t.transactionType.toUpperCase();
                           const side = ledgerSide(t.transactionType);
                           const isCorp = /BONUS|SPLIT|IPO|RIGHT/.test(type);   // corporate actions get their own badge
@@ -2009,7 +2115,7 @@ export default function Holdings({
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-850">
                                 {formatINR(t.amount)}
                               </td>
-                              <td className="px-6 py-3.5 text-right font-mono text-slate-450 border-l border-slate-50">
+                              <td className="px-6 py-3.5 text-right font-mono text-slate-450">
                                 {t.balanceQuantity !== undefined ? formatNum(t.balanceQuantity) : '—'}
                               </td>
                               <td className="px-6 py-3.5 text-center">
@@ -2035,7 +2141,7 @@ export default function Holdings({
 
                 {activeDetailTab === 'inventory' && (
                   <table className="w-full text-xs text-left" id="inventory-cost-lots-table">
-                    <thead className="bg-[#f8fafc] border-b border-slate-205 font-bold text-slate-600 uppercase tracking-wider">
+                    <thead className="bg-[#f8fafc] border-b border-slate-200 font-bold text-slate-600 uppercase tracking-wider">
                       <tr>
                         <th className="px-6 py-3">LOT PURCHASE DATE</th>
                         <th className="px-6 py-3">TERM</th>
@@ -2047,7 +2153,7 @@ export default function Holdings({
                         <th className="px-6 py-3 text-right">LOT AGE (DAYS)</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-150">
+                    <tbody className="divide-y divide-slate-200">
                       {filteredInventory.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="px-6 py-12 text-center text-slate-400 italic font-medium">
@@ -2112,7 +2218,7 @@ export default function Holdings({
 
                 {activeDetailTab === 'realised_inventory' && (
                   <table className="w-full text-xs text-left" id="realised-inventory-table">
-                    <thead className="bg-[#f8fafc] border-b border-slate-205 font-bold text-slate-600 uppercase tracking-wider">
+                    <thead className="bg-[#f8fafc] border-b border-slate-200 font-bold text-slate-600 uppercase tracking-wider">
                       <tr>
                         <th className="px-6 py-3">SELL DATE</th>
                         <th className="px-6 py-3">MATCHED BUY DATE</th>
@@ -2122,7 +2228,7 @@ export default function Holdings({
                         <th className="px-6 py-3 text-right">REALISED GAIN/LOSS</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-150">
+                    <tbody className="divide-y divide-slate-200">
                       {realisedTrades.length === 0 ? (
                         <tr>
                           <td colSpan={6} className="px-6 py-12 text-center text-slate-400 italic font-medium">
@@ -2161,13 +2267,37 @@ export default function Holdings({
   const getPortfolioSummary = (id: string) => {
     if (id !== 'local') {
       // Every configured portfolio shows real numbers only — no demo placeholders.
-      // Invested = that portfolio's own synced Holding-tab total (from the
-      // per-portfolio map), so each card is independent. Shows 0 until synced.
       const p = portfolioById(id);
+      const name = p?.label ?? id.toUpperCase();
+      const subtext = p ? `${p.label} - ${p.code}` : id;
+
+      // For the portfolio that's currently OPEN, the live rows (displayHoldings)
+      // already value each position at the imported screener CMP — so the summary
+      // cards must sum THOSE, otherwise they read current = invested with 0 gain
+      // even though every row shows a gain. (portfolioTotals[id] is built as the
+      // sum of the same rows' investedValue, so Invested Capital is unchanged.)
+      if (id === activePortfolio && sheetHoldings.length > 0) {
+        let currentValue = 0, investedValue = 0, todaysGain = 0;
+        for (const h of displayHoldings) {
+          if (h.sold || h.quantity <= 0) continue;
+          currentValue += h.currentValue;
+          investedValue += (h.original?.investedValue ?? h.quantity * h.avgCost);
+          todaysGain += h.todayGain || 0;
+        }
+        const unrealisedGain = currentValue - investedValue;
+        const unrealisedGainPct = investedValue > 0 ? (unrealisedGain / investedValue) * 100 : 0;
+        // Today's gain = Σ qty × (CMP − previous-day price). Stays 0 until a previous-day
+        // baseline exists (first import on a later day). % is vs the previous-day value.
+        const prevValue = currentValue - todaysGain;
+        const todaysGainPct = prevValue > 0 ? (todaysGain / prevValue) * 100 : 0;
+        return { name, subtext, currentValue, investedValue, unrealisedGain, unrealisedGainPct, todaysGain, todaysGainPct };
+      }
+
+      // Any other portfolio (e.g. the account-list cards): only its cost-basis
+      // total is loaded, so show that. Shows 0 until synced.
       const invested = portfolioTotals[id] ?? 0;
       return {
-        name: p?.label ?? id.toUpperCase(),
-        subtext: p ? `${p.label} - ${p.code}` : id,
+        name, subtext,
         currentValue: invested,
         investedValue: invested,
         unrealisedGain: 0,
@@ -2237,19 +2367,8 @@ export default function Holdings({
         </div>
       )}
       {!isDetailView ? (
-        <div id="portfolio-selection-panel" className="bg-white border border-slate-200/90 rounded-2xl shadow-sm overflow-hidden animate-fadeIn">
-          <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <h4 className="text-sm font-black text-slate-800 tracking-tight flex items-center gap-1.5 uppercase">
-                <Compass className="w-4 h-4 text-indigo-650" /> Account Portfolios Summary
-              </h4>
-              <p className="text-[11px] text-slate-400">
-                Click on any account portfolio below to open its dedicated live ledger page and scan full metrics.
-              </p>
-            </div>
-          </div>
-          
-          <div className="p-4 sm:p-5 grid grid-cols-1 lg:grid-cols-2 gap-3">
+        // Freestanding portfolio cards on the page ground — no wrapping panel/header.
+        <div id="portfolio-selection-panel" className="grid grid-cols-1 lg:grid-cols-2 gap-4 animate-fadeIn">
             {PORTFOLIOS.map((p) => {
               const id = p.id;
               const summary = getPortfolioSummary(id);
@@ -2264,7 +2383,7 @@ export default function Holdings({
                 <div
                   key={id}
                   onClick={() => { setActivePortfolio(id); setSelectedStock(null); setIsDetailView(true); }}
-                  className="group rounded-xl border border-slate-200 bg-white hover:border-indigo-300 hover:shadow-sm transition-all cursor-pointer overflow-hidden flex flex-col"
+                  className="group rounded-2xl border border-slate-200 bg-white shadow-sm hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer overflow-hidden flex flex-col"
                 >
                   {/* Header: code + name + sheet link */}
                   <div className="flex items-center justify-between gap-2 px-3.5 pt-3">
@@ -2378,7 +2497,6 @@ export default function Holdings({
                 </div>
               );
             })}
-          </div>
         </div>
       ) : (
         <div className="space-y-6 animate-fadeIn">
@@ -2692,7 +2810,7 @@ export default function Holdings({
                           )}
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-150">
+                      <tbody className="divide-y divide-slate-200">
                         {sortedHoldings.map((h) => {
                           const isPositive = h.unrealizedGain >= 0;
 

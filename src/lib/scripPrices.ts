@@ -11,7 +11,7 @@ import { lookupScrip, normName, ScripMaster } from "./scripMaster";
  */
 const PRICES_TAB = "Prices";
 
-export interface ScripPrice { isin: string; name: string; price: number; updated: string; }
+export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; }
 
 let _priceCache: { id: string; rows: ScripPrice[]; ts: number } | null = null;
 const PRICE_TTL_MS = 60_000;
@@ -26,6 +26,11 @@ const istStamp = (): string =>
     hour: "2-digit", minute: "2-digit", hour12: true,
   });
 
+// The date portion of an "Updated" stamp ("17 Jul 2026, 01:31 pm" → "17 Jul 2026").
+// Used to decide when to roll the day's "Previous Price" baseline. Derived from the
+// SAME formatter as the stamp so today's key and a stored stamp's date compare exactly.
+const stampDate = (s: string): string => (s || "").split(",")[0].trim();
+
 function parsePriceVals(vals: any[][]): ScripPrice[] {
   const rows: ScripPrice[] = [];
   const start = vals.length > 0 && /isin|name|price|updated/i.test((vals[0] || []).join(",")) ? 1 : 0;
@@ -35,8 +40,9 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const name = (r[1] || "").toString().trim();
     const price = toNum(r[2]);
     const updated = (r[3] || "").toString().trim();
+    const previousPrice = toNum(r[4]);
     if ((!isin && !name) || isNaN(price)) continue;
-    rows.push({ isin, name, price, updated });
+    rows.push({ isin, name, price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice });
   }
   return rows;
 }
@@ -85,17 +91,26 @@ export async function saveScripPrices(
   for (const p of existing) if (p.isin) map.set(p.isin, p);
 
   const stamp = istStamp();
+  const today = stampDate(stamp);
   let updated = 0;
   for (const s of incoming) {
     const isin = (s.isin || "").trim().toUpperCase();
     if (!isin || !(s.price > 0)) continue;
-    map.set(isin, { isin, name: s.name || map.get(isin)?.name || "", price: s.price, updated: stamp });
+    const prev = map.get(isin);
+    // Roll the day's baseline: the FIRST import on a new calendar day moves the
+    // last-known price into "Previous Price"; same-day re-imports keep the baseline
+    // (so re-importing intraday doesn't reset "today's" change to zero).
+    let previousPrice = prev?.previousPrice ?? 0;
+    if (prev && prev.price > 0 && stampDate(prev.updated) && stampDate(prev.updated) !== today) {
+      previousPrice = prev.price;
+    }
+    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice });
     updated++;
   }
 
-  const rows: any[][] = [["ISIN", "Name", "Current Price", "Updated"]];
+  const rows: any[][] = [["ISIN", "Name", "Current Price", "Updated", "Previous Price"]];
   for (const p of [...map.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-    rows.push([p.isin, p.name, p.price, p.updated]);
+    rows.push([p.isin, p.name, p.price, p.updated, p.previousPrice || ""]);
   }
 
   await ensureSheetTabs(spreadsheetId, [PRICES_TAB]);

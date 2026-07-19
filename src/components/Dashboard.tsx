@@ -80,32 +80,33 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
       </div>
 
       {/* AUM hero */}
-      <div className="rounded-3xl border border-indigo-700 bg-gradient-to-br from-indigo-600 to-indigo-800 text-white shadow-lg p-7 sm:p-9">
-        <div className="flex items-center gap-2 text-indigo-100">
+      {/* Light (Mono): warm-white card, ink border/text. Dark (Brass): warm graphite panel, gold label. */}
+      <div className="rounded-3xl border border-[#16130d] bg-gradient-to-br from-[#fbf6eb] to-[#f8f2e3] text-[#16130d] shadow-lg p-7 sm:p-9 dark:border-[#332d24] dark:from-[#1a1815] dark:to-[#1a1815] dark:text-[#eae5da]">
+        <div className="flex items-center gap-2 text-[#756b57] dark:text-[#d9a441]">
           <Wallet className="w-5 h-5" />
           <span className="text-[11px] font-black uppercase tracking-[0.15em]">Current AUM</span>
         </div>
         {loading && !aum ? (
-          <div className="flex items-center gap-2 mt-4 text-indigo-100"><Loader2 className="w-5 h-5 animate-spin" /> <span className="text-sm font-bold">Computing…</span></div>
+          <div className="flex items-center gap-2 mt-4 text-[#756b57] dark:text-[#938b7c]"><Loader2 className="w-5 h-5 animate-spin" /> <span className="text-sm font-bold">Computing…</span></div>
         ) : aum ? (
           <>
             <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-1">
               <span className="text-4xl sm:text-5xl font-black tracking-tight font-mono tabular-nums">{inr(aum.totalCurrent)}</span>
-              <span className="text-sm font-bold text-indigo-200 pb-1">≈ {cr(aum.totalCurrent)}</span>
+              <span className="text-sm font-bold text-[#756b57] dark:text-[#938b7c] pb-1">≈ {cr(aum.totalCurrent)}</span>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[13px]">
-              <span className="text-indigo-100">Invested <strong className="font-mono">{inr(aum.totalInvested)}</strong></span>
-              <span className={`inline-flex items-center gap-1 font-bold ${up ? 'text-emerald-300' : 'text-rose-300'}`}>
+              <span className="text-[#756b57] dark:text-[#938b7c]">Invested <strong className="font-mono text-[#16130d] dark:text-[#eae5da]">{inr(aum.totalInvested)}</strong></span>
+              <span className={`inline-flex items-center gap-1 font-bold ${up ? 'text-[#0d8a4f] dark:text-[#4fc584]' : 'text-[#d33a2c] dark:text-[#f2705f]'}`}>
                 {up ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
                 {up ? '+' : ''}{inr(gain)} ({up ? '+' : ''}{gainPct.toFixed(2)}%)
               </span>
             </div>
             {!aum.fullyPriced && (
-              <p className="mt-3 text-[11px] text-indigo-200/90">Some holdings are valued at cost — import current prices (Imports → Securities &amp; Prices) for full live valuation.</p>
+              <p className="mt-3 text-[11px] text-[#756b57] dark:text-[#938b7c]">Some holdings are valued at cost — import current prices (Imports → Securities &amp; Prices) for full live valuation.</p>
             )}
           </>
         ) : (
-          <p className="mt-3 text-sm text-indigo-100">—</p>
+          <p className="mt-3 text-sm text-[#756b57] dark:text-[#938b7c]">—</p>
         )}
       </div>
 

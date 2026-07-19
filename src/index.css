@@ -32,17 +32,17 @@ html, body, #root, * {
    Tailwind border utility the element already carries (an unlayered `border`
    here would otherwise outrank and clobber e.g. `border-2 border-dashed`). */
 .glass {
-  background-color: rgb(255 255 255 / 0.62);
+  background-color: rgb(251 246 235 / 0.62);
   backdrop-filter: blur(14px) saturate(150%);
   -webkit-backdrop-filter: blur(14px) saturate(150%);
 }
 .glass-soft {
-  background-color: rgb(255 255 255 / 0.5);
+  background-color: rgb(251 246 235 / 0.5);
   backdrop-filter: blur(10px) saturate(140%);
   -webkit-backdrop-filter: blur(10px) saturate(140%);
 }
-.dark .glass       { background-color: rgb(15 23 42 / 0.55); }
-.dark .glass-soft  { background-color: rgb(15 23 42 / 0.45); }
+.dark .glass       { background-color: rgb(20 18 15 / 0.6); }
+.dark .glass-soft  { background-color: rgb(20 18 15 / 0.5); }
 
 /* ──────────────────────────────────────────────────────────────────────────
    DARK THEME
@@ -52,78 +52,96 @@ html, body, #root, * {
    layered utilities in the cascade, so no !important is needed. This is purely
    presentational — it changes colors only, never any component logic.
    ────────────────────────────────────────────────────────────────────────── */
-.dark body { background-color: #020617; color: #e2e8f0; }
+/* BRASS TERMINAL dark (adopted 2026-07-20): warm graphite ground, warm ivory
+   text, ONE gold signal accent (#d9a441) replacing indigo, money green/red.
+   Pairs with the warm-paper Mono light theme. */
+.dark body { background-color: #121110; color: #eae5da; }
 
 /* Surfaces / backgrounds */
-.dark .bg-white            { background-color: #0f172a; }
-.dark .bg-slate-50         { background-color: #0f172a; }
-.dark .bg-slate-100        { background-color: #1e293b; }
-.dark .bg-slate-200        { background-color: #334155; }
-.dark .bg-slate-600        { background-color: #475569; }
+.dark .bg-white            { background-color: #1a1815; }
+.dark .bg-slate-50         { background-color: #1a1815; }
+.dark .bg-slate-100        { background-color: #242019; }
+.dark .bg-slate-200        { background-color: #2e2a22; }
+.dark .bg-slate-600        { background-color: #4a4335; }
 /* slate-800/900 are already dark — nudge slightly for depth against the page */
-.dark .bg-slate-800        { background-color: #111c33; }
-.dark .bg-slate-900        { background-color: #0b1324; }
+.dark .bg-slate-800        { background-color: #17140f; }
+.dark .bg-slate-900        { background-color: #131110; }
+.dark .bg-slate-900\/80    { background-color: rgb(19 17 16 / 0.85); }
 /* arbitrary light-gray table-header backgrounds (Holdings tables) — slightly
    lighter than the card bg so the header row still reads as a header */
-.dark .bg-\[\#f8fafc\]     { background-color: #1e293b; }
-.dark .bg-\[\#f0f4f8\]     { background-color: #1e293b; }
+.dark .bg-\[\#f8fafc\]     { background-color: #221e17; }
+.dark .bg-\[\#f0f4f8\]     { background-color: #221e17; }
 /* translucent surfaces (sticky headers / subtle fills) */
-.dark .bg-white\/80        { background-color: rgb(15 23 42 / 0.85); }
-.dark .bg-white\/10        { background-color: rgb(148 163 184 / 0.10); }
-.dark .bg-slate-50\/50     { background-color: rgb(30 41 59 / 0.50); }
-.dark .bg-slate-50\/10     { background-color: rgb(30 41 59 / 0.30); }
-.dark .bg-slate-50\/60     { background-color: rgb(30 41 59 / 0.60); }
+.dark .bg-white\/80        { background-color: rgb(26 24 21 / 0.88); }
+.dark .bg-white\/10        { background-color: rgb(200 188 160 / 0.08); }
+.dark .bg-slate-50\/50     { background-color: rgb(36 32 25 / 0.50); }
+.dark .bg-slate-50\/10     { background-color: rgb(36 32 25 / 0.30); }
+.dark .bg-slate-50\/60     { background-color: rgb(36 32 25 / 0.60); }
 /* gradients used on cards (from-white to-slate-50/…) */
-.dark .from-white          { --tw-gradient-from: #0f172a; }
-.dark .to-slate-50\/50     { --tw-gradient-to: rgb(15 23 42 / 0.5); }
-.dark .to-slate-50         { --tw-gradient-to: #0f172a; }
+.dark .from-white          { --tw-gradient-from: #1a1815; }
+.dark .to-slate-50\/50     { --tw-gradient-to: rgb(26 24 21 / 0.5); }
+.dark .to-slate-50         { --tw-gradient-to: #1a1815; }
 
-/* Text */
-.dark .text-slate-900      { color: #f8fafc; }
-.dark .text-slate-800      { color: #f1f5f9; }
-.dark .text-slate-700      { color: #e2e8f0; }
-.dark .text-slate-600      { color: #cbd5e1; }
-.dark .text-slate-500      { color: #94a3b8; }
-.dark .text-slate-400      { color: #8493a8; }
-.dark .text-slate-300      { color: #cbd5e1; }
-.dark .text-slate-200      { color: #e2e8f0; }
+/* Text — warm ivory ramp */
+.dark .text-slate-900      { color: #f0ebe0; }
+.dark .text-slate-800      { color: #eae5da; }
+.dark .text-slate-700      { color: #ddd6c8; }
+.dark .text-slate-600      { color: #c4bcab; }
+.dark .text-slate-500      { color: #938b7c; }
+.dark .text-slate-400      { color: #857d6e; }
+.dark .text-slate-300      { color: #c4bcab; }
+.dark .text-slate-200      { color: #ddd6c8; }
 
-/* Borders / dividers */
+/* Borders / dividers. NB: slate-150 / slate-205 aren't real Tailwind shades, so a
+   `border-slate-150` with no generated color falls back to currentColor — which is
+   near-white in dark mode (a bright bold line). Remap them here alongside the standard
+   shades so every divider is the same subtle #334155 in dark. */
 .dark .border-slate-100,
+.dark .border-slate-150,
+.dark .border-slate-205,
 .dark .border-slate-200,
-.dark .border-slate-300    { border-color: #334155; }
-.dark .border-slate-50     { border-color: #1e293b; }
-.dark .divide-slate-100 > * + *,
-.dark .divide-slate-150 > * + *,
-.dark .divide-slate-200 > * + * { border-color: #334155; }
+.dark .border-slate-300    { border-color: #2a2721; }
+.dark .border-slate-50     { border-color: #221f19; }
+/* Tailwind v4 draws divide-y as each row's border-BOTTOM on `:not(:last-child)` —
+   which INCLUDES the first row. The old override used `> * + *` (every child except
+   the FIRST), so the first row's bottom divider kept Tailwind's light colour → a bold
+   white line after row 1 in dark mode. Recolour ALL children (harmless on the last row,
+   which has no divider width) so every divider matches. */
+.dark .divide-slate-100 > *,
+.dark .divide-slate-150 > *,
+.dark .divide-slate-200 > * { border-color: #2a2721; }
 
-/* ── Accents: lighten dark accent text for contrast, tint light accent chips ── */
+/* ── Accents: indigo/violet → GOLD (the one signal hue); money stays g/r ── */
 .dark .text-indigo-900,
 .dark .text-indigo-800,
 .dark .text-indigo-700,
-.dark .text-indigo-600     { color: #a5b4fc; }
+.dark .text-indigo-600     { color: #e0b45e; }
+.dark .text-indigo-500,
+.dark .text-indigo-400     { color: #a89a7d; }
+/* pastel-indigo icon/text sits on solid accent chips — dark brown on gold */
+.dark .text-indigo-200     { color: #3a2e12; }
 .dark .text-emerald-900,
 .dark .text-emerald-800,
 .dark .text-emerald-700,
-.dark .text-emerald-600    { color: #6ee7b7; }
+.dark .text-emerald-600    { color: #52c98a; }
 .dark .text-rose-950,
 .dark .text-rose-900,
 .dark .text-rose-800,
 .dark .text-rose-700,
 .dark .text-rose-600,
-.dark .text-rose-500       { color: #fda4af; }
+.dark .text-rose-500       { color: #f28577; }
 .dark .text-red-700,
-.dark .text-red-600        { color: #fca5a5; }
+.dark .text-red-600        { color: #f28577; }
 .dark .text-amber-900,
 .dark .text-amber-800,
 .dark .text-amber-700,
-.dark .text-amber-600      { color: #fcd34d; }
-.dark .text-orange-700     { color: #fdba74; }
-.dark .text-blue-800       { color: #93c5fd; }
-.dark .text-violet-800     { color: #c4b5fd; }
+.dark .text-amber-600      { color: #f0c65a; }
+.dark .text-orange-700     { color: #f3b47c; }
+.dark .text-blue-800       { color: #d6cfbf; }
+.dark .text-violet-800     { color: #e0b45e; }
 /* deepest accent shades (parsed contract-note preview money columns) */
-.dark .text-emerald-950    { color: #6ee7b7; }
-.dark .text-indigo-950     { color: #a5b4fc; }
+.dark .text-emerald-950    { color: #52c98a; }
+.dark .text-indigo-950     { color: #e0b45e; }
 .dark .text-orange-950,
 .dark .text-orange-900     { color: #fdba74; }
 .dark .text-teal-900,
@@ -137,44 +155,220 @@ html, body, #root, * {
 .dark .text-stone-900,
 .dark .text-stone-800      { color: #d6d3d1; }
 
-/* light accent chip backgrounds → subtle dark tints */
-.dark .bg-indigo-50        { background-color: #1e1b4b; }
-.dark .bg-indigo-100       { background-color: #272366; }
-.dark .bg-indigo-50\/50    { background-color: rgb(30 27 75 / 0.5); }
-.dark .bg-emerald-50       { background-color: #0c2c22; }
-.dark .bg-emerald-100      { background-color: #11392c; }
-.dark .bg-rose-50          { background-color: #2c1418; }
-.dark .bg-rose-50\/50      { background-color: rgb(44 20 24 / 0.5); }
-.dark .bg-rose-100         { background-color: #3b1820; }
+/* light accent chip backgrounds → subtle warm dark tints */
+.dark .bg-indigo-50,
+.dark .bg-violet-50        { background-color: #2e2820; }
+.dark .bg-indigo-100       { background-color: #383125; }
+.dark .bg-indigo-50\/50    { background-color: rgb(46 40 32 / 0.5); }
+.dark .bg-emerald-50       { background-color: #12291e; }
+.dark .bg-emerald-100      { background-color: #173526; }
+.dark .bg-rose-50          { background-color: #2e1815; }
+.dark .bg-rose-50\/50      { background-color: rgb(46 24 21 / 0.5); }
+.dark .bg-rose-100         { background-color: #3b1e1a; }
 .dark .bg-amber-50         { background-color: #2a2008; }
 .dark .bg-amber-100        { background-color: #37290c; }
 .dark .bg-orange-50        { background-color: #2a1a0e; }
-.dark .bg-red-50           { background-color: #2c1414; }
+.dark .bg-red-50           { background-color: #2e1614; }
 
 .dark .border-indigo-100,
 .dark .border-indigo-200,
-.dark .border-indigo-400   { border-color: #3730a3; }
+.dark .border-violet-200   { border-color: #453f34; }
+.dark .border-indigo-400   { border-color: #6b5c39; }
 .dark .border-emerald-100,
-.dark .border-emerald-200  { border-color: #065f46; }
+.dark .border-emerald-200  { border-color: #1f4a35; }
 .dark .border-rose-100,
-.dark .border-rose-200     { border-color: #9f1239; }
+.dark .border-rose-200     { border-color: #6b322b; }
 .dark .border-amber-200    { border-color: #92400e; }
 .dark .border-orange-200   { border-color: #9a3412; }
-.dark .border-red-200      { border-color: #991b1b; }
-.dark .border-violet-100\/30 { border-color: rgb(124 58 237 / 0.3); }
+.dark .border-red-200      { border-color: #6b2c26; }
+.dark .border-violet-100\/30 { border-color: rgb(217 164 65 / 0.25); }
 
 /* ── Hover states ── */
 .dark .hover\:bg-white:hover,
 .dark .hover\:bg-slate-50:hover,
-.dark .hover\:bg-slate-100:hover     { background-color: #1e293b; }
+.dark .hover\:bg-slate-100:hover     { background-color: #242019; }
 .dark .hover\:bg-slate-50\/50:hover,
-.dark .hover\:bg-slate-50\/60:hover  { background-color: rgb(30 41 59 / 0.6); }
-.dark .hover\:bg-slate-200:hover     { background-color: #334155; }
-.dark .hover\:bg-slate-800:hover     { background-color: #1e293b; }
-.dark .hover\:bg-rose-50:hover       { background-color: #2c1418; }
-.dark .hover\:text-slate-900:hover   { color: #f1f5f9; }
-.dark .hover\:text-indigo-600:hover  { color: #a5b4fc; }
+.dark .hover\:bg-slate-50\/60:hover  { background-color: rgb(36 32 25 / 0.6); }
+.dark .hover\:bg-slate-200:hover     { background-color: #2e2a22; }
+.dark .hover\:bg-slate-800:hover     { background-color: #242019; }
+.dark .hover\:bg-rose-50:hover       { background-color: #2e1815; }
+.dark .hover\:bg-indigo-50:hover,
+.dark .hover\:bg-indigo-100:hover,
+.dark .hover\:bg-violet-100:hover    { background-color: #383125; }
+.dark .hover\:text-slate-900:hover   { color: #f0ebe0; }
+.dark .hover\:text-indigo-600:hover,
+.dark .hover\:text-indigo-700:hover,
+.dark .hover\:text-indigo-800:hover  { color: #e5c078; }
 
 /* Disabled */
-.dark .disabled\:bg-slate-200:disabled { background-color: #334155; }
-.dark .disabled\:text-slate-400:disabled { color: #64748b; }
+.dark .disabled\:bg-slate-200:disabled { background-color: #2e2a22; }
+.dark .disabled\:text-slate-400:disabled { color: #6e6759; }
+
+/* ── Gold signal: solid accent buttons/pills. Setting `color` here beats the
+   element's own text-white utility (unlayered > layered), so gold buttons get
+   dark-brown text like the Brass mock — child elements with explicit colors
+   keep them. ── */
+.dark .bg-indigo-600,
+.dark .bg-blue-600,
+.dark .bg-violet-600       { background-color: #d9a441; color: #1d1608; }
+.dark .bg-indigo-500       { background-color: #d9a441; color: #1d1608; }
+.dark .hover\:bg-indigo-500:hover,
+.dark .hover\:bg-indigo-600:hover { background-color: #e2b355; }
+.dark .hover\:bg-indigo-700:hover,
+.dark .active\:bg-indigo-700:active { background-color: #c99938; }
+.dark .focus\:ring-indigo-500:focus,
+.dark .ring-indigo-500     { --tw-ring-color: #d9a441; }
+.dark .outline-indigo-500  { outline-color: #d9a441; }
+.dark .focus-visible\:outline-indigo-500:focus-visible { outline-color: #d9a441; }
+.dark .focus\:border-indigo-400:focus,
+.dark .focus\:border-indigo-500:focus,
+.dark .border-indigo-500,
+.dark .border-indigo-600,
+.dark .hover\:border-indigo-400:hover,
+.dark .hover\:border-indigo-600:hover { border-color: #d9a441; }
+.dark .hover\:border-indigo-300:hover { border-color: #6b5c39; }
+.dark .accent-indigo-600   { accent-color: #d9a441; }
+.dark .shadow-indigo-500\/25,
+.dark .shadow-indigo-500\/20 { --tw-shadow-color: rgb(217 164 65 / 0.25); }
+.dark .shadow-indigo-200   { --tw-shadow-color: rgb(0 0 0 / 0.4); }
+/* decorative gradient stops (panel accent bar) → gold sweep */
+.dark .from-blue-600,
+.dark .from-indigo-700     { --tw-gradient-from: #d9a441; }
+.dark .to-violet-600       { --tw-gradient-to: #8a6a2a; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   LIGHT THEME — "MONO"
+   Stark black-and-white light mode: ink (#0a0a0a) replaces every decorative
+   accent hue (indigo/violet/blue/purple); green/red remain ONLY for money and
+   errors; slate neutrals lose their blue cast. Same mechanism as the dark
+   layer above — unlayered remaps of the utilities the components already
+   carry — but scoped to `html:not(.dark)`, so DARK MODE IS UNTOUCHED by
+   construction. Colors only; no layout/spacing/typography changes.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Ink replaces the indigo accent (nav pills, buttons, links, active states) */
+html:not(.dark) .bg-indigo-600,
+html:not(.dark) .bg-blue-600,
+html:not(.dark) .bg-violet-600      { background-color: #0a0a0a; }
+html:not(.dark) .bg-indigo-500      { background-color: #171717; }
+html:not(.dark) .hover\:bg-indigo-500:hover,
+html:not(.dark) .hover\:bg-indigo-600:hover { background-color: #262626; }
+html:not(.dark) .hover\:bg-indigo-700:hover,
+html:not(.dark) .active\:bg-indigo-700:active { background-color: #000000; }
+
+html:not(.dark) .text-indigo-600,
+html:not(.dark) .text-indigo-700,
+html:not(.dark) .text-indigo-800,
+html:not(.dark) .text-indigo-900,
+html:not(.dark) .text-indigo-950,
+html:not(.dark) .text-violet-600,
+html:not(.dark) .text-violet-700,
+html:not(.dark) .text-violet-800,
+html:not(.dark) .text-blue-600,
+html:not(.dark) .text-blue-800,
+html:not(.dark) .text-purple-600,
+html:not(.dark) .text-purple-800    { color: #0a0a0a; }
+html:not(.dark) .text-indigo-900\/70 { color: rgb(10 10 10 / 0.7); }
+html:not(.dark) .text-indigo-500    { color: #6b6b6b; }
+html:not(.dark) .text-indigo-400    { color: #7a7a7a; }
+/* light-indigo text sits on dark surfaces (drawer chip, gradient panels) */
+html:not(.dark) .text-indigo-200    { color: #d6d6d6; }
+html:not(.dark) .hover\:text-indigo-600:hover,
+html:not(.dark) .hover\:text-indigo-700:hover,
+html:not(.dark) .hover\:text-indigo-800:hover { color: #000000; }
+
+/* Accent chip fills → neutral grays */
+html:not(.dark) .bg-indigo-50,
+html:not(.dark) .bg-violet-50,
+html:not(.dark) .bg-blue-50,
+html:not(.dark) .bg-purple-50,
+html:not(.dark) .hover\:bg-indigo-50:hover { background-color: #efe8d6; }
+html:not(.dark) .bg-indigo-100      { background-color: #e6dcc6; }
+html:not(.dark) .hover\:bg-indigo-100:hover,
+html:not(.dark) .hover\:bg-violet-100:hover { background-color: #e0d5bc; }
+html:not(.dark) .bg-indigo-50\/70   { background-color: rgb(84 66 32 / 0.06); }
+html:not(.dark) .bg-indigo-50\/55   { background-color: rgb(84 66 32 / 0.05); }
+html:not(.dark) .bg-indigo-50\/50   { background-color: rgb(84 66 32 / 0.045); }
+html:not(.dark) .bg-indigo-50\/30,
+html:not(.dark) .bg-indigo-50\/25   { background-color: rgb(84 66 32 / 0.03); }
+html:not(.dark) .hover\:bg-indigo-50\/20:hover { background-color: rgb(84 66 32 / 0.04); }
+html:not(.dark) .bg-indigo-100\/60  { background-color: rgb(84 66 32 / 0.09); }
+html:not(.dark) .bg-blue-50\/80     { background-color: rgb(84 66 32 / 0.06); }
+html:not(.dark) .bg-indigo-500\/10  { background-color: rgb(60 48 22 / 0.07); }
+html:not(.dark) .bg-indigo-500\/15  { background-color: rgb(60 48 22 / 0.1); }
+html:not(.dark) .hover\:bg-indigo-500\/20:hover { background-color: rgb(60 48 22 / 0.13); }
+
+/* Accent borders / rings / outlines → ink or neutral gray */
+html:not(.dark) .border-indigo-400,
+html:not(.dark) .border-indigo-500,
+html:not(.dark) .border-indigo-600,
+html:not(.dark) .hover\:border-indigo-400:hover,
+html:not(.dark) .hover\:border-indigo-600:hover,
+html:not(.dark) .focus\:border-indigo-400:focus,
+html:not(.dark) .focus\:border-indigo-500:focus { border-color: #0a0a0a; }
+html:not(.dark) .hover\:border-indigo-300:hover { border-color: #b3a88d; }
+html:not(.dark) .border-indigo-100  { border-color: #e4dbc6; }
+html:not(.dark) .border-indigo-200,
+html:not(.dark) .border-violet-200  { border-color: #d9cfb6; }
+html:not(.dark) .border-blue-100    { border-color: #e0d7c1; }
+html:not(.dark) .border-indigo-300\/60 { border-color: rgb(0 0 0 / 0.3); }
+html:not(.dark) .border-indigo-300\/50 { border-color: rgb(0 0 0 / 0.25); }
+html:not(.dark) .focus\:ring-indigo-500:focus,
+html:not(.dark) .ring-indigo-500    { --tw-ring-color: #0a0a0a; }
+html:not(.dark) .outline-indigo-500 { outline-color: #0a0a0a; }
+html:not(.dark) .focus-visible\:outline-indigo-500:focus-visible { outline-color: #0a0a0a; }
+html:not(.dark) .accent-indigo-600  { accent-color: #0a0a0a; }
+
+/* Colored shadows → neutral */
+html:not(.dark) .shadow-indigo-500\/25,
+html:not(.dark) .shadow-indigo-500\/20 { --tw-shadow-color: rgb(0 0 0 / 0.18); }
+html:not(.dark) .shadow-indigo-200  { --tw-shadow-color: rgb(0 0 0 / 0.12); }
+
+/* Decorative gradient stops → ink (panel accent bar, CsvAuditor header) */
+html:not(.dark) .from-blue-600,
+html:not(.dark) .from-indigo-700    { --tw-gradient-from: #0a0a0a; }
+html:not(.dark) .to-violet-600      { --tw-gradient-to: #3a3a3a; }
+
+/* Money / semantic text retints (match the Mono mock exactly) */
+html:not(.dark) .text-emerald-600   { color: #0d8a4f; }
+html:not(.dark) .text-emerald-700   { color: #0b7343; }
+html:not(.dark) .text-rose-600,
+html:not(.dark) .text-red-600       { color: #d33a2c; }
+html:not(.dark) .text-rose-700,
+html:not(.dark) .text-red-700       { color: #b93226; }
+
+/* Slate neutrals → warm parchment (deeper cream, low glare): warm ink for
+   text, cream surfaces, sand borders. The page ground (App.tsx root gradient)
+   is parchment too, so nothing on it may stay blue- or cool-gray. */
+html:not(.dark) .text-slate-900     { color: #16130d; }
+html:not(.dark) .text-slate-800     { color: #211d15; }
+html:not(.dark) .text-slate-700     { color: #3a342a; }
+html:not(.dark) .text-slate-600     { color: #5e5745; }
+html:not(.dark) .text-slate-500     { color: #7d7460; }
+html:not(.dark) .text-slate-400     { color: #9a9179; }
+/* cards & translucent headers: cream instead of near-white (less glare) */
+html:not(.dark) .bg-white           { background-color: #fbf6eb; }
+html:not(.dark) .bg-white\/70       { background-color: rgb(251 246 235 / 0.8); }
+html:not(.dark) .bg-white\/80       { background-color: rgb(251 246 235 / 0.88); }
+html:not(.dark) .bg-slate-50        { background-color: #f1ebdd; }
+html:not(.dark) .bg-slate-100       { background-color: #e9e1cd; }
+html:not(.dark) .bg-slate-200       { background-color: #ddd3bb; }
+html:not(.dark) .hover\:bg-white:hover     { background-color: #fbf6eb; }
+html:not(.dark) .hover\:bg-slate-50:hover  { background-color: #eee7d7; }
+html:not(.dark) .hover\:bg-slate-100:hover { background-color: #e4dbc4; }
+html:not(.dark) .hover\:bg-slate-200:hover { background-color: #d5cab0; }
+html:not(.dark) .bg-\[\#f8fafc\]    { background-color: #f1ebdd; }
+html:not(.dark) .bg-\[\#f0f4f8\]    { background-color: #ece5d3; }
+html:not(.dark) .from-white         { --tw-gradient-from: #fbf6eb; }
+html:not(.dark) .to-slate-50        { --tw-gradient-to: #f1ebdd; }
+html:not(.dark) .border-slate-100   { border-color: #e6ddc8; }
+/* slate-150/205 are invented shades (no generated color → currentColor) — pin
+   them to the same neutral here, mirroring the dark-layer fix */
+html:not(.dark) .border-slate-150,
+html:not(.dark) .border-slate-205,
+html:not(.dark) .border-slate-200   { border-color: #ddd3bc; }
+html:not(.dark) .border-slate-300   { border-color: #cdc1a5; }
+html:not(.dark) .border-white\/50   { border-color: rgb(92 76 45 / 0.15); }
+html:not(.dark) .divide-slate-100 > *,
+html:not(.dark) .divide-slate-150 > *,
+html:not(.dark) .divide-slate-200 > * { border-color: #ddd3bc; }

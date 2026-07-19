@@ -12,6 +12,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useGoogleLogin } from '@react-oauth/google';
 import { ContractNoteResult, ReconciliationStatus, PortfolioHolding, PortfolioUser } from './types';
 import { persistGoogleToken, restoreGoogleToken, clearGoogleToken, hasValidGoogleToken } from './lib/googleAuth';
+import { installSheetsRetry } from './lib/sheetsRetry';
 import { logAccess, logImport } from './lib/accessLog';
 import { rebuildHoldingTab, syncCapitalGains } from './lib/holdingsCalc';
 import { ensureSheetTabs } from './lib/sheetTabs';
@@ -30,6 +31,7 @@ import Login from './components/Login';
 import Reports, { StockFocus } from './components/Reports';
 import ScreenerImport from './components/ScreenerImport';
 import OpeningBasisImport from './components/OpeningBasisImport';
+import LiveClock from './components/LiveClock';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
 const SummaryCard = ({ 
@@ -109,11 +111,16 @@ export default function App() {
                 "https://sheets.googleapis.com/$discovery/rest?version=v4",
               ],
             }).then(() => {
+              // Discovery doc is loaded now → wrap the Sheets API with auto-retry +
+              // backoff so a transient per-minute quota (429) self-recovers instead of
+              // surfacing "Synchronisation Interrupted".
+              installSheetsRetry();
               // Reuse a still-valid token from a previous session so the user
               // doesn't have to reconnect Sheets after every page reload.
               if (restoreGoogleToken()) logResume();
             }).catch((err: any) => {
               console.warn("Gapi initialization rejection: ", err);
+              installSheetsRetry();
               if (restoreGoogleToken()) logResume();
             });
           } catch (err) {
@@ -1673,7 +1680,10 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#d8d8ff] via-[#e6e7ff] to-[#eef1ff] dark:from-slate-950 dark:via-slate-950 dark:to-slate-900 text-slate-900 dark:text-slate-100 font-sans pb-20 animate-fadeIn">
+    <div className="min-h-screen bg-gradient-to-br from-[#f4efe3] via-[#f1ebdc] to-[#ebe4d1] dark:from-[#121110] dark:via-[#121110] dark:to-[#161410] text-slate-900 dark:text-slate-100 font-sans pb-20 animate-fadeIn">
+
+      {/* Live IST time, pinned bottom-right of the viewport. */}
+      <LiveClock />
 
       {/* Auto re-login: Google's token lapses ~hourly; this pops the moment it
           does so the user signs back in (one click) instead of hitting failures. */}
@@ -1684,9 +1694,6 @@ export default function App() {
               <ShieldCheck className="w-6 h-6" />
             </div>
             <h3 className="text-sm font-black text-slate-800 dark:text-slate-100 uppercase tracking-tight">Session expired</h3>
-            <p className="text-[12px] text-slate-500 dark:text-slate-400 mt-2 leading-relaxed">
-              Google signs you out about every hour for security. Sign in again to keep your Sheets connection active — your work stays exactly as it is.
-            </p>
             <button
               onClick={() => login()}
               className="mt-5 w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-xl transition-colors cursor-pointer flex items-center justify-center gap-2"
@@ -1724,7 +1731,7 @@ export default function App() {
               initial={{ x: '-100%' }}
               animate={{ x: 0 }}
               exit={{ x: '-100%' }}
-              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              transition={{ type: 'tween', duration: 0.2, ease: 'easeOut' }}
               className="fixed left-0 top-0 h-full w-64 bg-slate-900/80 backdrop-blur-xl text-slate-100 shadow-2xl z-[85] border-r border-slate-700/50 flex flex-col justify-between"
             >
               <div>
@@ -1776,7 +1783,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <header className="bg-white/70 dark:bg-slate-900/65 backdrop-blur-xl backdrop-saturate-150 border-b border-white/50 dark:border-slate-700/50 sticky top-0 z-50 px-6 h-16 shadow-sm flex items-center">
+      <header className="bg-white/70 dark:bg-[#16140f]/80 backdrop-blur-xl backdrop-saturate-150 border-b border-white/50 dark:border-[#2a2721] sticky top-0 z-50 px-6 h-16 shadow-sm flex items-center">
         <div className="flex-1 flex items-center space-x-2">
           <button
             id="btn-open-menu"
@@ -1792,7 +1799,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xs sm:text-base font-black text-slate-800 tracking-tight leading-none uppercase">
-                {currentView === 'dashboard' ? "Executive Dashboard" : currentView === 'holdings' ? "Consolidated Holdings" : currentView === 'reports' ? "Reports" : "Broker Note Imports"}
+                {currentView === 'dashboard' ? "Executive Dashboard" : currentView === 'holdings' ? "Portfolios" : currentView === 'reports' ? "Reports" : "Broker Note Imports"}
               </h1>
             </div>
           </div>
@@ -2211,7 +2218,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="max-w-7xl mx-auto px-4 py-8 bg-[#d8d8ff] dark:bg-slate-950">
+      <main className="max-w-7xl mx-auto px-4 py-8 bg-transparent">
         {currentView === 'dashboard' ? (
           <Dashboard
             holdings={holdings}
