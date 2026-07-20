@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import { Wallet, RefreshCw, Loader2, AlertCircle, TrendingUp, TrendingDown, ArrowRight, PieChart } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Wallet, RefreshCw, Loader2, AlertCircle, TrendingUp, TrendingDown, ArrowRight, LineChart } from 'lucide-react';
 import { PortfolioHolding } from '../types';
-import { computeAum, AumResult, computeIndustryAllocation, IndustryAllocationResult } from '../lib/holdingsCalc';
+import { computeAum, AumResult } from '../lib/holdingsCalc';
+import { computeInvestedTimeline, AumTimelinePoint } from '../lib/aumTimeline';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
 
@@ -17,13 +18,133 @@ const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { minimumFractionDi
 const cr = (n: number) => (n / 1e7).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' Cr';
 
 // Palette for the sector-allocation donut. "Unclassified" always renders grey.
-const PIE_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#a855f7', '#0ea5e9', '#eab308', '#f43f5e', '#22c55e', '#d946ef'];
-const UNCLASSIFIED_COLOR = '#94a3b8';
-const sliceColor = (industry: string, i: number) => (industry === 'Unclassified' ? UNCLASSIFIED_COLOR : PIE_COLORS[i % PIE_COLORS.length]);
+// Earthy 10-hue categorical set tuned to the theme (brass dark / parchment light):
+// validated with the dataviz palette checker against BOTH surfaces (#1a1815,
+// #fbf6eb) — lightness band, chroma floor, CVD + normal-vision separation,
+// contrast. Order is deliberate (lightness-staggered neighbors); don't shuffle.
+// Compact ₹ for chart axes/labels ("₹1.86 Cr", "₹42.3 L").
+const compactInr = (n: number): string =>
+  n >= 1e7 ? `₹${(n / 1e7).toFixed(2)} Cr`
+  : n >= 1e5 ? `₹${(n / 1e5).toFixed(1)} L`
+  : `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+/**
+ * AUM timeline — invested capital (cost of open positions) through time, with
+ * today's live market AUM as a distinct annotated marker. A market-value
+ * HISTORY isn't computable (prices are a snapshot, not a feed), so the line is
+ * honest cost basis; the marker is the only market number.
+ */
+function AumTimelineChart({ points, aumToday }: { points: AumTimelinePoint[]; aumToday: number | null }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const W = 720, H = 250, ML = 14, MR = 76, MT = 16, MB = 30;
+  const iw = W - ML - MR, ih = H - MT - MB;
+  const t0 = points[0].ts, t1 = points[points.length - 1].ts;
+  const span = Math.max(t1 - t0, 1);
+  const yMax = Math.max(...points.map(p => p.invested), aumToday ?? 0, 1) * 1.1;
+  const x = (ts: number) => ML + ((ts - t0) / span) * iw;
+  const y = (v: number) => MT + ih - (v / yMax) * ih;
+
+  // Theme-tuned marks (Dashboard re-renders on theme toggle, so reading the
+  // class at render is safe). Gold needs a deeper step on the cream surface.
+  const dark = document.documentElement.classList.contains('dark');
+  const lineCol = dark ? '#d9a441' : '#8a6a1e';
+  const upCol = dark ? '#4fc584' : '#0d8a4f';
+
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.ts).toFixed(1)},${y(p.invested).toFixed(1)}`).join(' ');
+  const areaPath = `${linePath} L${x(t1).toFixed(1)},${(MT + ih).toFixed(1)} L${x(t0).toFixed(1)},${(MT + ih).toFixed(1)} Z`;
+
+  // ~4 y gridlines, ~5 x time ticks.
+  const yTicks = [0.25, 0.5, 0.75, 1].map(f => f * yMax);
+  const xTicks = [0, 0.25, 0.5, 0.75, 1].map(f => t0 + f * span);
+  const fmtTick = (ts: number) => new Date(ts).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+
+  const onMove = (e: { clientX: number }) => {
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const ts = t0 + ((e.clientX - rect.left) / rect.width * W - ML) / iw * span;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < points.length; i++) {
+      const d = Math.abs(points[i].ts - ts);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    setHover(best);
+  };
+
+  const hp = hover !== null ? points[hover] : null;
+  const last = points[points.length - 1];
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-6">
+      <div className="flex items-center gap-2 mb-1">
+        <LineChart className="w-4 h-4 text-indigo-600" />
+        <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight">AUM Timeline</h3>
+      </div>
+      <p className="text-[11px] text-slate-500 mb-1">
+        Capital invested (cost of open positions) from inception to today, across all portfolios.
+      </p>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-[11px] font-semibold text-slate-500">
+        <span className="inline-flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 rounded" style={{ backgroundColor: lineCol }} /> Invested capital (cost)</span>
+        {aumToday !== null && aumToday > 0 && (
+          <span className="inline-flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: upCol }} /> AUM today (market)</span>
+        )}
+      </div>
+      <div ref={wrapRef} className="relative text-slate-500" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto block" role="img" aria-label="Invested capital over time">
+          {/* grid + y labels (right-aligned into the right margin) */}
+          {yTicks.map((v, i) => (
+            <g key={i}>
+              <line x1={ML} x2={ML + iw} y1={y(v)} y2={y(v)} stroke="currentColor" strokeOpacity="0.14" strokeWidth="1" />
+              <text x={W - 4} y={y(v) + 3} textAnchor="end" fontSize="10" fill="currentColor" fillOpacity="0.75">{compactInr(v)}</text>
+            </g>
+          ))}
+          <line x1={ML} x2={ML + iw} y1={MT + ih} y2={MT + ih} stroke="currentColor" strokeOpacity="0.3" strokeWidth="1" />
+          {xTicks.map((ts, i) => (
+            <text key={i} x={x(ts)} y={H - 8} textAnchor={i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'} fontSize="10" fill="currentColor" fillOpacity="0.75">{fmtTick(ts)}</text>
+          ))}
+          {/* area + line */}
+          <path d={areaPath} fill={lineCol} fillOpacity="0.09" />
+          <path d={linePath} fill="none" stroke={lineCol} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          {/* endpoint (latest invested) */}
+          <circle cx={x(last.ts)} cy={y(last.invested)} r="3.5" fill={lineCol} />
+          {/* today's market AUM marker */}
+          {aumToday !== null && aumToday > 0 && (
+            <g>
+              <line x1={x(t1)} x2={x(t1)} y1={y(last.invested)} y2={y(aumToday)} stroke={upCol} strokeOpacity="0.5" strokeWidth="1" strokeDasharray="3 3" />
+              <circle cx={x(t1)} cy={y(aumToday)} r="4.5" fill={upCol} stroke={dark ? '#1a1815' : '#fbf6eb'} strokeWidth="2" />
+              <text x={x(t1) - 8} y={y(aumToday) - 8} textAnchor="end" fontSize="11" fontWeight="700" fill={upCol}>{compactInr(aumToday)}</text>
+            </g>
+          )}
+          {/* hover crosshair */}
+          {hp && (
+            <g>
+              <line x1={x(hp.ts)} x2={x(hp.ts)} y1={MT} y2={MT + ih} stroke="currentColor" strokeOpacity="0.25" strokeWidth="1" />
+              <circle cx={x(hp.ts)} cy={y(hp.invested)} r="4" fill={lineCol} stroke={dark ? '#1a1815' : '#fbf6eb'} strokeWidth="2" />
+            </g>
+          )}
+        </svg>
+        {hp && (
+          <div
+            className="absolute pointer-events-none px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white shadow-md text-[11px] leading-tight whitespace-nowrap"
+            style={{
+              left: `${(x(hp.ts) / W) * 100}%`,
+              top: `${(y(hp.invested) / H) * 100}%`,
+              transform: `translate(${x(hp.ts) > W * 0.7 ? '-108%' : '10px'}, -120%)`,
+            }}
+          >
+            <div className="font-bold text-slate-800">{compactInr(hp.invested)}</div>
+            <div className="text-slate-500">{new Date(hp.ts).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
   const [aum, setAum] = useState<AumResult | null>(null);
-  const [alloc, setAlloc] = useState<IndustryAllocationResult | null>(null);
+  const [timeline, setTimeline] = useState<AumTimelinePoint[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,11 +157,11 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
     setError(null);
     const list = PORTFOLIOS.map(p => ({ id: p.id, label: p.label, sheetId: p.sheetId }));
     try {
-      // Run AUM + sector allocation together; a failure in one doesn't block the other.
-      const [aumRes, allocRes] = await Promise.allSettled([computeAum(list), computeIndustryAllocation(list)]);
+      // Run AUM + the invested-capital timeline together; a failure in one doesn't block the other.
+      const [aumRes, tlRes] = await Promise.allSettled([computeAum(list), computeInvestedTimeline(list)]);
       if (aumRes.status === 'fulfilled') setAum(aumRes.value);
       else setError(aumRes.reason?.result?.error?.message || aumRes.reason?.message || 'Could not compute AUM.');
-      if (allocRes.status === 'fulfilled') setAlloc(allocRes.value);
+      if (tlRes.status === 'fulfilled') setTimeline(tlRes.value);
     } finally {
       setLoading(false);
     }
@@ -116,66 +237,10 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
         </div>
       )}
 
-      {/* Sector allocation — donut sized by number of companies per industry */}
-      {alloc && alloc.totalCompanies > 0 && (() => {
-        const total = alloc.totalCompanies;
-        const cx = 120, cy = 120, r = 88, w = 40;
-        const circ = 2 * Math.PI * r;
-        const single = alloc.slices.length === 1;
-        let offset = 0;
-        return (
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-6">
-            <div className="flex items-center gap-2 mb-1">
-              <PieChart className="w-4 h-4 text-indigo-600" />
-              <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight">Sector Allocation</h3>
-            </div>
-            <p className="text-[11px] text-slate-500 mb-4">
-              {total} distinct compan{total === 1 ? 'y' : 'ies'} across all portfolios · slice size = number of companies in the sector.
-            </p>
-            <div className="flex flex-col sm:flex-row items-center gap-6">
-              {/* Donut */}
-              <div className="relative shrink-0" style={{ width: 240, height: 240 }}>
-                <svg viewBox="0 0 240 240" className="w-full h-full -rotate-90">
-                  {single ? (
-                    <circle cx={cx} cy={cy} r={r} fill="none" stroke={sliceColor(alloc.slices[0].industry, 0)} strokeWidth={w} />
-                  ) : alloc.slices.map((s, i) => {
-                    const len = (s.companies / total) * circ;
-                    const el = (
-                      <circle key={i} cx={cx} cy={cy} r={r} fill="none"
-                        stroke={sliceColor(s.industry, i)} strokeWidth={w}
-                        strokeDasharray={`${len} ${circ - len}`} strokeDashoffset={-offset}>
-                        <title>{`${s.industry}: ${s.companies} (${((s.companies / total) * 100).toFixed(0)}%)`}</title>
-                      </circle>
-                    );
-                    offset += len;
-                    return el;
-                  })}
-                </svg>
-                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                  <span className="text-3xl font-black text-slate-800 tabular-nums">{total}</span>
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">companies</span>
-                </div>
-              </div>
-              {/* Legend */}
-              <div className="flex-1 w-full grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1.5 max-h-[240px] overflow-y-auto">
-                {alloc.slices.map((s, i) => (
-                  <div key={i} className="flex items-center gap-2 text-[12px]">
-                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sliceColor(s.industry, i) }} />
-                    <span className="text-slate-700 font-medium truncate flex-1" title={s.industry}>{s.industry}</span>
-                    <span className="text-slate-500 font-mono shrink-0">{s.companies}</span>
-                    <span className="text-slate-400 font-mono shrink-0 w-9 text-right">{((s.companies / total) * 100).toFixed(0)}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-            {alloc.classified < total && (
-              <p className="mt-4 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                {total - alloc.classified} compan{total - alloc.classified === 1 ? 'y is' : 'ies are'} unclassified — import a screener.in CSV with an Industry column (Imports → Securities &amp; Prices) to classify them.
-              </p>
-            )}
-          </div>
-        );
-      })()}
+      {/* AUM timeline — invested capital through time + today's market AUM */}
+      {timeline && timeline.length >= 2 && (
+        <AumTimelineChart points={timeline} aumToday={aum ? aum.totalCurrent : null} />
+      )}
 
       {/* Per-portfolio breakdown */}
       {aum && (
