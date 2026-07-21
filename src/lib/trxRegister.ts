@@ -650,6 +650,58 @@ export async function generateTrxRegister(
   gt[COL.ipf] = r2(grand.ipf); gt[COL.dmat] = r2(grand.dmat);
   out.push(gt);
 
+  // Row after GRAND TOTAL — the lime P/L colour band stops here. The expense summary
+  // below isn't part of the per-scrip P/L grid, so it shouldn't carry the P/L stripe.
+  const plBandEnd = out.length;
+
+  // ── 5b. Expense-summary footer: total charges split DELIVERY vs INTRA-DAY (mirrors
+  // the source's two-line footer). Intra-day = the same-day round-trip charges (buy +
+  // sell of every in-FY intradayRT); delivery = everything else. By construction the
+  // two sum, per charge column, to the GRAND TOTAL charge row above (delivery +
+  // intraday = grand), so the footer reconciles to the rupee. Each line also carries a
+  // single "Total" row = the sum of its charge columns (e.g. 45+455+88+515+4+5+5=1,117).
+  const intradayCharges: Charges = { ...ZERO_CHARGES };
+  for (const rt of intradayRTs) {
+    if (rt.ts < fyStartTs || rt.ts >= fyEndExclTs) continue;   // same FY window as the block emission
+    const c = addCharges(rt.buyCharges, rt.sellCharges);
+    intradayCharges.brok += c.brok; intradayCharges.stt += c.stt; intradayCharges.gst += c.gst;
+    intradayCharges.et += c.et; intradayCharges.stamp += c.stamp; intradayCharges.sebi += c.sebi;
+    intradayCharges.ipf += c.ipf; intradayCharges.dmat += c.dmat;
+  }
+  const deliveryCharges: Charges = {
+    brok: grand.brok - intradayCharges.brok, stt: grand.stt - intradayCharges.stt,
+    gst: grand.gst - intradayCharges.gst, et: grand.et - intradayCharges.et,
+    stamp: grand.stamp - intradayCharges.stamp, sebi: grand.sebi - intradayCharges.sebi,
+    ipf: grand.ipf - intradayCharges.ipf, dmat: grand.dmat - intradayCharges.dmat,
+  };
+  const chargeSum = (c: Charges) => c.brok + c.stt + c.gst + c.et + c.dmat + c.stamp + c.sebi + c.ipf;
+  // charge columns in header order; EXCH.Clg. (not captured) stays blank. Zeros show as
+  // 0.00 (as in the source), not blank — the columns line up under GRAND TOTAL exactly.
+  // Label sits in the Long-term P/L column (COL.lt), immediately left of the charge
+  // breakdown; the breakdown stays under the Brok…IPF headers. The "Total" figure lands
+  // under the Brok column, directly beneath the breakdown's first value.
+  const expenseRow = (label: string, c: Charges): any[] => {
+    const row = blankRow();
+    row[COL.lt] = label;
+    row[COL.brok] = r2(c.brok); row[COL.stt] = r2(c.stt); row[COL.gst] = r2(c.gst);
+    row[COL.et] = r2(c.et); row[COL.dmat] = r2(c.dmat); row[COL.stamp] = r2(c.stamp);
+    row[COL.sebi] = r2(c.sebi); row[COL.ipf] = r2(c.ipf);
+    return row;
+  };
+  const totalRow = (c: Charges): any[] => {
+    const row = blankRow();
+    row[COL.lt] = "Total";
+    row[COL.brok] = r2(chargeSum(c));   // summed figure under the Brok column, beneath the breakdown
+    return row;
+  };
+  out.push(blankRow());   // spacer under GRAND TOTAL
+  const expStart = out.length;
+  out.push(expenseRow("Delivery Expenses", deliveryCharges));
+  out.push(totalRow(deliveryCharges));
+  out.push(expenseRow("Intra-day Expenses", intradayCharges));
+  out.push(totalRow(intradayCharges));
+  const expEnd = out.length;
+
   // ── 6. Write the tab ──
   const tabName = `Capital Gains for ${fyLabel}`;
   // Older names for this same tab, migrated in place (same sheet, new title — stale
@@ -750,7 +802,6 @@ export async function generateTrxRegister(
       });
       const GREEN = rgb(0.298, 0.686, 0.314), ORANGE = rgb(0.93, 0.60, 0.25),
         SALMON = rgb(0.96, 0.60, 0.51), LIME = rgb(0.61, 0.80, 0.40);
-      const dataEnd = out.length;
       requests.push(
         fill(1, 3, COL.sno, COL.oDate, GREEN),     // S.No + Script Name band (rows 2–3)
         fill(1, 3, COL.oDate, COL.pDate, ORANGE),  // OPENING STOCK band
@@ -758,9 +809,21 @@ export async function generateTrxRegister(
         fill(1, 3, COL.sDate, COL.intra, SALMON),  // SALES band
         fill(1, 3, COL.intra, COL.brok, GREEN),    // Intra-Day/Short/Long-term P/L header band
         fill(1, 3, COL.brok, WIDTH, GREEN),        // charge-column header band (Brok…IPF)
-        fill(3, dataEnd, COL.intra, COL.brok, LIME),  // P/L columns shaded down the data
+        fill(3, plBandEnd, COL.intra, COL.brok, LIME),  // P/L columns shaded down the DATA only (stops above the expense footer)
       );
       for (const cr of closingRanges) requests.push(fill(cr.start, cr.end, COL.name, COL.pDate, LIME));   // CLOSING rows (B–F)
+      // Expense-summary footer (Delivery / Intra-day + their Total): green label cells + bold labels,
+      // sitting in the Long-term P/L column just left of the charge breakdown.
+      requests.push(
+        fill(expStart, expEnd, COL.lt, COL.lt + 1, LIME),
+        {
+          repeatCell: {
+            range: { sheetId, startRowIndex: expStart, endRowIndex: expEnd, startColumnIndex: COL.lt, endColumnIndex: COL.lt + 1 },
+            cell: { userEnteredFormat: { textFormat: { bold: true } } },
+            fields: "userEnteredFormat.textFormat.bold",
+          },
+        },
+      );
 
       await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } }));
     }

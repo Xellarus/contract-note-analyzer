@@ -409,8 +409,15 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   }
 
   // ── 4. Write Holding tab ──
+  // Keep NEGATIVE net positions too (|qty| > 0), not just positives: a negative
+  // holding is impossible in reality and flags a data discrepancy (a missing buy,
+  // a dropped/duplicated sell, a bad opening lot). Surfacing it — rather than
+  // silently dropping it — lets the Holdings view show it as a discrepancy so it
+  // can be traced and fixed. Negatives carry avgBuyPrice 0 (set on the sell that
+  // took them below zero) → invested 0, so they don't distort the invested total,
+  // and computeAum already skips qty<=0 so the dashboard AUM is unaffected.
   const active = [...byKey.values()]
-    .filter(h => h.quantity > 0)
+    .filter(h => Math.abs(h.quantity) > 1e-9)
     .sort((a, b) => (b.quantity * b.avgBuyPrice) - (a.quantity * a.avgBuyPrice));
 
   const rows: any[][] = [["Company Name", "ISIN", "Quantity", "Avg Buy Price", "Invested Value"]];

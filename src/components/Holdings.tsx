@@ -13,7 +13,8 @@ import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedSc
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
 import { loadScripMaster, lookupScrip, normName, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { loadScripPrices, ScripPrice } from '../lib/scripPrices';
-import { loadOpeningHoldings, updateOpeningHoldingRow } from '../lib/openingHoldings';
+import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
+import { deleteSheetRow } from '../lib/sheetTabs';
 import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
@@ -116,6 +117,7 @@ interface DisplayHolding {
   todayGain: number;   // qty × (CMP − previous-day price); 0 when no prev price recorded
   type: string;
   sold?: boolean;   // exited position (traded historically, no current holding)
+  discrepancy?: boolean;   // impossible NEGATIVE net qty → a data error to trace/fix
   original: any;
 }
 
@@ -220,6 +222,7 @@ export default function Holdings({
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [savingEdit, setSavingEdit] = useState(false);
+  const [deletingEdit, setDeletingEdit] = useState(false);
   // Args of the current drill-down, so an edit can re-fetch the same scrip after saving.
   const [lastTxFetch, setLastTxFetch] = useState<{ companyName: string; isin: string } | null>(null);
   // "Show Sold" toggle: also list companies that were traded but are no longer held.
@@ -1004,12 +1007,51 @@ export default function Holdings({
     }
   };
 
+  // Delete the entry entirely: removes its row from True Entry (or the Opening
+  // Holdings lot), then rebuilds Holdings + capital gains so everything reflects
+  // the removal. Confirmed first — it's destructive and shifts the sheet's rows.
+  const deleteEntry = async () => {
+    const t = editingTx;
+    if (!t || t.sheetRow == null) return;
+    const spreadsheetId = sheetIdForId(activePortfolio);
+    if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
+    const isOpening = t.editSource === 'opening';
+    const ok = await confirmDialog({
+      title: 'Delete this entry?',
+      body: (
+        <span>
+          Permanently remove this {isOpening ? 'opening lot' : 'ledger row'} for <b>{t.assetName}</b>
+          {' '}({(t.transactionType || 'lot')} · {formatNum(t.quantity)} @ {formatINR(t.price)}, {t.tradeDate}).
+          {' '}Holdings and capital gains will be recomputed. This can't be undone.
+        </span>
+      ),
+      danger: true,
+      confirmLabel: 'Delete entry',
+      cancelLabel: 'Keep it',
+    });
+    if (!ok) return;
+    setDeletingEdit(true);
+    try {
+      await deleteSheetRow(spreadsheetId, isOpening ? OPENING_HOLDINGS_TAB : 'True Entry', t.sheetRow);
+      setEditingTx(null);
+      toast.success('Entry deleted — rebuilding Holdings & capital gains…');
+      try { await rebuildHoldingTab(spreadsheetId); } catch (e: any) { toast.error('Holding rebuild failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
+      try { await syncCapitalGains(spreadsheetId); } catch (e: any) { toast.error('Capital-gains sync failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
+      await fetchSheetHoldings(activePortfolio, true);
+      if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+    } catch (e: any) {
+      toast.error('Delete failed: ' + (e?.result?.error?.message || e?.message || 'error'));
+    } finally {
+      setDeletingEdit(false);
+    }
+  };
+
   // Edit Entry popup (Trade Book) — writes straight back to True Entry / Opening Holdings.
   // Declared once and rendered in BOTH top-level return branches: the component early-returns
   // renderStockDetailView() when a stock is selected, and the Trade Book (with its Edit
   // buttons) lives in THAT branch — a modal present only in the main return never mounts there.
   const editEntryModal = (
-      <ModalShell open={!!editingTx} onClose={() => !savingEdit && setEditingTx(null)} busy={savingEdit} labelledBy="edit-entry-title">
+      <ModalShell open={!!editingTx} onClose={() => !savingEdit && !deletingEdit && setEditingTx(null)} busy={savingEdit || deletingEdit} labelledBy="edit-entry-title">
         <div className="relative z-10 w-full max-w-xl max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn">
           <div className="flex items-start justify-between px-5 py-4 border-b border-slate-200">
             <div>
@@ -1021,7 +1063,7 @@ export default function Holdings({
                 </span>
               </p>
             </div>
-            <button onClick={() => !savingEdit && setEditingTx(null)} className="p-1.5 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-4 h-4 text-slate-500" /></button>
+            <button onClick={() => !savingEdit && !deletingEdit && setEditingTx(null)} className="p-1.5 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-4 h-4 text-slate-500" /></button>
           </div>
 
           <div className="overflow-y-auto px-5 py-4">
@@ -1087,13 +1129,20 @@ export default function Holdings({
             )}
           </div>
 
-          <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-slate-200">
-            <button onClick={() => setEditingTx(null)} disabled={savingEdit} className="px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer disabled:opacity-50">Cancel</button>
-            <button onClick={saveEdit} disabled={savingEdit} data-autofocus
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer disabled:opacity-50">
-              {savingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-              {savingEdit ? 'Saving & recomputing…' : 'Save & recompute'}
+          <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-slate-200">
+            <button onClick={deleteEntry} disabled={savingEdit || deletingEdit}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-rose-600 border border-rose-200 hover:bg-rose-50 rounded-lg cursor-pointer disabled:opacity-50">
+              {deletingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              {deletingEdit ? 'Deleting…' : 'Delete entry'}
             </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setEditingTx(null)} disabled={savingEdit || deletingEdit} className="px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer disabled:opacity-50">Cancel</button>
+              <button onClick={saveEdit} disabled={savingEdit || deletingEdit} data-autofocus
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer disabled:opacity-50">
+                {savingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                {savingEdit ? 'Saving & recomputing…' : 'Save & recompute'}
+              </button>
+            </div>
           </div>
         </div>
       </ModalShell>
@@ -1383,14 +1432,20 @@ export default function Holdings({
           }
         }
 
-        const totalValue = h.quantity * cmp;
-        const profit = totalValue - h.investedValue;
-        const profitPct = h.investedValue > 0 ? (profit / h.investedValue) * 105 / 105 * 100 : 0; // standard format
+        // A NEGATIVE net quantity is impossible for a real holding — it means the
+        // ledger is inconsistent (a missing buy, or a dropped/duplicated sell). Flag
+        // it as a discrepancy and DON'T value it (no cost basis, no CMP applied), so
+        // it can't distort the summary cards; the negative qty is shown, in red, as
+        // the signal to trace and fix it.
+        const discrepancy = h.quantity < -1e-9;
+        const totalValue = discrepancy ? 0 : h.quantity * cmp;
+        const profit = discrepancy ? 0 : totalValue - h.investedValue;
+        const profitPct = (!discrepancy && h.investedValue > 0) ? (profit / h.investedValue) * 100 : 0;
 
         // Today's gain = qty × (CMP − previous-day price). 0 until a previous-day
         // baseline exists (i.e. after the first import on a later day).
         const prevCmp = getRealPrevCmp(h.isin, h.companyName);
-        const todayGain = (cmp > 0 && prevCmp !== undefined && prevCmp > 0) ? h.quantity * (cmp - prevCmp) : 0;
+        const todayGain = (!discrepancy && cmp > 0 && prevCmp !== undefined && prevCmp > 0) ? h.quantity * (cmp - prevCmp) : 0;
 
         return {
           id: `sheet-${index}`,
@@ -1400,13 +1455,14 @@ export default function Holdings({
           sector,
           quantity: h.quantity,
           avgCost: h.avgBuyPrice,
-          currentPrice: cmp,
+          currentPrice: discrepancy ? 0 : cmp,
           currentValue: totalValue,
           unrealizedGain: profit,
           unrealizedGainPct: profitPct,
           todayGain,
           type,
-          sold: h.quantity <= 0,
+          sold: h.quantity === 0,
+          discrepancy,
           original: h
         };
       });
@@ -2832,7 +2888,12 @@ export default function Holdings({
                                   <span className="font-bold text-slate-800 truncate max-w-[260px]" title={h.name}>
                                     {h.name}
                                   </span>
-                                  {h.sold && (
+                                  {h.discrepancy ? (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-rose-50 text-rose-700 border border-rose-300 shrink-0 select-none"
+                                      title="Negative net quantity — the ledger for this stock is inconsistent (a missing buy, or a dropped/duplicated sell). Open the stock to trace it in the Trade Book.">
+                                      <AlertTriangle className="w-3 h-3" /> Discrepancy
+                                    </span>
+                                  ) : h.sold && (
                                     <span className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-rose-50 text-rose-600 border border-rose-200 shrink-0 select-none">
                                       Sold
                                     </span>
@@ -2840,7 +2901,7 @@ export default function Holdings({
                                 </div>
                               </td>
 
-                              <td className="px-6 py-4 text-right font-mono font-bold text-slate-700">
+                              <td className={`px-6 py-4 text-right font-mono font-bold ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
                                 {formatNum(h.quantity)}
                               </td>
 

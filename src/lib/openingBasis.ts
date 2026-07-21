@@ -1,26 +1,25 @@
 /**
- * Opening-basis reconstruction (transaction-history model).
+ * Opening-basis reconstruction.
  *
- * The app computes FY26 capital gains by FIFO-replaying True Entry (FY26 trades).
- * For that to be correct, the FIFO queues must be seeded with the lots carried
- * INTO FY26 — with real acquisition dates (for LTCG/STCG) and real cost.
+ * The app computes FY26 capital gains by FIFO-replaying True Entry (FY26 trades). For
+ * that to be correct, the FIFO queues must be seeded with the lots carried INTO FY26 —
+ * with real acquisition dates (for LTCG/STCG) and real cost.
  *
- * We rebuild those lots by **replaying the full transaction history from inception
- * up to 31-Mar-2025**, so every surviving lot keeps its ACTUAL buy date and ACTUAL
- * cost — no weighted-average blending or backing-out:
+ * ── Replace / one-shot (`reconstructOpeningLots`) — Holding-Period-Report model
+ *    (user redesign 2026-07-21):
+ *   • The **Holding Period Report** is the SOLE source of the written lots — each
+ *     surviving lot's real date + qty + cost taken VERBATIM (already net of every
+ *     rights/bonus/split/intraday event). No FIFO replay.
+ *   • The **transaction statement** only (1) surfaces Bonus/Split/Rights rows, and
+ *     (2) yields a net position (buy − sell) that CROSS-CHECKS the report's quantity.
+ *   • A net position present in the txns but absent from the report → no lot + a flag.
+ *   • Securities named "…Right Issue…" are dropped everywhere (`isRightIssueName`).
+ *   • The 31-Mar holding statement is no longer used here.
  *
- *   • BUY / IPO       → new lot (cost = the row's all-in Amount, date = trade date)
- *   • SELL / BUYBACK  → consume the OLDEST lots first (FIFO)
- *   • BONUS           → needs a ratio (user popup): adds held × N/M shares at ₹0
- *   • SPLIT           → needs a ratio (user popup): rescales every lot (qty ×f, cost/share ÷f)
- *   • RIGHTS          → needs ratio + price (user popup): adds held × N/M shares at that price
- *
- * Bonus/Split/Rights carry no reliable ratio in a plain statement, so they surface
- * as `pendingActions` for the user to fill in; once resolved they replay deterministically.
- *
- * The **31-Mar-2025 holding statement demotes to a checksum**: after the replay we
- * compare the surviving quantity (and value) per scrip against it and flag any
- * mismatch. It also still supplies SECTOR classifications for the Industries tab.
+ * ── Batch / Add-batch (`accumulateOpeningLots` / `accumulateReportLots`) — UNCHANGED:
+ *   for a history too large to import in one pass, feed it in chronological slices.
+ *   Transaction slices still FIFO-replay (BUY adds a lot, SELL consumes oldest-first,
+ *   BONUS/SPLIT/RIGHTS from `resolutions`); Holding-Period-Report slices append verbatim.
  *
  * This module is pure (no gapi) so it can be unit-tested in Node.
  */
@@ -101,7 +100,8 @@ export interface ReconstructResult {
     shortLots: number; longLots: number; zeroCost: number;
     buys: number; sells: number; corpActions: number;
     reconciled: number; mismatched: number; noTxn: number;
-    costOverrides: number;   // long-term lots whose cost was overridden by the holding-period report
+    costOverrides: number;   // lots sourced from the holding-period report
+    missingFromReport?: number;   // scrips with a surviving net in the txns but absent from the HPR (no lot written)
   };
 }
 
@@ -151,6 +151,11 @@ function parseDmy(s: string): { iso: string; ts: number } {
 export const obKey = (name: string): string =>
   (name || "").toLowerCase().replace(/[.,()'"]/g, " ").replace(/\b(ltd|limited|the)\b/g, " ").replace(/\s+/g, " ").trim();
 
+// Broker rights-entitlement placeholders — a temporary security named like "XYZ Right
+// Issue Ltd" (or "Rights Issue") — are NOT real holdings. Skip them in every upload
+// (user directive 2026-07-21). Matches "right issue" / "rights issue", any spacing/case.
+export const isRightIssueName = (name: string): boolean => /rights?\s*issue/i.test(name || "");
+
 // ── Parsers ──────────────────────────────────────────────────────────────────
 /** Parse a 31-Mar holding / historical-valuation CSV. Header-driven (tolerant of
  *  a leading blank column and column order). */
@@ -175,7 +180,7 @@ export function parseHoldingStatement(text: string): HoldingStatementRow[] {
     const f = splitCsvLine(lines[i]);
     const name = (f[ci.name] || "").trim();
     const qty = parseNum(f[ci.qty]);
-    if (!name || isNaN(qty) || qty <= 0) continue;
+    if (!name || isRightIssueName(name) || isNaN(qty) || qty <= 0) continue;
     const inv = parseNum(f[ci.invested]);
     out.push({
       name,
@@ -215,7 +220,7 @@ export function parseTransactionStatement(text: string): TxnStatementRow[] {
     const f = splitCsvLine(lines[i]);
     const name = (f[ci.name] || "").trim();
     const type = (f[ci.type] || "").trim();
-    if (!name || !type) continue;
+    if (!name || !type || isRightIssueName(name)) continue;
     const { iso, ts } = parseDmy(f[ci.date] || "");
     out.push({
       dateStr: (f[ci.date] || "").trim(), iso, ts, type, name,
@@ -251,7 +256,7 @@ export function parseHoldingPeriodReport(text: string): HoldingPeriodLot[] {
     const f = splitCsvLine(lines[i]);
     const name = (f[ci.name] || "").trim();
     const qty = parseNum(f[ci.qty]);
-    if (!name || isNaN(qty) || qty <= 0) continue;
+    if (!name || isRightIssueName(name) || isNaN(qty) || qty <= 0) continue;
     const { iso, ts } = parseDmy(f[ci.date] || "");
     const amt = ci.amt >= 0 ? parseNum(f[ci.amt]) : NaN;
     const price = ci.price >= 0 ? parseNum(f[ci.price]) : NaN;
@@ -383,39 +388,69 @@ function replayScrip(
   return { lots: lots.filter(l => l.qty > 1e-9), buys, sells, oversold, unknown: [...unknown] };
 }
 
+/** Net surviving quantity for one scrip from the transaction statement. Prefers the
+ *  broker's running BAL QTY (already net of every buy/sell/bonus/rights/split); falls
+ *  back to Σbuy − Σsell with resolved bonus/rights/split ratios applied when there's no
+ *  balance column. Used purely to CROSS-CHECK the Holding Period Report — it never
+ *  produces lots, so an unresolved corp action here only softens the check, it can't
+ *  corrupt the written basis. */
+export function netQtyFromTxns(
+  rowsRaw: TxnStatementRow[], resolutions: Record<string, ActionResolution>, scripKey: string,
+): number {
+  const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
+  const hasBal = rows.some(r => r.balQty !== 0);
+  if (hasBal) return rows[rows.length - 1].balQty;   // broker's closing balance = net position
+  let q = 0;
+  for (const row of rows) {
+    const kind = classifyTxn(row.type);
+    if (kind === "BUY") q += row.qty;
+    else if (kind === "SELL") q -= Math.abs(row.qty);
+    else if (kind === "BONUS" || kind === "RIGHT") {
+      const res = resolutions[corpActionKey(scripKey, kind, row.iso)];
+      if (res && res.den > 0) q += q * (res.num / res.den);
+    } else if (kind === "SPLIT") {
+      const res = resolutions[corpActionKey(scripKey, kind, row.iso)];
+      if (res && res.den > 0 && res.num > 0) q *= (res.num / res.den);
+    }
+  }
+  return q;
+}
+
 /**
- * Reconstruct dated opening lots as of 1-Apr-2025.
+ * Reconstruct dated opening lots as of 1-Apr-2025 — **Holding-Period-Report model**
+ * (user redesign 2026-07-21).
  *
- * Two sources, per scrip:
- *   • If the **holding-period report** (`hpLots`) covers the scrip, its lots are taken
- *     VERBATIM (real acq date + qty + cost) — it's the broker's authoritative surviving
- *     position, already net of every rights/bonus/split/intraday event, so no replay is
- *     needed (and no corp-action prompts).
- *   • Otherwise the full transaction history is **replayed** (BUY/IPO/SELL/BUYBACK auto;
- *     BONUS/SPLIT/RIGHTS from `resolutions`), and whatever survives all the sells is kept.
+ *   • The **Holding Period Report** (`hpLots`) is the SOLE source of the written lots:
+ *     each surviving lot's real acq date + qty + cost/share is taken VERBATIM. It's the
+ *     broker's authoritative position, already net of every rights/bonus/split/intraday
+ *     event, so there is no FIFO replay.
+ *   • The **transaction statement** (`txns`) does two things, "from one arrow":
+ *       1. surfaces Bonus / Split / Rights rows (so the user can see them, and so the net
+ *          cross-check is exact when the statement has no running-balance column), and
+ *       2. gives an independent net position (buy − sell, incl. those corp actions) that
+ *          is CROSS-CHECKED against the HPR quantity — e.g. buy 12,000 − sell 7,000 = 5,000
+ *          must equal the report's 5,000. A mismatch is flagged; the report still wins.
+ *   • A scrip with a surviving net in the transactions but **absent from the HPR** has no
+ *     cost source, so no lot is written and it's flagged (value comes only from the HPR).
+ *   • Securities whose name contains "Right Issue" are dropped upstream (see `isRightIssueName`).
  *
- * The 31-Mar holding statement is used only to reconcile the result. See the module header.
- * If any corp action for a *replayed* scrip is unresolved, `pendingActions` lists them and
- * `lots` is empty (a partial replay past an unknown split/bonus would be wrong).
+ * The 31-Mar holding statement is no longer part of this flow. Corp actions never block the
+ * write here (the lots come from the HPR regardless); resolving them only sharpens the check.
  */
 export function reconstructOpeningLots(
-  holdings: HoldingStatementRow[],
   txns: TxnStatementRow[],
+  hpLots: HoldingPeriodLot[],
   resolutions: Record<string, ActionResolution> = {},
-  hpLots: HoldingPeriodLot[] = [],
 ): ReconstructResult {
+  // Transactions grouped per scrip — for corp-action detection + the net cross-check.
   const byName = new Map<string, TxnStatementRow[]>();
   for (const t of txns) {
     const k = obKey(t.name);
     (byName.get(k) || byName.set(k, []).get(k)!).push(t);
   }
 
-  // Holding-period report → the broker's AUTHORITATIVE lot-wise surviving position as of
-  // 31-Mar-2025 (real acq date + qty + cost, already net of rights/bonus/splits/intraday).
-  // User directive 2026-07-13: for any scrip the report covers, take the opening lots
-  // DIRECTLY from it and SKIP the fragile transaction replay — the replay can't reproduce
-  // rights-entitlement sales or same-day churn (e.g. Skipper replayed 435 sh vs the true
-  // 390). The replay is used only for scrips the report doesn't cover.
+  // Holding-period report → the broker's AUTHORITATIVE lot-wise surviving position
+  // (real acq date + qty + cost). The ONLY source of the written opening lots.
   const hpByScrip = new Map<string, HoldingPeriodLot[]>();
   for (const hp of hpLots) {
     if (!(hp.qty > 0)) continue;
@@ -423,50 +458,19 @@ export function reconstructOpeningLots(
     (hpByScrip.get(k) || hpByScrip.set(k, []).get(k)!).push(hp);
   }
 
-  const sectors: { name: string; sector: string }[] = [];
-  for (const h of holdings) if (h.sector) sectors.push({ name: h.name, sector: h.sector });
-
-  // Corp actions only need resolving for scrips we actually REPLAY. A report-covered
-  // scrip's lots already reflect its corp actions, so don't prompt for them.
-  const pendingActions = collectPendingActions(byName).filter(a => !hpByScrip.has(obKey(a.name)));
-  const unresolved = pendingActions.filter(a => !resolutions[a.key]);
+  // Surface corp actions for display + to make the net cross-check exact on balance-less
+  // statements. They do NOT drive the lots, so they never block the write.
+  const pendingActions = collectPendingActions(byName);
 
   const lots: OpeningLot[] = [];
   const issues: ReconIssue[] = [];
-  let shortLots = 0, longLots = 0, zeroCost = 0, buys = 0, sells = 0;
-  let reconciled = 0, mismatched = 0, noTxn = 0, costOverrides = 0;   // costOverrides = lots sourced from the report
+  let shortLots = 0, longLots = 0, zeroCost = 0;
+  let reconciled = 0, mismatched = 0, noTxn = 0, costOverrides = 0, missingFromReport = 0;
 
-  // Don't replay until every (replayed-scrip) corp action has a ratio — a missed
-  // split/bonus corrupts everything after it. Surface the pending list to prompt for them.
-  if (unresolved.length > 0) {
-    for (const h of holdings) { const k = obKey(h.name); if (!byName.has(k) && !hpByScrip.has(k)) noTxn++; }
-    return {
-      lots, issues, sectors, pendingActions,
-      summary: { holdings: holdings.length, lots: 0, shortLots, longLots, zeroCost, buys, sells, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides },
-    };
-  }
-
-  // Emit replayed FIFO lots (for scrips NOT in the report). Returns the invested written.
-  const emit = (displayName: string, fifo: FifoLot[]): number => {
-    let emittedInv = 0;
-    for (const l of fifo) {
-      const ts = l.ts > 0 ? l.ts : 0;
-      const iso = ts > 0 ? l.iso : PRE_FY_DATE;
-      const longTerm = ts > 0 ? ts < LT_CUTOFF_TS : true;
-      const cps = r6(l.cps);
-      if (cps === 0) zeroCost++;
-      longTerm ? longLots++ : shortLots++;
-      const inv = r2(l.qty * cps);
-      emittedInv += inv;
-      lots.push({ name: displayName, isin: "", acqDate: iso, qty: r6(l.qty), costPerShare: cps, invested: inv, longTerm, note: l.note });
-    }
-    return emittedInv;
-  };
-
-  // Emit the report's lots verbatim (for scrips the report covers). Its DATE is the real
-  // acquisition date — the CG engine re-derives the holding period from it at sale time.
-  const emitReport = (displayName: string, repLots: HoldingPeriodLot[]): { qty: number; inv: number } => {
-    let qty = 0, inv = 0;
+  // Emit the report's lots verbatim. Its DATE is the real acquisition date — the CG engine
+  // re-derives the holding period from it at sale time.
+  const emitReport = (displayName: string, repLots: HoldingPeriodLot[]): number => {
+    let qty = 0;
     for (const rl of repLots) {
       if (!(rl.qty > 0)) continue;
       const ts = rl.ts > 0 ? rl.ts : 0;
@@ -476,80 +480,47 @@ export function reconstructOpeningLots(
       if (cps === 0) zeroCost++;
       longTerm ? longLots++ : shortLots++;
       const lotInv = r2(rl.qty * cps);
-      qty += rl.qty; inv += lotInv; costOverrides++;
+      qty += rl.qty; costOverrides++;
       lots.push({ name: displayName, isin: "", acqDate: iso, qty: r6(rl.qty), costPerShare: cps, invested: lotInv, longTerm, note: "cost & lot from holding-period report" });
     }
-    return { qty, inv };
+    return qty;
   };
 
-  const emitted = new Set<string>();
-
-  // Scrips in the 31-Mar holding statement: report-authoritative if covered, else replay.
-  for (const h of holdings) {
-    const key = obKey(h.name);
-    emitted.add(key);
-    const repLots = hpByScrip.get(key);
-    if (repLots && repLots.length) {
-      const { qty: survQty, inv: survInv } = emitReport(h.name, repLots);
-      if (Math.abs(survQty - h.qty) > 0.001) {
+  // 1. Every scrip the HPR covers → emit its lots, then cross-check qty against the txn net.
+  for (const [key, repLots] of hpByScrip) {
+    const displayName = repLots[0].name;
+    const survQty = emitReport(displayName, repLots);
+    const rows = byName.get(key);
+    if (rows && rows.length) {
+      const net = netQtyFromTxns(rows, resolutions, key);
+      if (Math.abs(net - survQty) > 0.001) {
         mismatched++;
-        issues.push({ name: h.name, message: `holding-period report shows ${fmt(survQty)} sh but the 31-Mar holding statement says ${fmt(h.qty)} (Δ ${fmt(survQty - h.qty)}). Using the report's lots — confirm the report is as-of 31-Mar-2025 and lists every lot.` });
+        issues.push({ name: displayName, message: `transaction net (buy − sell) is ${fmt(net)} sh but the Holding Period Report shows ${fmt(survQty)} (Δ ${fmt(net - survQty)}). Using the report's lots — check the transactions or a bonus/split/rights entry.` });
       } else {
         reconciled++;
-        if (h.invested > 0 && Math.abs(survInv - h.invested) > Math.max(1, 0.005 * h.invested)) {
-          issues.push({ name: h.name, message: `qty ties out; report value ₹${fmt(r2(survInv))} vs holding ₹${fmt(h.invested)} — small charges/convention gap.` });
-        }
       }
-      continue;
-    }
-    const rows = byName.get(key);
-    if (!rows) { noTxn++; issues.push({ name: h.name, message: `no transactions in the statement and not in the holding-period report — no opening lot created; add its history or include it in the report.` }); continue; }
-    const rep = replayScrip(key, rows, resolutions);
-    buys += rep.buys; sells += rep.sells;
-    const survInv = emit(h.name, rep.lots);
-    if (rep.oversold > 1e-6) issues.push({ name: h.name, message: `statement sells exceed buys by ${round0(rep.oversold)} sh — check for a missing opening/buy row.` });
-    if (rep.unknown.length) issues.push({ name: h.name, message: `unrecognised transaction type(s): ${rep.unknown.join(", ")} — ignored.` });
-
-    // Reconcile the replayed quantity + value against the 31-Mar holding statement.
-    const survQty = rep.lots.reduce((s, l) => s + l.qty, 0);
-    if (Math.abs(survQty - h.qty) > 0.001) {
-      mismatched++;
-      issues.push({ name: h.name, message: `qty mismatch — replayed ${fmt(survQty)} vs holding ${fmt(h.qty)} (Δ ${fmt(survQty - h.qty)}). Add this scrip to the Holding Period Report for an exact opening position, or check bonus/split/rights ratios.` });
     } else {
-      reconciled++;
-      if (h.invested > 0 && Math.abs(survInv - h.invested) > Math.max(1, 0.005 * h.invested)) {
-        issues.push({ name: h.name, message: `qty ties out; value differs — opening ₹${fmt(r2(survInv))} vs holding ₹${fmt(h.invested)} (add the Holding Period Report for exact cost, or brokerage/charges convention).` });
-      }
+      noTxn++;
+      issues.push({ name: displayName, message: `in the Holding Period Report (${fmt(survQty)} sh) but no transactions found to cross-check — using the report's lots as-is.` });
     }
   }
 
-  // Scrips in the transactions but NOT in the holding statement — keep any replayed
-  // survivors (txns are truth) but flag them; skip any already emitted or report-covered.
+  // 2. Scrips with a surviving net in the transactions but NOT in the HPR → no cost
+  //    source, so skip + flag (value only ever comes from the report).
   for (const [key, rows] of byName) {
-    if (emitted.has(key) || hpByScrip.has(key)) continue;
-    const rep = replayScrip(key, rows, resolutions);
-    buys += rep.buys; sells += rep.sells;
-    const survQty = rep.lots.reduce((s, l) => s + l.qty, 0);
-    if (survQty > 0.001) {
-      emit(rows[0].name, rep.lots);
-      issues.push({ name: rows[0].name, message: `replayed ${fmt(survQty)} sh held, but this scrip isn't in the 31-Mar holding statement — verify.` });
+    if (hpByScrip.has(key)) continue;
+    const net = netQtyFromTxns(rows, resolutions, key);
+    if (net > 0.001) {
+      missingFromReport++;
+      issues.push({ name: rows[0].name, message: `net ${fmt(net)} sh in the transaction statement but not in the Holding Period Report — no opening lot written. Add it to the report.` });
     }
-  }
-
-  // Scrips in the holding-period report but NOT in the holding statement (rare) — emit
-  // the report's lots (authoritative) and flag for review.
-  for (const [key, repLots] of hpByScrip) {
-    if (emitted.has(key)) continue;
-    emitted.add(key);
-    const { qty: survQty } = emitReport(repLots[0].name, repLots);
-    issues.push({ name: repLots[0].name, message: `in the holding-period report (${fmt(survQty)} sh) but not the 31-Mar holding statement — using the report's lots; verify.` });
   }
 
   return {
-    lots, issues, sectors, pendingActions,
+    lots, issues, sectors: [], pendingActions,
     summary: {
-      holdings: holdings.length, lots: lots.length, shortLots, longLots, zeroCost,
-      buys, sells, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides,
+      holdings: hpByScrip.size, lots: lots.length, shortLots, longLots, zeroCost,
+      buys: 0, sells: 0, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides, missingFromReport,
     },
   };
 }

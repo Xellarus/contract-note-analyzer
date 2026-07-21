@@ -86,12 +86,13 @@ export default function OpeningBasisImport() {
         const txnsC = txns.map(t => ({ ...t, name: canon(t.name) }));
         return accumulateOpeningLots(prevC, txnsC, resolutions, holdings);
       }
-      if (!holdingText) return null;
-      const holdings = parseHoldingStatement(holdingText);
-      if (holdings.length === 0) return null;
-      const txns = txnText ? parseTransactionStatement(txnText) : [];
-      const hpLots = hpText ? parseHoldingPeriodReport(hpText) : [];
-      return reconstructOpeningLots(holdings, txns, resolutions, hpLots);
+      // Replace mode: the Holding Period Report IS the lots; the transaction statement
+      // supplies corp-action detection + the net (buy−sell) cross-check.
+      if (!txnText || !hpText) return null;
+      const hpLots = parseHoldingPeriodReport(hpText);
+      if (hpLots.length === 0) return null;
+      const txns = parseTransactionStatement(txnText);
+      return reconstructOpeningLots(txns, hpLots, resolutions);
     } catch { return null; }
   }, [mode, batchSource, holdingText, txnText, hpText, resolutions, master, prevLots]);
 
@@ -223,7 +224,9 @@ export default function OpeningBasisImport() {
     if (!hasValidGoogleToken()) { setWriteError('Connect Google Sheets first (open the Holdings tab and authorize).'); return; }
     const port = portfolioById(portfolioId);
     if (!port) { setWriteError('Pick a portfolio.'); return; }
-    if (unresolvedCount > 0) { setWriteError(`Resolve ${unresolvedCount} corporate action(s) first.`); return; }
+    // Accumulate mode FIFO-replays, so a missing ratio corrupts it — block. Replace mode
+    // takes lots from the HPR, so corp actions only refine the cross-check → never block.
+    if (mode === 'accumulate' && unresolvedCount > 0) { setWriteError(`Resolve ${unresolvedCount} corporate action(s) first.`); return; }
     if (mode === 'accumulate' && overlap) {
       setWriteError(`This slice includes ${prettyDate(batchDates!.minIso)}, on/before the already-processed ${prettyDate(obState.processedThrough)}. Re-slice so it starts strictly after that date.`);
       return;
@@ -300,11 +303,12 @@ export default function OpeningBasisImport() {
       <div>
         <h2 className="text-lg font-black text-slate-800 tracking-tight">Opening Basis (FY26 cost basis)</h2>
         <p className="text-xs text-slate-500 mt-0.5">
-          Rebuild dated opening tax-lots as of <strong className="text-slate-700">1-Apr-2025</strong> by replaying the broker's
-          full transaction history (inception → 31-Mar-2025). Every surviving lot keeps its <strong className="text-slate-700">real buy date + real cost</strong>.
-          Bonus / Split / Rights rows can't be read from a plain statement, so you fill in their ratios in a popup. The
-          31-Mar-2025 holding statement reconciles the result (and supplies sectors). For a very large history that won't
-          import in one pass, switch to <strong className="text-slate-700">Add batch</strong> and feed it in chronological slices.
+          Build dated opening tax-lots as of <strong className="text-slate-700">1-Apr-2025</strong>. The <strong className="text-slate-700">Holding
+          Period Report</strong> supplies the lots — each with its <strong className="text-slate-700">real buy date + real cost</strong>. The
+          <strong className="text-slate-700"> transaction statement</strong> is used only to spot Bonus / Split / Rights and to cross-check the net
+          position (buy − sell) against the report — e.g. buy 12,000 − sell 7,000 = 5,000 must match the report's 5,000; a gap is flagged.
+          A scrip that has a net position in the transactions but isn't in the report gets no lot (and a flag). Securities named
+          "…Right Issue…" are ignored. For a very large history, switch to <strong className="text-slate-700">Add batch</strong> and feed it in slices.
         </p>
       </div>
 
@@ -394,9 +398,9 @@ export default function OpeningBasisImport() {
           {/* Upload zones */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {([
-              { kind: 'txn' as const, title: mode === 'accumulate' ? 'Transaction Slice' : 'Transaction Statement', sub: mode === 'accumulate' ? 'This chronological slice · IPO / Buy / Sell / Buyback / Bonus / Split / Rights · with BAL QTY' : 'Inception → 31-Mar-2025 · IPO / Buy / Sell / Buyback / Bonus / Split / Rights', name: txnName, req: true, show: mode === 'replace' || (mode === 'accumulate' && batchSource === 'txn') },
-              { kind: 'holding' as const, title: '31-Mar-2025 Holding Statement', sub: mode === 'accumulate' ? 'FINAL slice only — reconciles the finished position + sectors (optional until then)' : 'Name · Qty · Amount Invested (· Sector) — reconciles the replay', name: holdingName, req: mode === 'replace', show: true },
-              { kind: 'hp' as const, title: (mode === 'accumulate' && batchSource === 'hpr') ? 'Holding Period Report Slice' : 'Holding Period Report', sub: (mode === 'accumulate' && batchSource === 'hpr') ? "This slice's lot-wise rows · Company · Date · Qty · Purchase Amount — taken verbatim & appended" : 'Lot-wise Company · Date · Qty · Purchase Amount — authoritative opening lots (optional)', name: hpName, req: mode === 'accumulate' && batchSource === 'hpr', show: mode === 'replace' || (mode === 'accumulate' && batchSource === 'hpr') },
+              { kind: 'txn' as const, title: mode === 'accumulate' ? 'Transaction Slice' : 'Transaction Statement', sub: mode === 'accumulate' ? 'This chronological slice · IPO / Buy / Sell / Buyback / Bonus / Split / Rights · with BAL QTY' : 'Inception → 31-Mar-2025 · Buy / Sell (+ Bonus / Split / Rights) — for the net cross-check & corp actions', name: txnName, req: true, show: mode === 'replace' || (mode === 'accumulate' && batchSource === 'txn') },
+              { kind: 'holding' as const, title: '31-Mar-2025 Holding Statement', sub: 'FINAL slice only — reconciles the finished position + sectors (optional until then)', name: holdingName, req: false, show: mode === 'accumulate' },
+              { kind: 'hp' as const, title: (mode === 'accumulate' && batchSource === 'hpr') ? 'Holding Period Report Slice' : 'Holding Period Report', sub: (mode === 'accumulate' && batchSource === 'hpr') ? "This slice's lot-wise rows · Company · Date · Qty · Purchase Amount — taken verbatim & appended" : 'Lot-wise Company · Date · Qty · Purchase Amount — the authoritative opening lots (cost + real dates)', name: hpName, req: mode === 'replace' || (mode === 'accumulate' && batchSource === 'hpr'), show: mode === 'replace' || (mode === 'accumulate' && batchSource === 'hpr') },
             ]).filter(z => z.show).map(z => (
               <label key={z.kind}
                 className="rounded-2xl border-2 border-dashed border-slate-200 bg-white hover:border-indigo-300 p-6 text-center cursor-pointer transition-all block">
@@ -428,17 +432,18 @@ export default function OpeningBasisImport() {
             <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
               <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-slate-150 bg-slate-50">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-bold text-slate-700">
-                  <span className="inline-flex items-center gap-1.5"><Layers className="w-4 h-4 text-indigo-600" /> {mode === 'accumulate' ? `running position → ${s.lots} lots` : `${s.holdings} holdings → ${s.lots} lots`}</span>
+                  <span className="inline-flex items-center gap-1.5"><Layers className="w-4 h-4 text-indigo-600" /> {mode === 'accumulate' ? `running position → ${s.lots} lots` : `${s.holdings} scrips → ${s.lots} lots`}</span>
                   <span className="inline-flex items-center gap-1.5"><CalendarClock className="w-4 h-4 text-emerald-600" /> {s.shortLots} short-term · {s.longLots} long-term</span>
                   {s.reconciled > 0 && <span className="inline-flex items-center gap-1.5 text-emerald-700"><CheckCircle2 className="w-4 h-4" /> {s.reconciled} reconciled</span>}
                   {s.mismatched > 0 && <span className="inline-flex items-center gap-1.5 text-amber-700"><AlertTriangle className="w-4 h-4" /> {s.mismatched} qty mismatch</span>}
+                  {(s.missingFromReport ?? 0) > 0 && <span className="inline-flex items-center gap-1.5 text-amber-700"><AlertTriangle className="w-4 h-4" /> {s.missingFromReport} missing from report</span>}
                   {s.costOverrides > 0 && <span className="inline-flex items-center gap-1.5 text-indigo-700"><CheckCircle2 className="w-4 h-4" /> {s.costOverrides} lots from report</span>}
-                  {s.noTxn > 0 && <span className="text-slate-500">{s.noTxn} no-history</span>}
+                  {s.noTxn > 0 && <span className="text-slate-500">{s.noTxn} no cross-check</span>}
                   {s.zeroCost > 0 && <span className="text-slate-500">{s.zeroCost} zero-cost</span>}
                 </div>
                 <div className="flex items-center gap-2">
                   <button onClick={reset} className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-3.5 h-3.5" /> Clear</button>
-                  <button onClick={runWrite} disabled={writing || unresolvedCount > 0 || resolvedLots.length === 0 || (mode === 'accumulate' && overlap)}
+                  <button onClick={runWrite} disabled={writing || (mode === 'accumulate' && unresolvedCount > 0) || resolvedLots.length === 0 || (mode === 'accumulate' && overlap)}
                     className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50">
                     {writing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mode === 'accumulate' ? <Layers3 className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
                     {writing ? (mode === 'accumulate' ? 'Adding batch…' : 'Writing & rebuilding…') : mode === 'accumulate' ? `Add batch to ${port?.code}` : `Set opening basis for ${port?.code}`}
@@ -451,7 +456,9 @@ export default function OpeningBasisImport() {
                 unresolvedCount > 0 ? (
                   <div className="m-4 p-3 rounded-xl border border-indigo-200 bg-indigo-50 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-2 text-[12px] font-bold text-indigo-800">
-                      <Wand2 className="w-4 h-4" /> {unresolvedCount} corporate action(s) need a ratio before the basis can be built.
+                      <Wand2 className="w-4 h-4" /> {mode === 'accumulate'
+                        ? `${unresolvedCount} corporate action(s) need a ratio before the basis can be built.`
+                        : `${unresolvedCount} corporate action(s) detected — resolve them to sharpen the buy−sell cross-check (optional; lots come from the report either way).`}
                     </div>
                     <button onClick={openModal} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer">Resolve now</button>
                   </div>
