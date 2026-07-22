@@ -3,10 +3,11 @@ import {
   UploadCloud, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, AlertTriangle, X, Layers, CalendarClock, Link2Off, Wand2, Pencil, Layers3, RotateCcw, History,
 } from 'lucide-react';
 import {
-  parseTransactionStatement, parseHoldingPeriodReport, reconstructOpeningLots, accumulateReportLots,
-  ReconstructResult, OpeningLot, ActionResolution,
+  parseTransactionStatement, parseHoldingPeriodReport, reconstructOpeningLots, accumulateReportLots, advanceTxnNet,
+  ReconstructResult, OpeningLot, ActionResolution, TxnNetEntry,
 } from '../lib/openingBasis';
 import { saveOpeningHoldings, loadOpeningHoldings, OpeningSeedLot } from '../lib/openingHoldings';
+import { loadOpeningTxnNet, saveOpeningTxnNet, resetOpeningTxnNet, TxnNetMap } from '../lib/openingTxnNet';
 import { loadOpeningCorpActions, loadOpeningCorpActionRows, saveOpeningCorpActions, SavedCorpAction } from '../lib/openingCorpActions';
 import { loadOpeningBasisState, saveOpeningBasisState, resetOpeningBasisState, OpeningBasisState } from '../lib/openingBasisState';
 import { rebuildHoldingTab, syncCapitalGains } from '../lib/holdingsCalc';
@@ -43,6 +44,7 @@ export default function OpeningBasisImport() {
 
   // Batch (accumulate) mode: the running position + progress carried in from prior slices.
   const [prevLots, setPrevLots] = useState<OpeningSeedLot[]>([]);
+  const [txnNet, setTxnNet] = useState<TxnNetMap>({});   // accumulated transaction position (verification)
   const [obState, setObState] = useState<OpeningBasisState>({ processedThrough: '', batches: 0 });
   const [loadingPrev, setLoadingPrev] = useState(false);
   const [reloadTick, setReloadTick] = useState(0);
@@ -63,13 +65,15 @@ export default function OpeningBasisImport() {
         if (!master) return null;
         const canon = (n: string) => { const e = lookupScrip(master, '', n).entry; return e ? e.canonicalName : n; };
         const prevC = prevLots.map(l => ({ name: canon(l.name), isin: l.isin, acqDate: l.acqDate, qty: l.qty, costPerShare: l.costPerShare, note: l.note }));
-        // Batch = Holding Period Report slices (appended verbatim). The transaction statement
-        // is optional (final slice) and only runs the buy−sell net cross-check.
+        // Batch = Holding Period Report slices (appended verbatim → the lots). A transaction
+        // slice per HPR slice surfaces Bonus/Split/Rights (the popup) and feeds the running
+        // transaction POSITION (see mergedNet below) that you eyeball against your dated
+        // holding report — so no per-slice HPR cross-check here (crossCheck = false).
         const hpr = hpText ? parseHoldingPeriodReport(hpText) : [];
-        if (hpr.length === 0) return null;
-        const hprC = hpr.map(l => ({ ...l, name: canon(l.name) }));
         const txns = txnText ? parseTransactionStatement(txnText).map(t => ({ ...t, name: canon(t.name) })) : [];
-        return accumulateReportLots(prevC, hprC, txns, resolutions);
+        if (hpr.length === 0 && txns.length === 0) return null;
+        const hprC = hpr.map(l => ({ ...l, name: canon(l.name) }));
+        return accumulateReportLots(prevC, hprC, txns, resolutions, false);
       }
       // Replace mode: the Holding Period Report IS the lots; the transaction statement
       // supplies corp-action detection + the net (buy−sell) cross-check.
@@ -80,6 +84,39 @@ export default function OpeningBasisImport() {
       return reconstructOpeningLots(txns, hpLots, resolutions);
     } catch { return null; }
   }, [mode, txnText, hpText, resolutions, master, prevLots]);
+
+  // Batch mode: this slice's transactions, canonicalized + parsed once (reused for the
+  // running-position accumulation and the chronology/overlap check).
+  const sliceTxns = useMemo(() => {
+    if (mode !== 'accumulate' || !master || !txnText) return [];
+    try {
+      const canon = (n: string) => { const e = lookupScrip(master, '', n).entry; return e ? e.canonicalName : n; };
+      return parseTransactionStatement(txnText).map(t => ({ ...t, name: canon(t.name) }));
+    } catch { return []; }
+  }, [mode, master, txnText]);
+
+  // The accumulated transaction POSITION = the persisted running net + this slice folded on
+  // top. This is the "position from transactions" the user compares to the dated broker
+  // holding report each batch (a verification aid — NOT written into the FY26 lots).
+  const mergedNet = useMemo<TxnNetMap>(
+    () => (mode === 'accumulate' ? advanceTxnNet(txnNet, sliceTxns, resolutions) : {}),
+    [mode, txnNet, sliceTxns, resolutions],
+  );
+  const netRows = useMemo<TxnNetEntry[]>(
+    () => Object.keys(mergedNet).map(k => mergedNet[k])
+      .filter(e => Math.abs(e.qty) > 1e-6 || (e.brokerBal ?? 0) !== 0)
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    [mergedNet],
+  );
+
+  // Chronology guard: transaction slices must go oldest→newest (a SPLIT rescales only shares
+  // held before it). Warn if this slice reaches on/before what's already been processed.
+  const sliceDates = useMemo(() => {
+    const iso = sliceTxns.map(t => t.iso).filter(Boolean).sort();
+    return { min: iso[0] || '', max: iso[iso.length - 1] || '' };
+  }, [sliceTxns]);
+  const overlapsProcessed = !!(sliceDates.min && obState.processedThrough && sliceDates.min <= obState.processedThrough);
+  const throughIso = [obState.processedThrough, sliceDates.max].filter(Boolean).sort().pop() || '';
 
   // Pull previously-saved corp-action resolutions for this portfolio, so a re-import
   // (or the next slice) doesn't re-ask. Re-runs when the portfolio or txn file changes.
@@ -105,12 +142,13 @@ export default function OpeningBasisImport() {
   useEffect(() => {
     let cancelled = false;
     const port = portfolioById(portfolioId);
-    if (mode !== 'accumulate' || !port || !hasValidGoogleToken()) { setPrevLots([]); setObState({ processedThrough: '', batches: 0 }); return; }
+    if (mode !== 'accumulate' || !port || !hasValidGoogleToken()) { setPrevLots([]); setTxnNet({}); setObState({ processedThrough: '', batches: 0 }); return; }
     setLoadingPrev(true);
     Promise.all([
       loadOpeningHoldings(port.sheetId).catch(() => [] as OpeningSeedLot[]),
       loadOpeningBasisState(port.sheetId).catch(() => ({ processedThrough: '', batches: 0 } as OpeningBasisState)),
-    ]).then(([lots, st]) => { if (!cancelled) { setPrevLots(lots); setObState(st); } })
+      loadOpeningTxnNet(port.sheetId).catch(() => ({} as TxnNetMap)),
+    ]).then(([lots, st, net]) => { if (!cancelled) { setPrevLots(lots); setObState(st); setTxnNet(net); } })
       .finally(() => { if (!cancelled) setLoadingPrev(false); });
     return () => { cancelled = true; };
   }, [mode, portfolioId, reloadTick]);
@@ -202,20 +240,24 @@ export default function OpeningBasisImport() {
       if (m && !master) setMaster(m);
       const lots = resolveLots(m, result.lots);
       await saveOpeningHoldings(port.sheetId, lots);
-      if (mode !== 'accumulate') await persistCorpActions(port.sheetId);   // batch (HPR) corp actions are cross-check only
+      await persistCorpActions(port.sheetId);   // save + merge resolved bonus/split/rights (both modes, per slice)
 
       if (mode === 'accumulate') {
-        // Append this HPR slice; DON'T rebuild yet (that's the Finish step) — the running
-        // position is partial until the last slice, so FY26 numbers aren't meaningful.
+        // Append this HPR slice + fold this slice's transactions into the running position;
+        // DON'T rebuild yet (that's the Finish step) — the position is partial until the last
+        // slice, so FY26 numbers aren't meaningful.
         const added = Math.max(0, lots.length - prevLots.length);
         const nextBatch = (obState.batches || 0) + 1;
-        await saveOpeningBasisState(port.sheetId, { processedThrough: obState.processedThrough, batches: nextBatch });
-        setLastBatch({ n: nextBatch, through: obState.processedThrough, lots: lots.length });
-        toast.success(`Slice ${nextBatch} added — ${added.toLocaleString('en-IN')} new lot(s); running position now ${lots.length} lots.`);
+        await saveOpeningTxnNet(port.sheetId, mergedNet);   // persist the accumulated transaction position
+        await saveOpeningBasisState(port.sheetId, { processedThrough: throughIso || obState.processedThrough, batches: nextBatch });
+        setLastBatch({ n: nextBatch, through: throughIso || obState.processedThrough, lots: lots.length });
+        toast.success(`Slice ${nextBatch} added — ${added.toLocaleString('en-IN')} new lot(s); running position now ${lots.length} lots${throughIso ? `, txns through ${throughIso}` : ''}.`);
         setHpText(null); setHpName('');      // ready for the next HPR slice
-        setReloadTick(t => t + 1);           // refresh the running-position banner
+        setTxnText(null); setTxnName('');    // and the next transaction slice
+        setReloadTick(t => t + 1);           // refresh the running position (+ reloads saved corp actions & txn net)
       } else {
         await resetOpeningBasisState(port.sheetId).catch(() => {});   // a fresh one-shot supersedes any batches
+        await resetOpeningTxnNet(port.sheetId).catch(() => {});       // …and its accumulated transaction position
         let holdingErr: string | undefined, cgErr: string | undefined;
         try { await rebuildHoldingTab(port.sheetId); } catch (e: any) { holdingErr = e?.result?.error?.message || e?.message || 'Unknown error'; }
         try { await syncCapitalGains(port.sheetId); } catch (e: any) { cgErr = e?.result?.error?.message || e?.message || 'Unknown error'; }
@@ -302,13 +344,13 @@ export default function OpeningBasisImport() {
                       <span className="inline-flex items-center gap-1.5 font-bold"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading running position…</span>
                     ) : (obState.batches > 0 || prevLots.length > 0) ? (
                       <>
-                        <p className="font-bold">Continuing {port?.code}: {prevLots.length.toLocaleString('en-IN')} lots across {prevScrips.toLocaleString('en-IN')} scrips ({Math.round(prevQty).toLocaleString('en-IN')} sh){obState.batches > 0 ? ` · ${obState.batches} slice(s)` : ''}.</p>
-                        <p className="mt-0.5">Upload the next <strong>Holding Period Report</strong> slice — any order. Lots are appended and de-duplicated, so re-uploading a slice is safe. Add the full <strong>Transaction Statement</strong> on your last slice for the buy−sell cross-check.</p>
+                        <p className="font-bold">Continuing {port?.code}: {prevLots.length.toLocaleString('en-IN')} lots across {prevScrips.toLocaleString('en-IN')} scrips ({Math.round(prevQty).toLocaleString('en-IN')} sh){obState.batches > 0 ? ` · ${obState.batches} slice(s)` : ''}{obState.processedThrough ? ` · txns through ${obState.processedThrough}` : ''}.</p>
+                        <p className="mt-0.5">Upload the next <strong>Holding Period Report</strong> slice (lots — appended & de-duplicated, any order) plus its <strong>Transaction Statement</strong> slice. The transactions build the <strong>running position below</strong> — check it against your dated broker holding report and fix any Bonus / Split / Rights (it pops up) before the next slice. Feed transaction slices <strong>oldest → newest</strong>.</p>
                       </>
                     ) : (
                       <>
                         <p className="font-bold">No running position yet for {port?.code}.</p>
-                        <p className="mt-0.5">Upload your first <strong>Holding Period Report</strong> slice — its lots are taken <strong>verbatim</strong> (real date + qty + cost) and appended; slice it however your broker exports it. Add the full <strong>Transaction Statement</strong> on your last slice to cross-check the net position.</p>
+                        <p className="mt-0.5">Upload your first <strong>Holding Period Report</strong> slice (lots — taken <strong>verbatim</strong>: real date + qty + cost) plus its <strong>Transaction Statement</strong> slice. The transactions build the <strong>running position below</strong>, which you compare to your dated broker holding report each batch. Feed transaction slices <strong>oldest → newest</strong> and resolve any Bonus / Split / Rights as it pops up.</p>
                       </>
                     )}
                   </div>
@@ -334,7 +376,7 @@ export default function OpeningBasisImport() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {([
               { kind: 'hp' as const, title: mode === 'accumulate' ? 'Holding Period Report Slice' : 'Holding Period Report', sub: mode === 'accumulate' ? "This slice's lot-wise rows · Company · Date · Qty · Purchase Amount — taken verbatim & appended" : 'Lot-wise Company · Date · Qty · Purchase Amount — the authoritative opening lots (cost + real dates)', name: hpName, req: true, show: true },
-              { kind: 'txn' as const, title: mode === 'accumulate' ? 'Transaction Statement (final slice)' : 'Transaction Statement', sub: mode === 'accumulate' ? 'Optional — the full inception→31-Mar Buy / Sell, for the net cross-check on your last slice' : 'Inception → 31-Mar-2025 · Buy / Sell (+ Bonus / Split / Rights) — for the net cross-check & corp actions', name: txnName, req: mode === 'replace', show: true },
+              { kind: 'txn' as const, title: mode === 'accumulate' ? 'Transaction Statement Slice' : 'Transaction Statement', sub: mode === 'accumulate' ? "This slice's Buy / Sell (oldest→newest) — builds the running position below; Bonus / Split / Rights pop up to resolve (saved across slices)." : 'Inception → 31-Mar-2025 · Buy / Sell (+ Bonus / Split / Rights) — for the net cross-check & corp actions', name: txnName, req: mode === 'replace', show: true },
             ]).filter(z => z.show).map(z => (
               <label key={z.kind}
                 className="rounded-2xl border-2 border-dashed border-slate-200 bg-white hover:border-indigo-300 p-6 text-center cursor-pointer transition-all block">
@@ -346,6 +388,15 @@ export default function OpeningBasisImport() {
               </label>
             ))}
           </div>
+
+          {/* Chronology guard — transaction slices must go oldest→newest so a SPLIT rescales
+              only shares held before it. */}
+          {mode === 'accumulate' && overlapsProcessed && (
+            <div className="flex items-start gap-2 -mt-1 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>This slice starts <strong>{sliceDates.min}</strong>, on/before what's already processed (<strong>{obState.processedThrough}</strong>). Feed slices oldest→newest and non-overlapping, or the running position may double-count.</span>
+            </div>
+          )}
 
           {parseError && (
             <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
@@ -382,7 +433,7 @@ export default function OpeningBasisImport() {
                 unresolvedCount > 0 ? (
                   <div className="m-4 p-3 rounded-xl border border-indigo-200 bg-indigo-50 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-2 text-[12px] font-bold text-indigo-800">
-                      <Wand2 className="w-4 h-4" /> {unresolvedCount} corporate action(s) detected — resolve them to sharpen the buy−sell cross-check (optional; lots come from the report either way).
+                      <Wand2 className="w-4 h-4" /> {unresolvedCount} corporate action(s) detected — resolve them so the {mode === 'accumulate' ? 'running position matches your broker report' : 'buy−sell cross-check is exact'} (lots come from the report either way).
                     </div>
                     <button onClick={openModal} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer">Resolve now</button>
                   </div>
@@ -442,6 +493,53 @@ export default function OpeningBasisImport() {
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Running position from the transactions (batch mode) — the check the user makes
+              against the dated broker holding report each batch. Verification only; NOT written
+              into the FY26 lots (those come from the HPR). */}
+          {mode === 'accumulate' && netRows.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 border-b border-slate-150 bg-slate-50">
+                <div className="text-xs font-bold text-slate-700">
+                  <span className="inline-flex items-center gap-1.5"><CalendarClock className="w-4 h-4 text-indigo-600" /> Position from transactions{throughIso ? ` through ${throughIso}` : ''} — {netRows.length} scrip(s)</span>
+                </div>
+                {(() => {
+                  const gaps = netRows.filter(e => e.brokerBal != null && Math.abs(e.qty - (e.brokerBal ?? 0)) > 1e-6).length;
+                  return gaps > 0
+                    ? <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-amber-700"><AlertTriangle className="w-4 h-4" /> {gaps} differ from broker balance</span>
+                    : <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-emerald-700"><CheckCircle2 className="w-4 h-4" /> matches broker balance</span>;
+                })()}
+              </div>
+              <p className="px-5 pt-3 text-[11px] text-slate-500">Compare this against your broker holding report for this date. A gap is usually an unresolved Bonus / Split / Rights — resolve it above, then re-check before adding the next slice.</p>
+              <div className="overflow-x-auto max-h-[360px] overflow-y-auto mt-2">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-[#f8fafc] border-b border-slate-200 text-[11px] font-bold text-slate-600 uppercase tracking-wider sticky top-0">
+                    <tr>
+                      <th className="px-5 py-2.5">Security</th>
+                      <th className="px-5 py-2.5 text-right">Computed Qty</th>
+                      <th className="px-5 py-2.5 text-right">Broker Bal</th>
+                      <th className="px-5 py-2.5 text-right">Δ</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {netRows.slice(0, 800).map((e, i) => {
+                      const diff = e.brokerBal == null ? null : e.qty - e.brokerBal;
+                      const off = diff != null && Math.abs(diff) > 1e-6;
+                      const fmtQ = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 4 });
+                      return (
+                        <tr key={i} className={`hover:bg-slate-50 ${off ? 'bg-amber-50/40' : ''}`}>
+                          <td className="px-5 py-2 font-medium text-slate-800">{e.name}</td>
+                          <td className="px-5 py-2 text-right font-mono text-slate-700">{fmtQ(e.qty)}</td>
+                          <td className="px-5 py-2 text-right font-mono text-slate-500">{e.brokerBal == null ? '—' : fmtQ(e.brokerBal)}</td>
+                          <td className={`px-5 py-2 text-right font-mono font-bold ${off ? 'text-amber-700' : 'text-slate-300'}`}>{diff == null ? '' : off ? (diff > 0 ? '+' : '') + fmtQ(diff) : '0'}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

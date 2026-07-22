@@ -416,6 +416,59 @@ export function netQtyFromTxns(
   return q;
 }
 
+/** One scrip's running position as reconstructed from the transaction statement, for the
+ *  batch-wise verification display: `qty` is OUR additive computation (Σbuy − Σsell with each
+ *  resolved bonus/rights/split applied in date order — this is what surfaces a missed corp
+ *  action), and `brokerBal` is the broker's own running balance from the statement, if it has
+ *  one, shown alongside as a reference. This is a CHECK aid only — it is not written into the
+ *  FY26 lots (those come from the Holding Period Report). */
+export interface TxnNetEntry { name: string; qty: number; brokerBal: number | null; }
+
+/**
+ * Advance the accumulated transaction position by ONE chronological slice. `prev` is the
+ * running position carried in from earlier slices (its own persisted tab); this slice's rows
+ * are applied ON TOP, per scrip, in date order. Scrips absent from this slice carry forward
+ * unchanged. Slices must be chronological + non-overlapping (a SPLIT must only rescale shares
+ * already held before it) — the caller warns on an out-of-order slice. Additive by design:
+ * the broker's BAL QTY is captured as `brokerBal` for reference but NOT used as the computed
+ * qty, so an unresolved bonus/split shows up as a computed-vs-broker gap the user can fix.
+ * Pure (no gapi).
+ */
+export function advanceTxnNet(
+  prev: Record<string, TxnNetEntry>,
+  txns: TxnStatementRow[],
+  resolutions: Record<string, ActionResolution> = {},
+): Record<string, TxnNetEntry> {
+  const out: Record<string, TxnNetEntry> = {};
+  for (const k in prev) out[k] = { ...prev[k] };
+
+  const byName = new Map<string, TxnStatementRow[]>();
+  for (const t of txns) { const k = obKey(t.name); (byName.get(k) || byName.set(k, []).get(k)!).push(t); }
+
+  for (const [k, rowsRaw] of byName) {
+    const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
+    let q = out[k]?.qty ?? 0;
+    const name = out[k]?.name || rows[0].name;
+    let brokerBal = out[k]?.brokerBal ?? null;
+    for (const row of rows) {
+      const kind = classifyTxn(row.type);
+      if (kind === "BUY") q += row.qty;
+      else if (kind === "SELL") q -= Math.abs(row.qty);
+      else if (kind === "BONUS" || kind === "RIGHT") {
+        const res = resolutions[corpActionKey(k, kind, row.iso)];
+        if (res && res.den > 0) q += q * (res.num / res.den);
+      } else if (kind === "SPLIT") {
+        const res = resolutions[corpActionKey(k, kind, row.iso)];
+        if (res && res.den > 0 && res.num > 0) q *= (res.num / res.den);
+      }
+    }
+    // Broker's own running balance (latest chronological value in this slice), if present.
+    if (rows.some(r => r.balQty !== 0)) brokerBal = rows[rows.length - 1].balQty;
+    out[k] = { name, qty: r6(q), brokerBal };
+  }
+  return out;
+}
+
 /**
  * Reconstruct dated opening lots as of 1-Apr-2025 — **Holding-Period-Report model**
  * (user redesign 2026-07-21).
@@ -666,17 +719,23 @@ export function accumulateOpeningLots(
  * genuinely identical lots collapse to one — rare, and the final-slice txn cross-check
  * flags it as a qty shortfall.)
  *
- * `txns` (the FULL transaction statement) is optional and supplied only on the FINAL slice,
- * to run the same buy−sell **net cross-check** as `reconstructOpeningLots`: each accumulated
- * scrip's HPR qty vs its transaction net, and a scrip with a net position in the txns but
- * absent from every HPR slice is flagged (no lot). Names in `prevLots`/`hprLots`/`txns` must
- * already be canonicalized by the caller (scrip master). Pure (no gapi).
+ * `txns` is fed in the SAME batch-wise streak as the HPR — a transaction slice per HPR
+ * slice. On EVERY slice it is scanned for Bonus / Split / Rights, which surface as
+ * `pendingActions` (the resolve-ratio popup); resolutions persist + merge across slices so
+ * a later slice never re-asks an earlier one's action. The buy−sell **net cross-check**
+ * (each accumulated scrip's HPR qty vs its transaction net, plus a net-in-txns-but-not-in-
+ * any-HPR-slice flag), however, only runs when `crossCheck` is true — the caller's "this is
+ * my COMPLETE transaction statement" flag (typically ticked on the last slice). A PARTIAL
+ * transaction slice would otherwise show false shortfalls against the full HPR total, so the
+ * check waits for the whole statement. Names in `prevLots`/`hprLots`/`txns` must already be
+ * canonicalized by the caller (scrip master). Pure (no gapi).
  */
 export function accumulateReportLots(
   prevLots: SeedLot[],
   hprLots: HoldingPeriodLot[],
   txns: TxnStatementRow[] = [],
   resolutions: Record<string, ActionResolution> = {},
+  crossCheck: boolean = false,
 ): ReconstructResult {
   const lots: OpeningLot[] = [];
   const issues: ReconIssue[] = [];
@@ -715,12 +774,14 @@ export function accumulateReportLots(
   }
   if (dup > 0) issues.push({ name: "—", message: `${dup} lot(s) in this slice were already in the running position — skipped (re-uploading a slice is safe).` });
 
-  // Transactions → corp-action detection + the FINAL-slice net cross-check (both optional).
+  // Transactions → corp-action detection (EVERY slice) + the net cross-check (only when the
+  // caller flags this as the COMPLETE statement — a partial slice can't be checked against
+  // the full HPR total without false shortfalls).
   const byName = new Map<string, TxnStatementRow[]>();
   for (const t of txns) { const k = obKey(t.name); (byName.get(k) || byName.set(k, []).get(k)!).push(t); }
   const pendingActions = collectPendingActions(byName);
 
-  if (txns.length) {
+  if (txns.length && crossCheck) {
     // 1. Each accumulated HPR scrip vs its transaction net (buy − sell).
     for (const [k, surv] of survByScrip) {
       const displayName = survName.get(k) || k;
