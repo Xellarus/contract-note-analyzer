@@ -1,7 +1,7 @@
 import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
-  normName, loadScripMaster, resolveScrip, lookupScrip, ScripMaster, ScripEntry,
+  normName, loadScripMaster, resolveScrip, lookupScrip, findNameCollisions, ScripMaster, ScripEntry, NameCollision,
   SCRIP_MASTER_SPREADSHEET_ID,
 } from "./scripMaster";
 import { loadScripPrices, makePriceResolver } from "./scripPrices";
@@ -22,6 +22,9 @@ export interface RebuildHoldingResult {
   tradeRows: number;
   unresolved: UnresolvedScrip[];
   master: ScripMaster;
+  // Names this portfolio uses that map to 2+ scrip-master entries (e.g. a rename left an
+  // old entry behind) → those trades won't merge into one holding. Surfaced as a warning.
+  nameCollisions: NameCollision[];
 }
 
 interface HoldingAcc {
@@ -317,20 +320,28 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   const resolve = (isin: string, name: string): HoldingAcc => {
     const r = resolveScrip(master, isin, name);
     let key: string;
+    // When the scrip resolves, group AND display under the master's CANONICAL name +
+    // ISIN — not whatever raw name the trades happen to carry. So renaming a scrip in the
+    // master (new name, old name kept as an alias) makes the Holding tab show the NEW name
+    // after a rebuild instead of the old one; all its trades still merge under one key
+    // (mirrors computeHoldingsAsOf, which already does this).
+    let displayName = name, displayIsin = (isin || "").trim();
     if (r.status === "resolved") {
       key = r.key;
+      displayName = r.entry.canonicalName;
+      if (!displayIsin) displayIsin = r.entry.isin || "";
     } else {
-      key = (isin || "").trim() || normName(name);
+      key = displayIsin || normName(name);
       if (!unresolvedMap.has(key)) {
         unresolvedMap.set(key, { name, isin, candidates: r.status === "ambiguous" ? r.candidates : [] });
       }
     }
     let h = byKey.get(key);
     if (!h) {
-      h = { isin, securityName: name, quantity: 0, avgBuyPrice: 0 };
+      h = { isin: displayIsin, securityName: displayName, quantity: 0, avgBuyPrice: 0 };
       byKey.set(key, h);
-    } else if (isin && !h.isin) {
-      h.isin = isin;
+    } else if (displayIsin && !h.isin) {
+      h.isin = displayIsin;
     }
     return h;
   };
@@ -382,6 +393,12 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     h.avgBuyPrice = newQty > 0 ? ((h.quantity * h.avgBuyPrice) + (ol.qty * ol.costPerShare)) / newQty : 0;
     h.quantity = newQty;
   }
+
+  // Every name this portfolio actually references (trades + opening lots), normalized —
+  // used below to flag ONLY the scrip-master name collisions that affect THIS portfolio.
+  const seenNames = new Set<string>();
+  for (const t of trades) seenNames.add(normName(t.name));
+  for (const ol of openingLots) seenNames.add(normName(ol.name));
 
   for (const ev of hevents) {
     if (ev.ca) { ev.ca.type === "Merger" ? applyMergerHolding(ev.ca) : applyDemergerHolding(ev.ca); continue; }
@@ -446,12 +463,19 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     resource: { values: rows },
   });
 
+  // Name collisions that affect THIS portfolio: a name it uses is claimed by 2+ master
+  // entries (only one wins the lookup) → those trades split instead of merging. Common
+  // after a rename where the old entry wasn't removed. Scoped to seenNames so unrelated
+  // collisions elsewhere in the shared master don't create noise here.
+  const nameCollisions = findNameCollisions(master).filter(c => seenNames.has(c.key));
+
   return {
     positions: active.length,
     totalInvested: parseFloat(totalInvested.toFixed(2)),
     tradeRows: trades.length,
     unresolved: [...unresolvedMap.values()],
     master,
+    nameCollisions,
   };
 }
 

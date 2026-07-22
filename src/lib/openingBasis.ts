@@ -653,35 +653,37 @@ export function accumulateOpeningLots(
 }
 
 /**
- * BATCH accumulate from a **Holding Period Report** delivered in slices. Unlike the
- * transaction replay, HPR lots are the broker's AUTHORITATIVE surviving lots as of
- * 31-Mar-2025 (real date + qty + cost, already net of every rights/bonus/split/intraday
- * event) — so there's no FIFO, no seam, and no corp actions. Each slice simply APPENDS
- * its lots to the running position (`prevLots` = current Opening Holdings) and the whole
- * union is re-emitted to overwrite the tab.
+ * BATCH accumulate from a **Holding Period Report** delivered in slices — the ONLY batch
+ * lot source since the 2026-07-21 redesign (the transaction-FIFO batch path was retired
+ * from the UI). HPR lots are the broker's AUTHORITATIVE surviving lots (real date + qty +
+ * cost, already net of every rights/bonus/split/intraday event) — no FIFO, no seam, no
+ * corp actions driving lots. Each slice APPENDS its lots to the running position
+ * (`prevLots` = current Opening Holdings) and the whole union is re-emitted to overwrite
+ * the tab.
  *
- * Deduped by an exact lot signature (scrip · date · qty · cost) so re-uploading a slice
- * is idempotent and an accidental cross-slice overlap can't double-count. (Trade-off: two
- * genuinely identical lots collapse to one — rare, and the final-slice reconciliation
- * against the 31-Mar holding statement flags it as a qty shortfall.)
+ * Deduped by an exact lot signature (scrip · date · qty · cost) so re-uploading a slice is
+ * idempotent and an accidental cross-slice overlap can't double-count. (Trade-off: two
+ * genuinely identical lots collapse to one — rare, and the final-slice txn cross-check
+ * flags it as a qty shortfall.)
  *
- * Names in `prevLots` and `hprLots` must already be canonicalized by the caller (scrip
- * master) so dedup + per-scrip reconciliation line up. `holdings` is supplied only on the
- * FINAL slice to reconcile the finished position + capture sectors. Pure (no gapi).
+ * `txns` (the FULL transaction statement) is optional and supplied only on the FINAL slice,
+ * to run the same buy−sell **net cross-check** as `reconstructOpeningLots`: each accumulated
+ * scrip's HPR qty vs its transaction net, and a scrip with a net position in the txns but
+ * absent from every HPR slice is flagged (no lot). Names in `prevLots`/`hprLots`/`txns` must
+ * already be canonicalized by the caller (scrip master). Pure (no gapi).
  */
 export function accumulateReportLots(
   prevLots: SeedLot[],
   hprLots: HoldingPeriodLot[],
-  holdings: HoldingStatementRow[] = [],
+  txns: TxnStatementRow[] = [],
+  resolutions: Record<string, ActionResolution> = {},
 ): ReconstructResult {
-  const sectors: { name: string; sector: string }[] = [];
-  for (const h of holdings) if (h.sector) sectors.push({ name: h.name, sector: h.sector });
-
   const lots: OpeningLot[] = [];
   const issues: ReconIssue[] = [];
-  let shortLots = 0, longLots = 0, zeroCost = 0, mismatched = 0, reconciled = 0, noTxn = 0;
+  let shortLots = 0, longLots = 0, zeroCost = 0, mismatched = 0, reconciled = 0, noTxn = 0, missingFromReport = 0;
   const seen = new Set<string>();
   const survByScrip = new Map<string, { qty: number; inv: number }>();
+  const survName = new Map<string, string>();
 
   const add = (name: string, isin: string, iso: string, qty: number, cps: number, note: string): boolean => {
     if (!(qty > 0)) return false;
@@ -695,7 +697,9 @@ export function accumulateReportLots(
     longTerm ? longLots++ : shortLots++;
     const inv = r2(qty * c);
     lots.push({ name, isin: isin || "", acqDate: iso, qty: r6(qty), costPerShare: c, invested: inv, longTerm, note });
-    const k = obKey(name); const cur = survByScrip.get(k) || { qty: 0, inv: 0 };
+    const k = obKey(name);
+    if (!survName.has(k)) survName.set(k, name);
+    const cur = survByScrip.get(k) || { qty: 0, inv: 0 };
     cur.qty += qty; cur.inv += inv; survByScrip.set(k, cur);
     return true;
   };
@@ -711,28 +715,45 @@ export function accumulateReportLots(
   }
   if (dup > 0) issues.push({ name: "—", message: `${dup} lot(s) in this slice were already in the running position — skipped (re-uploading a slice is safe).` });
 
-  // Final-slice reconciliation against the 31-Mar-2025 holding statement (optional).
-  if (holdings.length) {
-    for (const h of holdings) {
-      const k = obKey(h.name); const surv = survByScrip.get(k);
-      if (!surv || surv.qty <= 0.001) { noTxn++; issues.push({ name: h.name, message: `not in any Holding Period Report slice yet — no opening lot created. Include it in a slice.` }); continue; }
-      if (Math.abs(surv.qty - h.qty) > 0.001) {
-        mismatched++;
-        issues.push({ name: h.name, message: `qty mismatch — report lots ${fmt(surv.qty)} vs holding ${fmt(h.qty)} (Δ ${fmt(surv.qty - h.qty)}). A slice is missing lots, or a lot was duplicated/collapsed.` });
-      } else {
-        reconciled++;
-        if (h.invested > 0 && Math.abs(surv.inv - h.invested) > Math.max(1, 0.005 * h.invested)) {
-          issues.push({ name: h.name, message: `qty ties out; report value ₹${fmt(r2(surv.inv))} vs holding ₹${fmt(h.invested)} — brokerage/charges convention.` });
+  // Transactions → corp-action detection + the FINAL-slice net cross-check (both optional).
+  const byName = new Map<string, TxnStatementRow[]>();
+  for (const t of txns) { const k = obKey(t.name); (byName.get(k) || byName.set(k, []).get(k)!).push(t); }
+  const pendingActions = collectPendingActions(byName);
+
+  if (txns.length) {
+    // 1. Each accumulated HPR scrip vs its transaction net (buy − sell).
+    for (const [k, surv] of survByScrip) {
+      const displayName = survName.get(k) || k;
+      const rows = byName.get(k);
+      if (rows && rows.length) {
+        const net = netQtyFromTxns(rows, resolutions, k);
+        if (Math.abs(net - surv.qty) > 0.001) {
+          mismatched++;
+          issues.push({ name: displayName, message: `transaction net (buy − sell) is ${fmt(net)} sh but the Holding Period Report slices total ${fmt(surv.qty)} (Δ ${fmt(net - surv.qty)}). Using the report's lots — check a slice or a bonus/split/rights entry.` });
+        } else {
+          reconciled++;
         }
+      } else {
+        noTxn++;
+        issues.push({ name: displayName, message: `in the Holding Period Report (${fmt(surv.qty)} sh) but no transactions found to cross-check.` });
+      }
+    }
+    // 2. Net position in the txns but absent from every HPR slice → skip + flag.
+    for (const [k, rows] of byName) {
+      if (survByScrip.has(k)) continue;
+      const net = netQtyFromTxns(rows, resolutions, k);
+      if (net > 0.001) {
+        missingFromReport++;
+        issues.push({ name: rows[0].name, message: `net ${fmt(net)} sh in the transaction statement but not in any Holding Period Report slice — no opening lot. Add it to a slice.` });
       }
     }
   }
 
   return {
-    lots, issues, sectors, pendingActions: [],
+    lots, issues, sectors: [], pendingActions,
     summary: {
-      holdings: holdings.length, lots: lots.length, shortLots, longLots, zeroCost,
-      buys: 0, sells: 0, corpActions: 0, reconciled, mismatched, noTxn, costOverrides: lots.length,
+      holdings: survByScrip.size, lots: lots.length, shortLots, longLots, zeroCost,
+      buys: 0, sells: 0, corpActions: pendingActions.length, reconciled, mismatched, noTxn, costOverrides: lots.length, missingFromReport,
     },
   };
 }

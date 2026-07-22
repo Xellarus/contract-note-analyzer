@@ -330,6 +330,32 @@ export function lookupScrip(master: ScripMaster, isin: string, name: string): Sc
   return { entry: null, foundBy: "none" };
 }
 
+/** A normalized name string that maps to MORE THAN ONE distinct master entry — so a
+ *  name-only lookup for it is ambiguous: only ONE entry wins the slot (`claimAlias`
+ *  precedence / last-writer), and trades under that name won't reliably merge with the
+ *  intended scrip. The classic cause is a botched rename: adding a NEW entry (new
+ *  canonical name + old name as an alias) while the OLD entry (old name as its canonical)
+ *  still exists — the old name keeps resolving to the old entry, splitting the position.
+ *  `entries` lists every canonical name claiming the string (2+); `key` is its normName. */
+export interface NameCollision { key: string; name: string; entries: string[]; }
+export function findNameCollisions(master: ScripMaster): NameCollision[] {
+  const byNorm = new Map<string, { raw: string; entries: Set<ScripEntry> }>();
+  for (const e of master.entries) {
+    for (const raw of e.rawAliases) {
+      const a = normName(raw);
+      if (!a) continue;
+      let rec = byNorm.get(a);
+      if (!rec) { rec = { raw, entries: new Set() }; byNorm.set(a, rec); }
+      rec.entries.add(e);
+    }
+  }
+  const out: NameCollision[] = [];
+  for (const [key, rec] of byNorm) {
+    if (rec.entries.size >= 2) out.push({ key, name: rec.raw, entries: [...rec.entries].map(e => e.canonicalName) });
+  }
+  return out;
+}
+
 /** Add an alias / fill an ISIN on an existing entry and re-index it (in memory). */
 function enrich(master: ScripMaster, entry: ScripEntry, isin: string, name: string) {
   let changed = false;

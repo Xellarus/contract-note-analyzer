@@ -3,13 +3,12 @@ import {
   UploadCloud, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, AlertTriangle, X, Layers, CalendarClock, Link2Off, Wand2, Pencil, Layers3, RotateCcw, History,
 } from 'lucide-react';
 import {
-  parseHoldingStatement, parseTransactionStatement, parseHoldingPeriodReport, reconstructOpeningLots, accumulateOpeningLots, accumulateReportLots,
+  parseTransactionStatement, parseHoldingPeriodReport, reconstructOpeningLots, accumulateReportLots,
   ReconstructResult, OpeningLot, ActionResolution,
 } from '../lib/openingBasis';
 import { saveOpeningHoldings, loadOpeningHoldings, OpeningSeedLot } from '../lib/openingHoldings';
 import { loadOpeningCorpActions, loadOpeningCorpActionRows, saveOpeningCorpActions, SavedCorpAction } from '../lib/openingCorpActions';
 import { loadOpeningBasisState, saveOpeningBasisState, resetOpeningBasisState, OpeningBasisState } from '../lib/openingBasisState';
-import { saveScripIndustries } from '../lib/scripIndustries';
 import { rebuildHoldingTab, syncCapitalGains } from '../lib/holdingsCalc';
 import { PORTFOLIOS, portfolioById } from '../lib/portfolios';
 import { loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
@@ -23,26 +22,16 @@ const resolveLots = (m: ScripMaster | null, lots: OpeningLot[]): OpeningLot[] =>
 
 const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
-// ── date helpers for the batch overlap guard ────────────────────────────────
-const isoFromTs = (ts: number) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-const tsFromIso = (iso: string) => { const m = (iso || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : 0; };
-const prettyDate = (iso: string) => { const m = (iso || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/); return m ? `${m[3].padStart(2, '0')}-${m[2].padStart(2, '0')}-${m[1]}` : (iso || '—'); };
 
 interface WriteResult { lots: number; holdingErr?: string; cgErr?: string; }
 type DraftRow = { num: string; den: string; price: string };
 type Mode = 'replace' | 'accumulate';
-// In Add-batch mode, the slices are either raw transactions (replayed) or Holding
-// Period Report lots (taken verbatim, appended). S713 uses the report.
-type BatchSource = 'txn' | 'hpr';
 
 export default function OpeningBasisImport() {
   const [portfolioId, setPortfolioId] = useState(PORTFOLIOS[0]?.id || '');
   const [mode, setMode] = useState<Mode>('replace');
-  const [batchSource, setBatchSource] = useState<BatchSource>('hpr');
-  const [holdingText, setHoldingText] = useState<string | null>(null);
   const [txnText, setTxnText] = useState<string | null>(null);
-  const [hpText, setHpText] = useState<string | null>(null);   // holding-period report (accurate LT cost)
-  const [holdingName, setHoldingName] = useState('');
+  const [hpText, setHpText] = useState<string | null>(null);   // holding-period report — the lot source
   const [txnName, setTxnName] = useState('');
   const [hpName, setHpName] = useState('');
   const [parseError, setParseError] = useState<string | null>(null);
@@ -74,17 +63,13 @@ export default function OpeningBasisImport() {
         if (!master) return null;
         const canon = (n: string) => { const e = lookupScrip(master, '', n).entry; return e ? e.canonicalName : n; };
         const prevC = prevLots.map(l => ({ name: canon(l.name), isin: l.isin, acqDate: l.acqDate, qty: l.qty, costPerShare: l.costPerShare, note: l.note }));
-        const holdings = holdingText ? parseHoldingStatement(holdingText).map(h => ({ ...h, name: canon(h.name) })) : [];
-        if (batchSource === 'hpr') {
-          const hpr = hpText ? parseHoldingPeriodReport(hpText) : [];
-          if (hpr.length === 0) return null;
-          const hprC = hpr.map(l => ({ ...l, name: canon(l.name) }));
-          return accumulateReportLots(prevC, hprC, holdings);
-        }
-        const txns = txnText ? parseTransactionStatement(txnText) : [];
-        if (txns.length === 0) return null;
-        const txnsC = txns.map(t => ({ ...t, name: canon(t.name) }));
-        return accumulateOpeningLots(prevC, txnsC, resolutions, holdings);
+        // Batch = Holding Period Report slices (appended verbatim). The transaction statement
+        // is optional (final slice) and only runs the buy−sell net cross-check.
+        const hpr = hpText ? parseHoldingPeriodReport(hpText) : [];
+        if (hpr.length === 0) return null;
+        const hprC = hpr.map(l => ({ ...l, name: canon(l.name) }));
+        const txns = txnText ? parseTransactionStatement(txnText).map(t => ({ ...t, name: canon(t.name) })) : [];
+        return accumulateReportLots(prevC, hprC, txns, resolutions);
       }
       // Replace mode: the Holding Period Report IS the lots; the transaction statement
       // supplies corp-action detection + the net (buy−sell) cross-check.
@@ -94,7 +79,7 @@ export default function OpeningBasisImport() {
       const txns = parseTransactionStatement(txnText);
       return reconstructOpeningLots(txns, hpLots, resolutions);
     } catch { return null; }
-  }, [mode, batchSource, holdingText, txnText, hpText, resolutions, master, prevLots]);
+  }, [mode, txnText, hpText, resolutions, master, prevLots]);
 
   // Pull previously-saved corp-action resolutions for this portfolio, so a re-import
   // (or the next slice) doesn't re-ask. Re-runs when the portfolio or txn file changes.
@@ -143,38 +128,22 @@ export default function OpeningBasisImport() {
   const pending = result?.pendingActions ?? [];
   const unresolvedCount = pending.filter(a => !resolutions[a.key]).length;
 
-  // Batch date range + overlap guard (accumulate mode).
-  const batchDates = useMemo(() => {
-    if (mode !== 'accumulate' || batchSource !== 'txn' || !txnText) return null;
-    try {
-      const txns = parseTransactionStatement(txnText).filter(t => t.ts > 0);
-      if (!txns.length) return null;
-      let min = Infinity, max = -Infinity;
-      for (const t of txns) { if (t.ts < min) min = t.ts; if (t.ts > max) max = t.ts; }
-      return { minIso: isoFromTs(min), maxIso: isoFromTs(max), minTs: min, maxTs: max };
-    } catch { return null; }
-  }, [mode, batchSource, txnText]);
-  const processedTs = obState.processedThrough ? tsFromIso(obState.processedThrough) : 0;
-  const overlap = !!(batchDates && processedTs && batchDates.minTs <= processedTs);
-
-  const readFile = async (file: File | null, kind: 'holding' | 'txn' | 'hp') => {
+  const readFile = async (file: File | null, kind: 'txn' | 'hp') => {
     setParseError(null); setWriteResult(null); setWriteError(null); setLastBatch(null);
     if (!file) return;
     if (!file.name.toLowerCase().endsWith('.csv')) { setParseError('Please upload the CSV export (not PDF/Excel).'); return; }
     const text = await file.text();
-    if (kind === 'holding') { setHoldingText(text); setHoldingName(file.name); }
-    else if (kind === 'hp') { setHpText(text); setHpName(file.name); }
+    if (kind === 'hp') { setHpText(text); setHpName(file.name); }
     else { setTxnText(text); setTxnName(file.name); }
   };
 
   const reset = () => {
-    setHoldingText(null); setTxnText(null); setHpText(null);
-    setHoldingName(''); setTxnName(''); setHpName('');
+    setTxnText(null); setHpText(null);
+    setTxnName(''); setHpName('');
     setParseError(null); setWriteResult(null); setWriteError(null);
   };
 
   const switchMode = (m: Mode) => { if (m === mode) return; setMode(m); reset(); setLastBatch(null); };
-  const switchSource = (sc: BatchSource) => { if (sc === batchSource) return; setBatchSource(sc); reset(); setLastBatch(null); };
 
   // ── Corp-action modal ───────────────────────────────────────────────────────
   const openModal = () => {
@@ -224,13 +193,8 @@ export default function OpeningBasisImport() {
     if (!hasValidGoogleToken()) { setWriteError('Connect Google Sheets first (open the Holdings tab and authorize).'); return; }
     const port = portfolioById(portfolioId);
     if (!port) { setWriteError('Pick a portfolio.'); return; }
-    // Accumulate mode FIFO-replays, so a missing ratio corrupts it — block. Replace mode
-    // takes lots from the HPR, so corp actions only refine the cross-check → never block.
-    if (mode === 'accumulate' && unresolvedCount > 0) { setWriteError(`Resolve ${unresolvedCount} corporate action(s) first.`); return; }
-    if (mode === 'accumulate' && overlap) {
-      setWriteError(`This slice includes ${prettyDate(batchDates!.minIso)}, on/before the already-processed ${prettyDate(obState.processedThrough)}. Re-slice so it starts strictly after that date.`);
-      return;
-    }
+    // Both modes now take lots from the Holding Period Report — corp actions only refine
+    // the buy−sell cross-check, so they never block the write (either mode).
     setWriting(true); setWriteError(null); setWriteResult(null);
     try {
       // Resolve names to canonical + ISIN (load the master now if the preview hadn't yet).
@@ -238,26 +202,17 @@ export default function OpeningBasisImport() {
       if (m && !master) setMaster(m);
       const lots = resolveLots(m, result.lots);
       await saveOpeningHoldings(port.sheetId, lots);
-      if (mode !== 'accumulate' || batchSource === 'txn') await persistCorpActions(port.sheetId);   // HPR slices carry no corp actions
-      // Sector classifications (only when a holding statement is present → replace, or the final slice).
-      if (result.sectors.length) {
-        await saveScripIndustries(SCRIP_MASTER_SPREADSHEET_ID, result.sectors.map(s => {
-          const e = m ? lookupScrip(m, '', s.name).entry : null;
-          return { isin: e?.isin || '', name: e?.canonicalName || s.name, industry: s.sector };
-        }));
-      }
+      if (mode !== 'accumulate') await persistCorpActions(port.sheetId);   // batch (HPR) corp actions are cross-check only
 
       if (mode === 'accumulate') {
-        // Advance the progress marker; DON'T rebuild yet (that's the Finish step) — the
-        // running position is partial until the last slice, so FY26 numbers aren't meaningful.
+        // Append this HPR slice; DON'T rebuild yet (that's the Finish step) — the running
+        // position is partial until the last slice, so FY26 numbers aren't meaningful.
         const added = Math.max(0, lots.length - prevLots.length);
-        const newThrough = batchSource === 'txn' ? (batchDates ? batchDates.maxIso : obState.processedThrough) : obState.processedThrough;
         const nextBatch = (obState.batches || 0) + 1;
-        await saveOpeningBasisState(port.sheetId, { processedThrough: newThrough, batches: nextBatch });
-        setLastBatch({ n: nextBatch, through: newThrough, lots: lots.length });
-        if (batchSource === 'txn') toast.success(`Batch ${nextBatch} added — running position ${lots.length} lots through ${prettyDate(newThrough)}.`);
-        else toast.success(`Slice ${nextBatch} added — ${added.toLocaleString('en-IN')} new lot(s); running position now ${lots.length} lots.`);
-        if (batchSource === 'txn') { setTxnText(null); setTxnName(''); } else { setHpText(null); setHpName(''); }   // ready for the next slice
+        await saveOpeningBasisState(port.sheetId, { processedThrough: obState.processedThrough, batches: nextBatch });
+        setLastBatch({ n: nextBatch, through: obState.processedThrough, lots: lots.length });
+        toast.success(`Slice ${nextBatch} added — ${added.toLocaleString('en-IN')} new lot(s); running position now ${lots.length} lots.`);
+        setHpText(null); setHpName('');      // ready for the next HPR slice
         setReloadTick(t => t + 1);           // refresh the running-position banner
       } else {
         await resetOpeningBasisState(port.sheetId).catch(() => {});   // a fresh one-shot supersedes any batches
@@ -336,23 +291,9 @@ export default function OpeningBasisImport() {
             </div>
           </div>
 
-          {/* Running-position banner (accumulate mode) */}
+          {/* Running-position banner (accumulate mode) — Holding Period Report slices only */}
           {mode === 'accumulate' && (
             <div className="rounded-2xl border border-indigo-200 bg-indigo-50/70 p-4">
-              {/* Batch source sub-toggle */}
-              <div className="flex flex-wrap items-center gap-2 mb-3">
-                <span className="text-[11px] font-bold text-indigo-900/70 uppercase tracking-wider">Slices are</span>
-                <div className="inline-flex rounded-lg border border-indigo-200 bg-white/70 p-0.5 text-xs font-bold">
-                  <button onClick={() => switchSource('hpr')}
-                    className={`px-3 py-1 rounded-md cursor-pointer transition-colors ${batchSource === 'hpr' ? 'bg-indigo-600 text-white shadow-sm' : 'text-indigo-700 hover:bg-indigo-50'}`}>
-                    Holding Period Report
-                  </button>
-                  <button onClick={() => switchSource('txn')}
-                    className={`px-3 py-1 rounded-md cursor-pointer transition-colors ${batchSource === 'txn' ? 'bg-indigo-600 text-white shadow-sm' : 'text-indigo-700 hover:bg-indigo-50'}`}>
-                    Transactions
-                  </button>
-                </div>
-              </div>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="flex items-start gap-2.5">
                   <History className="w-5 h-5 text-indigo-600 mt-0.5 shrink-0" />
@@ -362,16 +303,12 @@ export default function OpeningBasisImport() {
                     ) : (obState.batches > 0 || prevLots.length > 0) ? (
                       <>
                         <p className="font-bold">Continuing {port?.code}: {prevLots.length.toLocaleString('en-IN')} lots across {prevScrips.toLocaleString('en-IN')} scrips ({Math.round(prevQty).toLocaleString('en-IN')} sh){obState.batches > 0 ? ` · ${obState.batches} slice(s)` : ''}.</p>
-                        {batchSource === 'txn'
-                          ? <p className="mt-0.5">Processed through <strong>{prettyDate(obState.processedThrough)}</strong>. Upload the next transaction slice — it must start <strong>after</strong> that date.</p>
-                          : <p className="mt-0.5">Upload the next Holding Period Report slice — any order. Lots are appended and de-duplicated, so re-uploading a slice is safe.</p>}
+                        <p className="mt-0.5">Upload the next <strong>Holding Period Report</strong> slice — any order. Lots are appended and de-duplicated, so re-uploading a slice is safe. Add the full <strong>Transaction Statement</strong> on your last slice for the buy−sell cross-check.</p>
                       </>
                     ) : (
                       <>
                         <p className="font-bold">No running position yet for {port?.code}.</p>
-                        {batchSource === 'txn'
-                          ? <p className="mt-0.5">Upload your first (oldest) transaction slice — inception up to a cutoff date. Add later slices in chronological order. Keep the broker's <strong>BAL QTY</strong> column in each export.</p>
-                          : <p className="mt-0.5">Upload your first Holding Period Report slice. Its lots are taken <strong>verbatim</strong> (real date + qty + cost) and appended — slice it however your broker exports it. Add the 31-Mar holding statement on your last slice to reconcile.</p>}
+                        <p className="mt-0.5">Upload your first <strong>Holding Period Report</strong> slice — its lots are taken <strong>verbatim</strong> (real date + qty + cost) and appended; slice it however your broker exports it. Add the full <strong>Transaction Statement</strong> on your last slice to cross-check the net position.</p>
                       </>
                     )}
                   </div>
@@ -387,20 +324,17 @@ export default function OpeningBasisImport() {
               {lastBatch && (
                 <div className="mt-3 flex items-center gap-2 text-[12px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
                   <CheckCircle2 className="w-4 h-4" />
-                  {batchSource === 'txn'
-                    ? <>Batch {lastBatch.n} added — running position {lastBatch.lots.toLocaleString('en-IN')} lots through {prettyDate(lastBatch.through)}. Upload the next slice, or Finish &amp; rebuild.</>
-                    : <>Slice {lastBatch.n} added — running position {lastBatch.lots.toLocaleString('en-IN')} lots. Upload the next slice, or Finish &amp; rebuild.</>}
+                  Slice {lastBatch.n} added — running position {lastBatch.lots.toLocaleString('en-IN')} lots. Upload the next slice, or Finish &amp; rebuild.
                 </div>
               )}
             </div>
           )}
 
           {/* Upload zones */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {([
-              { kind: 'txn' as const, title: mode === 'accumulate' ? 'Transaction Slice' : 'Transaction Statement', sub: mode === 'accumulate' ? 'This chronological slice · IPO / Buy / Sell / Buyback / Bonus / Split / Rights · with BAL QTY' : 'Inception → 31-Mar-2025 · Buy / Sell (+ Bonus / Split / Rights) — for the net cross-check & corp actions', name: txnName, req: true, show: mode === 'replace' || (mode === 'accumulate' && batchSource === 'txn') },
-              { kind: 'holding' as const, title: '31-Mar-2025 Holding Statement', sub: 'FINAL slice only — reconciles the finished position + sectors (optional until then)', name: holdingName, req: false, show: mode === 'accumulate' },
-              { kind: 'hp' as const, title: (mode === 'accumulate' && batchSource === 'hpr') ? 'Holding Period Report Slice' : 'Holding Period Report', sub: (mode === 'accumulate' && batchSource === 'hpr') ? "This slice's lot-wise rows · Company · Date · Qty · Purchase Amount — taken verbatim & appended" : 'Lot-wise Company · Date · Qty · Purchase Amount — the authoritative opening lots (cost + real dates)', name: hpName, req: mode === 'replace' || (mode === 'accumulate' && batchSource === 'hpr'), show: mode === 'replace' || (mode === 'accumulate' && batchSource === 'hpr') },
+              { kind: 'hp' as const, title: mode === 'accumulate' ? 'Holding Period Report Slice' : 'Holding Period Report', sub: mode === 'accumulate' ? "This slice's lot-wise rows · Company · Date · Qty · Purchase Amount — taken verbatim & appended" : 'Lot-wise Company · Date · Qty · Purchase Amount — the authoritative opening lots (cost + real dates)', name: hpName, req: true, show: true },
+              { kind: 'txn' as const, title: mode === 'accumulate' ? 'Transaction Statement (final slice)' : 'Transaction Statement', sub: mode === 'accumulate' ? 'Optional — the full inception→31-Mar Buy / Sell, for the net cross-check on your last slice' : 'Inception → 31-Mar-2025 · Buy / Sell (+ Bonus / Split / Rights) — for the net cross-check & corp actions', name: txnName, req: mode === 'replace', show: true },
             ]).filter(z => z.show).map(z => (
               <label key={z.kind}
                 className="rounded-2xl border-2 border-dashed border-slate-200 bg-white hover:border-indigo-300 p-6 text-center cursor-pointer transition-all block">
@@ -416,14 +350,6 @@ export default function OpeningBasisImport() {
           {parseError && (
             <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{parseError}</span>
-            </div>
-          )}
-
-          {/* Overlap guard (accumulate) */}
-          {mode === 'accumulate' && overlap && batchDates && (
-            <div className="flex items-start gap-2 p-3 rounded-xl border border-rose-200 bg-rose-50 text-[12px] text-rose-700">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>This slice spans {prettyDate(batchDates.minIso)} → {prettyDate(batchDates.maxIso)}, which overlaps dates already processed (through <strong>{prettyDate(obState.processedThrough)}</strong>). Importing it would double-count. Re-slice so it starts <strong>after</strong> {prettyDate(obState.processedThrough)}.</span>
             </div>
           )}
 
@@ -443,7 +369,7 @@ export default function OpeningBasisImport() {
                 </div>
                 <div className="flex items-center gap-2">
                   <button onClick={reset} className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-3.5 h-3.5" /> Clear</button>
-                  <button onClick={runWrite} disabled={writing || (mode === 'accumulate' && unresolvedCount > 0) || resolvedLots.length === 0 || (mode === 'accumulate' && overlap)}
+                  <button onClick={runWrite} disabled={writing || resolvedLots.length === 0}
                     className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50">
                     {writing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mode === 'accumulate' ? <Layers3 className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
                     {writing ? (mode === 'accumulate' ? 'Adding batch…' : 'Writing & rebuilding…') : mode === 'accumulate' ? `Add batch to ${port?.code}` : `Set opening basis for ${port?.code}`}
@@ -456,9 +382,7 @@ export default function OpeningBasisImport() {
                 unresolvedCount > 0 ? (
                   <div className="m-4 p-3 rounded-xl border border-indigo-200 bg-indigo-50 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-2 text-[12px] font-bold text-indigo-800">
-                      <Wand2 className="w-4 h-4" /> {mode === 'accumulate'
-                        ? `${unresolvedCount} corporate action(s) need a ratio before the basis can be built.`
-                        : `${unresolvedCount} corporate action(s) detected — resolve them to sharpen the buy−sell cross-check (optional; lots come from the report either way).`}
+                      <Wand2 className="w-4 h-4" /> {unresolvedCount} corporate action(s) detected — resolve them to sharpen the buy−sell cross-check (optional; lots come from the report either way).
                     </div>
                     <button onClick={openModal} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer">Resolve now</button>
                   </div>

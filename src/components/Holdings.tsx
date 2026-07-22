@@ -522,6 +522,10 @@ export default function Holdings({
       const result = await rebuildHoldingTab(spreadsheetId);
       setHoldingRebuildStatus({ pid, result });
       setScripReview(result.unresolved.length > 0 ? { pid, master: result.master, unresolved: result.unresolved } : null);
+      if (result.nameCollisions.length > 0) {
+        const names = result.nameCollisions.slice(0, 6).map(c => `"${c.name}"`).join(', ');
+        toast.info(`⚠ ${result.nameCollisions.length} name(s) map to 2+ scrip-master entries — those trades may split instead of merging into one holding: ${names}${result.nameCollisions.length > 6 ? '…' : ''}. Keep ONE master entry per stock (old name as an alias, same ISIN).`);
+      }
       // Pull the freshly written Holding tab into the view if it's the active one
       if (activePortfolio === pid) await fetchSheetHoldings(pid);
     } catch (err: any) {
@@ -2527,9 +2531,17 @@ export default function Holdings({
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={cg.error}>✗ Capital gains failed</span>
                     ))}
                     {rb && (rb.result ? (
-                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg" title={`${rb.result.tradeRows} trades replayed`}>
-                        ✓ {rb.result.positions} positions · ₹{rb.result.totalInvested.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-                      </span>
+                      <>
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg" title={`${rb.result.tradeRows} trades replayed`}>
+                          ✓ {rb.result.positions} positions · ₹{rb.result.totalInvested.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                        </span>
+                        {rb.result.nameCollisions.length > 0 && (
+                          <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg"
+                            title={`These names each map to 2+ scrip-master entries — trades under them split instead of merging. Keep ONE entry per stock (old name as an alias).\n\n${rb.result.nameCollisions.map(c => `"${c.name}" → ${c.entries.join('  /  ')}`).join('\n')}`}>
+                            ⚠ {rb.result.nameCollisions.length} name collision{rb.result.nameCollisions.length > 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </>
                     ) : (
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={rb.error}>✗ Rebuild failed</span>
                     ))}

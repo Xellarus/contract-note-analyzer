@@ -651,22 +651,35 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       // Strip leading numbers e.g. trade numbers
       securityPart = securityPart.replace(/^[\d\s\-\,\.\/]+/, "").trim();
 
-      // ISIN capture — the identifier the Scrip Master is keyed on (getting it right is
-      // what lets the master resolve the canonical name, which wins over any name match).
-      // `extractIsin` (shared) requires the ISIN's trailing check digit, so it skips name
-      // words like "INfrastructu" inside "Infrastructures", and tolerates a stray space
-      // pdf.js can inject. If this BUY/SELL line carries no ISIN (the name+ISIN wrapped and
-      // only the tail is on this line), recover it from the previous line.
+      // ISIN + name capture. `extractIsin` (shared) requires the ISIN's trailing check
+      // digit, so it skips name words like "INfrastructu" inside "Infrastructures", and
+      // tolerates a stray space pdf.js can inject. Share India frequently WRAPS the
+      // security description onto the line ABOVE the BUY/SELL row — so this line is just
+      // "SELL <qty> <price> …" with no name and no ISIN. When there's no equity-segment
+      // listing to fall back on (e.g. a single-line ETF note like Rel Etf Lquid Bees), the
+      // trade was being dropped for want of a name. Recover BOTH the name and the ISIN from
+      // the previous security-description line, which carries the glued "Name-(ISIN)".
+      // Guarded on the previous line HAVING an ISIN, so header junk ("NCL CM") can't be
+      // mistaken for a security name.
       let isin = extractIsin(securityPart);
-      if (!isin && i > 0) {
+      let name = stripIsin(securityPart).replace(/^[\d\s\-\,\.\/:]+/, "").replace(/\s+/g, " ").trim();
+      if ((!isin || name.length < 2) && i > 0) {
         const prevRaw = (lines[i - 1] || "").trim();
-        if (prevRaw && !/\b(BUY|SELL)\b/i.test(prevRaw)) isin = extractIsin(`${prevRaw} ${securityPart}`);
+        const prevIsin = extractIsin(prevRaw);
+        if (prevIsin && !/\b(BUY|SELL)\b/i.test(prevRaw)) {
+          if (!isin) isin = prevIsin;
+          if (name.length < 2) {
+            // Strip the prev line's leading order/trade numbers + timestamps, then its ISIN.
+            let prevSec = prevRaw;
+            const tRe = /\b\d{2}:\d{2}:\d{2}\b/g;
+            let tm: RegExpExecArray | null, lastT = -1;
+            while ((tm = tRe.exec(prevSec)) !== null) lastT = tm.index + tm[0].length;
+            if (lastT !== -1) prevSec = prevSec.substring(lastT);
+            const prevName = stripIsin(prevSec).replace(/^[\d\s\-\,\.\/:]+/, "").replace(/\s+/g, " ").trim();
+            if (prevName.length >= 2) name = prevName;
+          }
+        }
       }
-
-      // Reconstructed name (ISIN + leading trade-number junk stripped). The authoritative
-      // name comes from the ISIN→Scrip-Master lookup at write time; the Equity-Segment
-      // ISIN→name map (below) supplies it when this line's name is a bare wrapped tail.
-      const name = stripIsin(securityPart).replace(/^[\d\s\-\,\.\/:]+/, "").replace(/\s+/g, " ").trim();
 
       // Prefer the full name from the note's Equity-Segment listing (keyed by ISIN)
       // when the line-reconstructed name is broken by a wrap (e.g. bare "Lt"). Falls

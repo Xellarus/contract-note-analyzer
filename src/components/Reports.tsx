@@ -3,7 +3,7 @@ import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Download, B
 import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
-import { normName } from '../lib/scripMaster';
+import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { useVirtualRows } from './ui/useVirtualRows';
 
 type Step = 'home' | 'portfolio' | 'config' | 'result';
@@ -13,14 +13,31 @@ type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expens
 // on a stock's detail page). Portfolio is locked; every report is filtered to it.
 export interface StockFocus { portfolioId: string; scripName: string; isin: string; }
 
-// A sheet/position row matches the focused scrip by ISIN when both sides carry one,
-// else by canonical name (names are canonicalized on import, so this is exact). Some
-// target tabs (LTST / True Entry) no longer keep an ISIN column, so name is the usual
-// path — `isin` is just a bonus when present.
-const scripMatches = (name: string, isin: string, focus: StockFocus): boolean => {
-  const fi = (focus.isin || '').trim().toUpperCase();
-  if (fi && (isin || '').trim().toUpperCase() === fi) return true;
-  return normName(name || '') === normName(focus.scripName || '');
+// Build a matcher that decides whether a sheet/position row belongs to the focused scrip.
+// Priority: (1) exact ISIN when both sides carry one; (2) same CANONICAL entry via the
+// scrip master — resolve BOTH the row name and the focus name and compare `entry.key`, so a
+// scrip that was RENAMED in the master (its OLD name, still stored in True Entry / LTST from
+// the original import, is now an alias of the entry) still matches its rows; (3) exact
+// normalized-name equality as a fallback when the master can't resolve a side. `lookupScrip`
+// is read-only (no master mutation). Some target tabs (LTST / True Entry) keep no ISIN
+// column, so the master-key path is what makes renamed/aliased scrips line up.
+type ScripMatcher = (name: string, isin: string) => boolean;
+const makeScripMatcher = (master: ScripMaster | null, focus: StockFocus): ScripMatcher => {
+  const fn = normName(focus.scripName || '');
+  // Resolve the focus scrip ONCE (a single, acceptable token-subset scan) to its entry, then
+  // reuse the entry's `aliasNorms` — the set of ALL normalized names it's known by (canonical
+  // + every alias, INCLUDING the old name after a rename). Per-row matching is then an O(1)
+  // Set/ISIN test — NOT a per-row `lookupScrip`, whose token-subset fallback would rescan all
+  // ~5,000 master entries for every row and make a large report crawl.
+  const focusEntry = master ? lookupScrip(master, focus.isin || '', focus.scripName || '').entry : null;
+  const aliasNorms = focusEntry?.aliasNorms || null;
+  const focusIsin = ((focusEntry?.isin || focus.isin || '').trim()).toUpperCase();
+  return (name: string, isin: string): boolean => {
+    if (focusIsin && (isin || '').trim().toUpperCase() === focusIsin) return true;
+    const nk = normName(name || '');
+    if (aliasNorms && aliasNorms.has(nk)) return true;   // canonical or any alias (old name incl.)
+    return nk === fn;                                    // fallback when the master can't resolve
+  };
 };
 
 const REPORTS: { type: ReportType; title: string; desc: string; Icon: typeof FileBarChart2; needsDate: boolean }[] = [
@@ -46,7 +63,7 @@ const EXPENSE_COLS: { label: string; names: string[] }[] = [
 ];
 
 // Build a date-wise (or date+company-wise) expense report from a True Entry grid.
-function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, toDate: string, focus?: StockFocus | null): { header: string[]; rows: string[][] } {
+function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, toDate: string, matchScrip?: ScripMatcher | null): { header: string[]; rows: string[][] } {
   const hdr = (vals[0] || []).map((c: any) => (c ?? '').toString().trim());
   const findCol = (...names: string[]) => { for (const n of names) { const i = hdr.indexOf(n); if (i >= 0) return i; } return -1; };
   const dateIdx = findCol('Trade Date', 'Date');
@@ -65,7 +82,7 @@ function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, 
     if (ts === null || ts < fromTs || ts > toTs) continue;   // a date report needs a dated row in range
     const company = (r[nameIdx] ?? '').toString().trim();
     // Scoped to a single stock → drop every other scrip's rows before summing.
-    if (focus && !scripMatches(company, isinIdx >= 0 ? (r[isinIdx] ?? '').toString() : '', focus)) continue;
+    if (matchScrip && !matchScrip(company, isinIdx >= 0 ? (r[isinIdx] ?? '').toString() : '')) continue;
     const key = detailed ? `${ts}|${company}` : `${ts}`;
     let g = groups.get(key);
     if (!g) { g = { ts, dateStr: dateCell, company, sums: EXPENSE_COLS.map(() => 0) }; groups.set(key, g); }
@@ -167,17 +184,25 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     setError(null);
     setPositions([]); setGenHeader([]); setGenRows([]);
     try {
+      // For a stock-scoped report, resolve matches through the scrip master so a scrip
+      // that was renamed in the master (old name now an alias) still matches its True
+      // Entry / LTST rows, which were written under the old canonical name at import.
+      let matchScrip: ScripMatcher | null = null;
+      if (focus) {
+        const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null);
+        matchScrip = makeScripMatcher(master, focus);
+      }
       if (reportType === 'holding') {
         const asOfTs = new Date(`${asOf}T23:59:59`).getTime();
         const res = await computeHoldingsAsOf(portfolio.sheetId, asOfTs);
-        const positions = focus ? res.positions.filter(p => scripMatches(p.securityName, p.isin, focus)) : res.positions;
+        const positions = matchScrip ? res.positions.filter(p => matchScrip!(p.securityName, p.isin)) : res.positions;
         setPositions(positions);
-        setTotalInvested(focus ? positions.reduce((s, p) => s + p.invested, 0) : res.totalInvested);
+        setTotalInvested(matchScrip ? positions.reduce((s, p) => s + p.invested, 0) : res.totalInvested);
         setTradeRows(res.tradeRows);
       } else if (reportType === 'expenses' || reportType === 'expenses-detailed') {
         const vals = await readTab(portfolio.sheetId, 'True Entry!A:Z');
         if (vals.length < 2) throw new Error("No transactions found in True Entry — import a contract note or transaction report first.");
-        const { header, rows } = buildExpenseReport(vals, reportType === 'expenses-detailed', fromDate, toDate, focus);
+        const { header, rows } = buildExpenseReport(vals, reportType === 'expenses-detailed', fromDate, toDate, matchScrip);
         setGenHeader(header);
         setGenRows(rows);
       } else {
@@ -207,10 +232,10 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
         // Scoped to a single stock → keep only its rows (by ISIN or canonical name).
         // Note the column names differ per tab: True Entry uses "Stock Name", the LTST
         // capital-gains tab uses "Asset Name".
-        if (focus) {
+        if (matchScrip) {
           const nameCol = header.findIndex(h => /stock name|security name|asset name|scrip|company|^name$/i.test(h));
           const isinCol = header.findIndex(h => /isin/i.test(h));
-          if (nameCol >= 0) body = body.filter(r => scripMatches(r[nameCol] ?? '', isinCol >= 0 ? (r[isinCol] ?? '') : '', focus));
+          if (nameCol >= 0) body = body.filter(r => matchScrip!(r[nameCol] ?? '', isinCol >= 0 ? (r[isinCol] ?? '') : ''));
         }
         setGenHeader(header);
         setGenRows(body);
