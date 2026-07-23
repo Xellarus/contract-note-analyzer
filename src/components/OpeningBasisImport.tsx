@@ -4,10 +4,10 @@ import {
 } from 'lucide-react';
 import {
   parseTransactionStatement, parseHoldingPeriodReport, reconstructOpeningLots, accumulateReportLots, advanceTxnNet,
-  ReconstructResult, OpeningLot, ActionResolution, TxnNetEntry,
+  ReconstructResult, OpeningLot, ActionResolution, TxnNetEntry, TxnStatementRow,
 } from '../lib/openingBasis';
 import { saveOpeningHoldings, loadOpeningHoldings, OpeningSeedLot } from '../lib/openingHoldings';
-import { loadOpeningTxnNet, saveOpeningTxnNet, resetOpeningTxnNet, TxnNetMap } from '../lib/openingTxnNet';
+import { loadOpeningTxns, saveOpeningTxns, resetOpeningTxns, mergeOpeningTxnsSlice } from '../lib/openingTxns';
 import { loadOpeningCorpActions, loadOpeningCorpActionRows, saveOpeningCorpActions, SavedCorpAction } from '../lib/openingCorpActions';
 import { loadOpeningBasisState, saveOpeningBasisState, resetOpeningBasisState, OpeningBasisState } from '../lib/openingBasisState';
 import { rebuildHoldingTab, syncCapitalGains } from '../lib/holdingsCalc';
@@ -44,7 +44,7 @@ export default function OpeningBasisImport() {
 
   // Batch (accumulate) mode: the running position + progress carried in from prior slices.
   const [prevLots, setPrevLots] = useState<OpeningSeedLot[]>([]);
-  const [txnNet, setTxnNet] = useState<TxnNetMap>({});   // accumulated transaction position (verification)
+  const [openingTxnRows, setOpeningTxnRows] = useState<TxnStatementRow[]>([]);   // accumulated raw txn history
   const [obState, setObState] = useState<OpeningBasisState>({ processedThrough: '', batches: 0 });
   const [loadingPrev, setLoadingPrev] = useState(false);
   const [reloadTick, setReloadTick] = useState(0);
@@ -95,12 +95,18 @@ export default function OpeningBasisImport() {
     } catch { return []; }
   }, [mode, master, txnText]);
 
-  // The accumulated transaction POSITION = the persisted running net + this slice folded on
-  // top. This is the "position from transactions" the user compares to the dated broker
-  // holding report each batch (a verification aid — NOT written into the FY26 lots).
-  const mergedNet = useMemo<TxnNetMap>(
-    () => (mode === 'accumulate' ? advanceTxnNet(txnNet, sliceTxns, resolutions) : {}),
-    [mode, txnNet, sliceTxns, resolutions],
+  // The merged raw transaction history = persisted rows + this slice (re-uploading a slice
+  // replaces its date range). This is what "Add batch" persists AND what the position table
+  // derives from — a single source of truth (also feeds the Historical Holding Report).
+  const previewTxns = useMemo<TxnStatementRow[]>(
+    () => (mode === 'accumulate' ? mergeOpeningTxnsSlice(openingTxnRows, sliceTxns) : []),
+    [mode, openingTxnRows, sliceTxns],
+  );
+  // The accumulated transaction POSITION derived from that history — the "position from
+  // transactions" the user compares to the dated broker holding report each batch.
+  const mergedNet = useMemo<Record<string, TxnNetEntry>>(
+    () => (mode === 'accumulate' ? advanceTxnNet({}, previewTxns, resolutions) : {}),
+    [mode, previewTxns, resolutions],
   );
   const netRows = useMemo<TxnNetEntry[]>(
     () => Object.keys(mergedNet).map(k => mergedNet[k])
@@ -142,13 +148,13 @@ export default function OpeningBasisImport() {
   useEffect(() => {
     let cancelled = false;
     const port = portfolioById(portfolioId);
-    if (mode !== 'accumulate' || !port || !hasValidGoogleToken()) { setPrevLots([]); setTxnNet({}); setObState({ processedThrough: '', batches: 0 }); return; }
+    if (mode !== 'accumulate' || !port || !hasValidGoogleToken()) { setPrevLots([]); setOpeningTxnRows([]); setObState({ processedThrough: '', batches: 0 }); return; }
     setLoadingPrev(true);
     Promise.all([
       loadOpeningHoldings(port.sheetId).catch(() => [] as OpeningSeedLot[]),
       loadOpeningBasisState(port.sheetId).catch(() => ({ processedThrough: '', batches: 0 } as OpeningBasisState)),
-      loadOpeningTxnNet(port.sheetId).catch(() => ({} as TxnNetMap)),
-    ]).then(([lots, st, net]) => { if (!cancelled) { setPrevLots(lots); setObState(st); setTxnNet(net); } })
+      loadOpeningTxns(port.sheetId).catch(() => [] as TxnStatementRow[]),
+    ]).then(([lots, st, txnrows]) => { if (!cancelled) { setPrevLots(lots); setObState(st); setOpeningTxnRows(txnrows); } })
       .finally(() => { if (!cancelled) setLoadingPrev(false); });
     return () => { cancelled = true; };
   }, [mode, portfolioId, reloadTick]);
@@ -239,16 +245,25 @@ export default function OpeningBasisImport() {
       const m = master || await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null);
       if (m && !master) setMaster(m);
       const lots = resolveLots(m, result.lots);
+      const canonName = (n: string) => { const e = m ? lookupScrip(m, '', n).entry : null; return e ? e.canonicalName : n; };
       await saveOpeningHoldings(port.sheetId, lots);
       await persistCorpActions(port.sheetId);   // save + merge resolved bonus/split/rights (both modes, per slice)
 
       if (mode === 'accumulate') {
+        // A batch that persists NO transaction rows leaves the Historical Holding Report with
+        // nothing to replay (it seeds pre-FY26 positions from these). Block it and say so,
+        // rather than silently writing an empty history.
+        if (previewTxns.length === 0) {
+          setWriting(false);
+          setWriteError("Add this batch's Transaction Statement slice — the Historical Holding Report replays these to show past positions. The Holding Period Report alone writes lots but no dated transaction history.");
+          return;
+        }
         // Append this HPR slice + fold this slice's transactions into the running position;
         // DON'T rebuild yet (that's the Finish step) — the position is partial until the last
         // slice, so FY26 numbers aren't meaningful.
         const added = Math.max(0, lots.length - prevLots.length);
         const nextBatch = (obState.batches || 0) + 1;
-        await saveOpeningTxnNet(port.sheetId, mergedNet);   // persist the accumulated transaction position
+        await saveOpeningTxns(port.sheetId, previewTxns);   // persist the merged raw transaction history
         await saveOpeningBasisState(port.sheetId, { processedThrough: throughIso || obState.processedThrough, batches: nextBatch });
         setLastBatch({ n: nextBatch, through: throughIso || obState.processedThrough, lots: lots.length });
         toast.success(`Slice ${nextBatch} added — ${added.toLocaleString('en-IN')} new lot(s); running position now ${lots.length} lots${throughIso ? `, txns through ${throughIso}` : ''}.`);
@@ -257,7 +272,12 @@ export default function OpeningBasisImport() {
         setReloadTick(t => t + 1);           // refresh the running position (+ reloads saved corp actions & txn net)
       } else {
         await resetOpeningBasisState(port.sheetId).catch(() => {});   // a fresh one-shot supersedes any batches
-        await resetOpeningTxnNet(port.sheetId).catch(() => {});       // …and its accumulated transaction position
+        // Persist the (complete) transaction statement so the Historical Holding Report can
+        // replay it to any past date — Replace supplies the whole history at once. (Previously
+        // this wiped the tab, leaving the report with nothing to replay.)
+        const replaceTxns = txnText ? parseTransactionStatement(txnText).map(t => ({ ...t, name: canonName(t.name) })) : [];
+        if (replaceTxns.length) await saveOpeningTxns(port.sheetId, replaceTxns);
+        else await resetOpeningTxns(port.sheetId).catch(() => {});
         let holdingErr: string | undefined, cgErr: string | undefined;
         try { await rebuildHoldingTab(port.sheetId); } catch (e: any) { holdingErr = e?.result?.error?.message || e?.message || 'Unknown error'; }
         try { await syncCapitalGains(port.sheetId); } catch (e: any) { cgErr = e?.result?.error?.message || e?.message || 'Unknown error'; }
@@ -398,6 +418,21 @@ export default function OpeningBasisImport() {
             </div>
           )}
 
+          {/* Batch mode needs a transaction slice: a CSV that parsed to nothing, or an
+              HPR-only batch on a fresh portfolio — either way the report would have no history. */}
+          {mode === 'accumulate' && !!master && txnText && sliceTxns.length === 0 && (
+            <div className="flex items-start gap-2 -mt-1 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>Couldn't read any transactions from that CSV — check it's the transaction-statement export (needs Date · Transaction Type · Name · Qty columns).</span>
+            </div>
+          )}
+          {mode === 'accumulate' && !txnText && !!hpText && previewTxns.length === 0 && (
+            <div className="flex items-start gap-2 -mt-1 p-3 rounded-xl border border-indigo-200 bg-indigo-50 text-[12px] text-indigo-800">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>Add this batch's <strong>Transaction Statement</strong> slice too — the Historical Holding Report replays these to show past positions (the Holding Period Report alone writes lots but no dated transaction history).</span>
+            </div>
+          )}
+
           {parseError && (
             <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><span>{parseError}</span>
@@ -420,7 +455,7 @@ export default function OpeningBasisImport() {
                 </div>
                 <div className="flex items-center gap-2">
                   <button onClick={reset} className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-3.5 h-3.5" /> Clear</button>
-                  <button onClick={runWrite} disabled={writing || resolvedLots.length === 0}
+                  <button onClick={runWrite} disabled={writing || resolvedLots.length === 0 || (mode === 'accumulate' && previewTxns.length === 0)}
                     className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50">
                     {writing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mode === 'accumulate' ? <Layers3 className="w-3.5 h-3.5" /> : <UploadCloud className="w-3.5 h-3.5" />}
                     {writing ? (mode === 'accumulate' ? 'Adding batch…' : 'Writing & rebuilding…') : mode === 'accumulate' ? `Add batch to ${port?.code}` : `Set opening basis for ${port?.code}`}

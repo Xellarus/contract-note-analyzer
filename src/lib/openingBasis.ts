@@ -469,6 +469,74 @@ export function advanceTxnNet(
   return out;
 }
 
+/** One scrip's surviving position from the opening-basis transaction history, replayed to
+ *  an as-of date (weighted-average cost). Used to SEED the Historical Holding Report so a
+ *  pre-FY26 date shows what was actually held then (True Entry is FY26-only). */
+export interface OpeningPosAsOf { name: string; qty: number; avgCost: number; }
+
+/**
+ * Replay the batch opening-basis transactions to a past date → each scrip's surviving
+ * quantity + weighted-average cost as of `asOfTs`. Per scrip, per day: same-day buys/sells
+ * are netted (an intraday round-trip drops out, so it can't distort the average — mirrors
+ * the FY26 engine's `squareOffIntraday`); BONUS/RIGHT add held×ratio (₹0 / rights price),
+ * SPLIT rescales (qty ×f, cost ÷f), all from `resolutions`. Rows dated after `asOfTs` are
+ * excluded; undated rows (ts ≤ 0) are treated as always-held. Keyed by `obKey(name)`; the
+ * caller maps that to the scrip-master key when seeding. Pure (no gapi).
+ */
+export function replayOpeningTxnsAsOf(
+  txns: TxnStatementRow[],
+  resolutions: Record<string, ActionResolution>,
+  asOfTs: number,
+): Record<string, OpeningPosAsOf> {
+  const byName = new Map<string, TxnStatementRow[]>();
+  for (const t of txns) {
+    if (t.ts > asOfTs && t.ts > 0) continue;   // future row (undated ts≤0 is kept)
+    const k = obKey(t.name);
+    (byName.get(k) || byName.set(k, []).get(k)!).push(t);
+  }
+
+  const out: Record<string, OpeningPosAsOf> = {};
+  for (const [k, rows] of byName) {
+    const displayName = rows[0].name;
+    // Net same-day buys/sells per day (intraday square-off); keep corp actions separate.
+    interface Ev { ts: number; ord: number; kind: string; qty: number; price: number; iso: string; }
+    const dayMap = new Map<number, { buyQ: number; buyV: number; sellQ: number }>();
+    const corp: Ev[] = [];
+    for (const t of rows) {
+      const kind = classifyTxn(t.type);
+      if (kind === "BUY") {
+        const d = dayMap.get(t.ts) || { buyQ: 0, buyV: 0, sellQ: 0 };
+        d.buyQ += t.qty; d.buyV += t.amount > 0 ? t.amount : t.qty * t.price; dayMap.set(t.ts, d);
+      } else if (kind === "SELL") {
+        const d = dayMap.get(t.ts) || { buyQ: 0, buyV: 0, sellQ: 0 };
+        d.sellQ += Math.abs(t.qty); dayMap.set(t.ts, d);
+      } else if (kind === "BONUS" || kind === "RIGHT" || kind === "SPLIT") {
+        corp.push({ ts: t.ts, ord: 1, kind, qty: 0, price: 0, iso: t.iso });
+      }
+    }
+    const evs: Ev[] = [...corp];
+    for (const [ts, d] of dayMap) {
+      const net = d.buyQ - d.sellQ;
+      if (net > 1e-9) evs.push({ ts, ord: 0, kind: "BUY", qty: net, price: d.buyQ > 0 ? d.buyV / d.buyQ : 0, iso: "" });
+      else if (net < -1e-9) evs.push({ ts, ord: 2, kind: "SELL", qty: -net, price: 0, iso: "" });
+      // net 0 → fully squared off intraday
+    }
+    // Same-day order: buy → corp action → sell.
+    evs.sort((a, b) => (a.ts - b.ts) || (a.ord - b.ord));
+
+    let qty = 0, avg = 0;
+    for (const e of evs) {
+      if (e.kind === "BUY") { const nq = qty + e.qty; avg = nq > 0 ? (qty < 0 ? e.price : (qty * avg + e.qty * e.price) / nq) : 0; qty = nq; }
+      else if (e.kind === "SELL") { qty -= e.qty; if (qty <= 1e-9) avg = 0; }
+      else if (e.kind === "SPLIT") { const r = resolutions[corpActionKey(k, "SPLIT", e.iso)]; if (r && r.den > 0 && r.num > 0 && qty > 1e-9) { const c = qty * avg; qty *= r.num / r.den; avg = qty > 0 ? c / qty : 0; } }
+      else if (e.kind === "BONUS") { const r = resolutions[corpActionKey(k, "BONUS", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const c = qty * avg; qty += add; avg = qty > 0 ? c / qty : 0; } } }
+      else if (e.kind === "RIGHT") { const r = resolutions[corpActionKey(k, "RIGHT", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const nq = qty + add; avg = nq > 0 ? (qty * avg + add * (r.price || 0)) / nq : 0; qty = nq; } } }
+    }
+    if (qty > 1e-9) out[k] = { name: displayName, qty: r6(qty), avgCost: r6(avg) };
+  }
+  return out;
+}
+
 /**
  * Reconstruct dated opening lots as of 1-Apr-2025 — **Holding-Period-Report model**
  * (user redesign 2026-07-21).

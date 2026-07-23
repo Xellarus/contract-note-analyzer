@@ -8,6 +8,9 @@ import { loadScripPrices, makePriceResolver } from "./scripPrices";
 import { loadScripIndustries, makeIndustryResolver } from "./scripIndustries";
 import { loadCorporateActions, CorpAction } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
+import { loadOpeningTxns } from "./openingTxns";
+import { loadOpeningCorpActions } from "./openingCorpActions";
+import { replayOpeningTxnsAsOf, TxnStatementRow, ActionResolution } from "./openingBasis";
 import { ledgerSide, isSplitType } from "./tradeRowSchema";
 
 export interface UnresolvedScrip {
@@ -128,100 +131,123 @@ export interface HistoricalHoldingResult {
 }
 
 /**
- * Read-only: compute the holdings of a portfolio **as of a past date** by
- * FIFO-replaying every Buy/Sell row in True Entry dated on or before `asOfTs`.
- * Computed purely from entry data (no opening seed). Does not write anything.
- * Mirrors rebuildHoldingTab's replay so figures stay consistent.
+ * Read-only: compute the holdings of a portfolio **as of a past date** by replaying trades
+ * dated on or before `asOfTs`. Two sources are combined (in date order):
+ *   1. the **opening-basis batch transactions** ("Opening Txns"), replayed to the as-of date
+ *      — the ONLY source of pre-FY26 positions (True Entry is FY26-only), and it also carries
+ *      the opening position into an FY26-date report, and
+ *   2. **True Entry** (FY26) Buy/Sell rows, replayed on top.
+ * Does not write anything. Mirrors rebuildHoldingTab's replay so figures stay consistent.
  */
 export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number): Promise<HistoricalHoldingResult> {
-  let teRes: any;
-  try {
-    teRes = await (gapi.client as any).sheets.spreadsheets.values.get({
-      spreadsheetId, range: "True Entry!A:T",
-      // Dates as serials, not display strings — see parseDateTs for why.
-      valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "SERIAL_NUMBER",
-    });
-  } catch (e: any) {
-    const msg = e?.result?.error?.message || e?.message || "";
-    if (/unable to parse range/i.test(msg)) {
-      throw new Error("'True Entry' tab not found in this spreadsheet — import a contract note or transaction report first.");
-    }
-    throw e;
-  }
-  const teRows: any[][] = teRes?.result?.values || [];
-  if (teRows.length < 2) throw new Error("True Entry sheet is empty — nothing to report on.");
-
-  const hdrs = teRows[0].map((h: any) => (h || "").toString().trim());
-  const col = (name: string, fallback: number) => { const i = hdrs.indexOf(name); return i >= 0 ? i : fallback; };
-  const dateIdx = col("Trade Date", 0), isinIdx = col("ISIN", -1), nameIdx = col("Stock Name", 2);
-  const typeIdx = col("Transaction Type", 3), qtyIdx = col("Number of Shares", 4), priceIdx = col("Avg Price", 5);
-  const turnoverIdx = col("Total Amount (Turnover)", 6);
-  const inclIdx = col("Total Amount with Expense (Incl STT)", 15);
-
-  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; }
-  const trades: TradeRow[] = [];
-  for (let i = 1; i < teRows.length; i++) {
-    const r = teRows[i];
-    if (!r || r.length === 0) continue;
-    // Ledger stores the real action ("Bonus"/"Split"/"IPO"/"Rights"); classify it. A SPLIT
-    // rescales the held lots (kept a distinct type so it's excluded from the intraday
-    // square-off and isn't a ₹0 add); Bonus/IPO/Rights are buy-side.
-    const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
-    if (!type) continue;
-    const name = (r[nameIdx] || "").toString().trim();
-    const qty = toNum(r[qtyIdx]);
-    if (!name || isNaN(qty) || qty <= 0) continue;
-    const avgPrice = toNum(r[priceIdx]);
-    const turnover = toNum(r[turnoverIdx]);
-    const inclSTT = toNum(r[inclIdx]);
-    // Invested = all-in cost incl. expenses: value BUYs by "Total Amount with
-    // Expense (Incl STT)" (fallback turnover, then Avg Price). Sells carry no cost.
-    // Bonus/Split rows carry 0 turnover/cost, so this yields ₹0 as intended.
-    const price = type === "BUY"
-      ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
-      : avgPrice;
-    if (type === "BUY" && isNaN(price)) continue;
-    trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price });
-  }
-  if (trades.length === 0) throw new Error("True Entry has no parseable Buy/Sell rows.");
-  trades.sort((a, b) => (a.ts - b.ts) || (a.idx - b.idx));
-
   const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
   const byKey = new Map<string, HoldingAcc>();
   const resolve = (isin: string, name: string): HoldingAcc => {
     const r = resolveScrip(master, isin, name);
     const key = r.status === "resolved" ? r.key : ((isin || "").trim() || normName(name));
     let h = byKey.get(key);
-    if (!h) { h = { isin, securityName: r.status === "resolved" ? r.entry.canonicalName : name, quantity: 0, avgBuyPrice: 0 }; byKey.set(key, h); }
+    if (!h) { h = { isin: r.status === "resolved" ? (r.entry.isin || isin || "") : isin, securityName: r.status === "resolved" ? r.entry.canonicalName : name, quantity: 0, avgBuyPrice: 0 }; byKey.set(key, h); }
     else if (isin && !h.isin) h.isin = isin;
     return h;
   };
 
-  // Only trades on/before the as-of date, with intraday round-trips squared off
-  // (same-day buy+sell on a scrip is excluded so it can't lift the cost basis).
-  const keyOf = (t: ReplayTrade) => {
-    const r = resolveScrip(master, t.isin, t.name);
-    return r.status === "resolved" ? r.key : ((t.isin || "").trim() || normName(t.name));
-  };
-  const window = trades.filter(t => t.ts <= asOfTs);
-  const playable = squareOffIntraday(window, keyOf);
+  // 1. Seed the pre-FY26 opening position, replayed from the batch transaction history to the
+  //    as-of date. True Entry holds no pre-FY26 rows, so this is the only source for a past
+  //    date (and it carries the opening position into an FY26-date report too).
+  let openingCount = 0;
+  const openingTxns = await loadOpeningTxns(spreadsheetId).catch(() => [] as TxnStatementRow[]);
+  if (openingTxns.length) {
+    const resolutions = await loadOpeningCorpActions(spreadsheetId).catch(() => ({} as Record<string, ActionResolution>));
+    const openPos = replayOpeningTxnsAsOf(openingTxns, resolutions, asOfTs);
+    openingCount = openingTxns.filter(t => t.ts <= 0 || t.ts <= asOfTs).length;
+    for (const okey in openPos) {
+      const p = openPos[okey];
+      const h = resolve("", p.name);
+      const cost = h.quantity * h.avgBuyPrice + p.qty * p.avgCost;   // weighted-avg merge (aliases → same key)
+      h.quantity += p.qty;
+      h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0;
+    }
+  }
 
-  const replayed = window.length;
-  for (const t of playable) {
-    const h = resolve(t.isin, t.name);
-    if (t.type === "SPLIT") {
-      // Subdivide: qty grows by the added shares, total cost unchanged → avg ÷factor.
-      if (h.quantity > 1e-9 && t.qty > 0) { const cost = h.quantity * h.avgBuyPrice; h.quantity += t.qty; h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0; }
-      continue;
+  // 2. FY26 trades from True Entry, replayed on top. Tolerant: a missing/empty tab just means
+  //    "opening basis only" (a fresh portfolio still building its history).
+  let teRows: any[][] = [];
+  try {
+    const teRes: any = await (gapi.client as any).sheets.spreadsheets.values.get({
+      spreadsheetId, range: "True Entry!A:T",
+      // Dates as serials, not display strings — see parseDateTs for why.
+      valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "SERIAL_NUMBER",
+    });
+    teRows = teRes?.result?.values || [];
+  } catch (e: any) {
+    const msg = e?.result?.error?.message || e?.message || "";
+    if (!/unable to parse range/i.test(msg)) throw e;   // missing tab is fine (opening-only)
+  }
+
+  let replayed = 0;
+  if (teRows.length >= 2) {
+    const hdrs = teRows[0].map((h: any) => (h || "").toString().trim());
+    const col = (name: string, fallback: number) => { const i = hdrs.indexOf(name); return i >= 0 ? i : fallback; };
+    const dateIdx = col("Trade Date", 0), isinIdx = col("ISIN", -1), nameIdx = col("Stock Name", 2);
+    const typeIdx = col("Transaction Type", 3), qtyIdx = col("Number of Shares", 4), priceIdx = col("Avg Price", 5);
+    const turnoverIdx = col("Total Amount (Turnover)", 6);
+    const inclIdx = col("Total Amount with Expense (Incl STT)", 15);
+
+    const trades: ReplayTrade[] = [];
+    for (let i = 1; i < teRows.length; i++) {
+      const r = teRows[i];
+      if (!r || r.length === 0) continue;
+      // Ledger stores the real action ("Bonus"/"Split"/"IPO"/"Rights"); classify it. A SPLIT
+      // rescales the held lots (kept a distinct type so it's excluded from the intraday
+      // square-off and isn't a ₹0 add); Bonus/IPO/Rights are buy-side.
+      const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
+      if (!type) continue;
+      const name = (r[nameIdx] || "").toString().trim();
+      const qty = toNum(r[qtyIdx]);
+      if (!name || isNaN(qty) || qty <= 0) continue;
+      const avgPrice = toNum(r[priceIdx]);
+      const turnover = toNum(r[turnoverIdx]);
+      const inclSTT = toNum(r[inclIdx]);
+      // Invested = all-in cost incl. expenses: value BUYs by "Total Amount with
+      // Expense (Incl STT)" (fallback turnover, then Avg Price). Sells carry no cost.
+      // Bonus/Split rows carry 0 turnover/cost, so this yields ₹0 as intended.
+      const price = type === "BUY"
+        ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
+        : avgPrice;
+      if (type === "BUY" && isNaN(price)) continue;
+      trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price });
     }
-    if (t.type === "BUY") {
-      const newQty = h.quantity + t.qty;
-      h.avgBuyPrice = newQty > 0 ? (h.quantity < 0 ? t.price : ((h.quantity * h.avgBuyPrice) + (t.qty * t.price)) / newQty) : 0;
-      h.quantity = newQty;
-    } else {
-      h.quantity -= t.qty;
-      if (h.quantity <= 0) h.avgBuyPrice = 0;
+    trades.sort((a, b) => (a.ts - b.ts) || (a.idx - b.idx));
+
+    // Only trades on/before the as-of date, with intraday round-trips squared off
+    // (same-day buy+sell on a scrip is excluded so it can't lift the cost basis).
+    const keyOf = (t: ReplayTrade) => {
+      const r = resolveScrip(master, t.isin, t.name);
+      return r.status === "resolved" ? r.key : ((t.isin || "").trim() || normName(t.name));
+    };
+    const window = trades.filter(t => t.ts <= asOfTs);
+    const playable = squareOffIntraday(window, keyOf);
+    replayed = window.length;
+    for (const t of playable) {
+      const h = resolve(t.isin, t.name);
+      if (t.type === "SPLIT") {
+        // Subdivide: qty grows by the added shares, total cost unchanged → avg ÷factor.
+        if (h.quantity > 1e-9 && t.qty > 0) { const cost = h.quantity * h.avgBuyPrice; h.quantity += t.qty; h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0; }
+        continue;
+      }
+      if (t.type === "BUY") {
+        const newQty = h.quantity + t.qty;
+        h.avgBuyPrice = newQty > 0 ? (h.quantity < 0 ? t.price : ((h.quantity * h.avgBuyPrice) + (t.qty * t.price)) / newQty) : 0;
+        h.quantity = newQty;
+      } else {
+        h.quantity -= t.qty;
+        if (h.quantity <= 0) h.avgBuyPrice = 0;
+      }
     }
+  }
+
+  if (byKey.size === 0 && openingTxns.length === 0 && teRows.length < 2) {
+    throw new Error("Nothing to report — this portfolio has no opening basis and no True Entry trades yet.");
   }
 
   const active = [...byKey.values()].filter(h => h.quantity > 0).sort((a, b) => (b.quantity * b.avgBuyPrice) - (a.quantity * a.avgBuyPrice));
@@ -231,7 +257,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     totalInvested += invested;
     return { securityName: h.securityName, isin: h.isin, quantity: h.quantity, avgBuyPrice: parseFloat(h.avgBuyPrice.toFixed(4)), invested: parseFloat(invested.toFixed(2)) };
   });
-  return { positions, totalInvested: parseFloat(totalInvested.toFixed(2)), tradeRows: replayed };
+  return { positions, totalInvested: parseFloat(totalInvested.toFixed(2)), tradeRows: replayed + openingCount };
 }
 
 /**
