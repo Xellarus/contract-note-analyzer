@@ -62,6 +62,11 @@ export interface ScripMaster {
   byAliasNorm: Map<string, ScripEntry>;
   entries: ScripEntry[];
   dirty: boolean;
+  // Tokens that appear in many entries ("corporation", "securities", "industries", …). A
+  // SINGLE such token is too weak to carry a fuzzy (token-subset) match on its own — e.g.
+  // "S & T Corporation" collapses to {corporation} and would otherwise grab any name
+  // containing "corporation". Computed at load; see resolveScrip step 3.
+  genericTokens: Set<string>;
 }
 
 export type ResolveResult =
@@ -74,7 +79,32 @@ const emptyMaster = (): ScripMaster => ({
   byAliasNorm: new Map(),
   entries: [],
   dirty: false,
+  genericTokens: new Set(),
 });
+
+// A token appearing in at least this many DISTINCT entries is "generic" (a common company
+// word, not a distinctive name). Only used to veto a SINGLE-token fuzzy match.
+const GENERIC_MIN_ENTRIES = 6;
+
+/** Recompute which tokens are generic (shared across many entries). Call after entries change. */
+export function computeGenericTokens(master: ScripMaster): void {
+  const freq = new Map<string, number>();
+  for (const e of master.entries) {
+    const seen = new Set<string>();
+    for (const ts of e.tokenSets) for (const t of ts) seen.add(t);
+    for (const t of seen) freq.set(t, (freq.get(t) || 0) + 1);
+  }
+  master.genericTokens = new Set([...freq].filter(([, c]) => c >= GENERIC_MIN_ENTRIES).map(([t]) => t));
+}
+
+/** A token-subset hit that isn't carried solely by one generic word. `sub ⊆ sup`, but a
+ *  size-1 subset whose only token is generic ("corporation"/"securities"/…) doesn't count —
+ *  that's the over-match that sent "Deepak Fertilizers … Corporation" to "S & T Corporation". */
+const distinctiveSubset = (sub: Set<string>, sup: Set<string>, generic: Set<string>): boolean => {
+  if (!isSubset(sub, sup)) return false;
+  if (sub.size === 1 && generic.has([...sub][0])) return false;
+  return true;
+};
 
 /** Claim an alias-norm slot for an entry. A name another entry carries as its
  *  CANONICAL name can't be displaced by a mere alias — e.g. the "-RE" rights
@@ -255,6 +285,7 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
     }
   }
 
+  computeGenericTokens(master);   // which single tokens are too common to carry a fuzzy match
   master.dirty = false;
   _cache = { id: spreadsheetId, master, ts: now };   // cache only after a SUCCESSFUL read
   return master;
@@ -288,7 +319,7 @@ export function resolveScrip(master: ScripMaster, isin: string, name: string): R
   if (toks.size > 0) {
     const candidates: ScripEntry[] = [];
     for (const entry of master.entries) {
-      const hit = entry.tokenSets.some(a => isSubset(a, toks) || isSubset(toks, a))
+      const hit = entry.tokenSets.some(a => distinctiveSubset(a, toks, master.genericTokens) || distinctiveSubset(toks, a, master.genericTokens))
         || prefixHit(entry.aliasNorms, nk);
       if (hit) candidates.push(entry);
     }
@@ -323,7 +354,7 @@ export function lookupScrip(master: ScripMaster, isin: string, name: string): Sc
   if (toks.size > 0) {
     const cands: ScripEntry[] = [];
     for (const e of master.entries) {
-      if (e.tokenSets.some(a => isSubset(a, toks) || isSubset(toks, a)) || prefixHit(e.aliasNorms, nk)) cands.push(e);
+      if (e.tokenSets.some(a => distinctiveSubset(a, toks, master.genericTokens) || distinctiveSubset(toks, a, master.genericTokens)) || prefixHit(e.aliasNorms, nk)) cands.push(e);
     }
     if (cands.length === 1) return { entry: cands[0], foundBy: "name" };
   }

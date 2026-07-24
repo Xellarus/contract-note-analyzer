@@ -1,5 +1,6 @@
 import { ContractNoteResult, Summary, Trade, TransactionType, TradeType } from '../../types';
 import { BrokerStrategy } from './types';
+import { allocateStt } from './stt';
 import {
   parseNumber,
   cleanText,
@@ -533,29 +534,6 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     const totalBuyTurnover = tradesToProcess.reduce((sum, t) => t.type === "Buy" ? sum + (t.quantity * t.price) : sum, 0);
     const totalSellTurnover = tradesToProcess.reduce((sum, t) => t.type === "Sell" ? sum + (t.quantity * t.price) : sum, 0);
 
-    const INSTRUMENT_RULES = {
-      EQUITY: {
-        delivery: {
-          buy: 0.001,
-          sell: 0.001
-        },
-        intraday: {
-          buy: 0,
-          sell: 0.00025
-        }
-      },
-      ETF: {
-        delivery: {
-          buy: 0,
-          sell: 0
-        },
-        intraday: {
-          buy: 0,
-          sell: 0
-        }
-      }
-    };
-
     const classifyInstrument = (symbol: string): "EQUITY" | "ETF" => {
       const s = symbol.toUpperCase();
       if (
@@ -580,6 +558,20 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
     };
 
     const numTrades = tradesToProcess.length;
+
+    // STT: allocate the note's printed total across the trades (delivery at the
+    // exact 0.1%; the leftover intraday pool pro-rata by squared-off turnover,
+    // split 50/50 buy/sell). Shared with every broker — see ./stt.
+    const sttArr = allocateStt(
+      tradesToProcess.map(t => ({
+        securityName: t.securityName,
+        type: t.type as "Buy" | "Sell",
+        quantity: t.quantity,
+        price: t.price,
+        exempt: classifyInstrument(t.securityName) !== "EQUITY",
+      })),
+      summary.stt || 0
+    );
 
     const trades: Trade[] = tradesToProcess.map((t, idx) => {
       const isLast = idx === numTrades - 1;
@@ -628,11 +620,8 @@ export class ZerodhaBrokerStrategy implements BrokerStrategy {
       const brokerage = allocateExpense(summary.taxableValue, 'brokerage', ratio);
       
       const tradeType = isIntraday ? "Intraday" : "Delivery";
-      const instrumentType = classifyInstrument(t.securityName);
-      const tradeTypeKey = isIntraday ? "intraday" : "delivery";
-      const sideKey = t.type === "Buy" ? "buy" : "sell";
-      const rate = INSTRUMENT_RULES[instrumentType][tradeTypeKey][sideKey];
-      const stt = Math.round(grossTotal * rate);
+      // STT pre-allocated across all trades from the note's printed total (see ./stt).
+      const stt = sttArr[idx];
 
       const etc = allocateExpense(summary.etc, 'etc', ratio);
       const sebiFees = allocateExpense(summary.sebiFees, 'sebiFees', ratio);

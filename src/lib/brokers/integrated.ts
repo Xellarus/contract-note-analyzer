@@ -1,5 +1,6 @@
 import { ContractNoteResult, Summary, Trade, TransactionType, TradeType } from '../../types';
 import { BrokerStrategy } from './types';
+import { allocateStt } from './stt';
 import {
   parseNumber,
   cleanText,
@@ -575,6 +576,20 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
 
     const numTrades = tradesToProcess.length;
 
+    // STT: allocate the note's printed total across the trades (delivery at the
+    // exact 0.1%; the leftover intraday pool pro-rata by squared-off turnover,
+    // split 50/50 buy/sell). Shared with every broker — see ./stt.
+    const sttArr = allocateStt(
+      tradesToProcess.map(t => ({
+        securityName: t.securityName,
+        type: t.type as "Buy" | "Sell",
+        quantity: t.quantity,
+        price: t.price,
+        exempt: t.securityName.toLowerCase().includes("liquidbees"),
+      })),
+      summary.stt || 0
+    );
+
     const trades: Trade[] = tradesToProcess.map((t, idx) => {
       const isLast = idx === numTrades - 1;
       const s = securityStats.get(t.securityName);
@@ -611,18 +626,8 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
       // Brokerage: quantity * brokeragePerShare
       const brokerage = rt(t.quantity * (t.brokeragePerShare || 0));
       
-      // STT Delivery: 0.1% on buy and sell transactions
-      // STT Intraday: 0.025% on sell side, but 0 if fully matched (buyQty === sellQty)
-      const getStt = () => {
-        if (t.securityName.toLowerCase().includes("liquidbees")) return 0;
-        if (!isIntraday) {
-          return Math.round(grossTotal * 0.001);
-        } else {
-          if (s.buyQty === s.sellQty) return 0;
-          return t.type === "Sell" ? Math.round(grossTotal * 0.00025) : 0;
-        }
-      };
-      const stt = getStt();
+      // STT pre-allocated across all trades from the note's printed total (see ./stt).
+      const stt = sttArr[idx];
 
       const allocateExpense = (totalVal: number, key: keyof typeof remainingAmount, r: number) => {
         if (isLast) return rt(remainingAmount[key]);

@@ -1,5 +1,6 @@
 import { ContractNoteResult, Summary, Trade, TransactionType, TradeType } from '../../types';
 import { BrokerStrategy } from './types';
+import { allocateStt } from './stt';
 import {
   parseNumber,
   cleanText,
@@ -815,20 +816,19 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       }
     });
 
-    const INSTRUMENT_RULES = {
-      EQUITY: {
-        delivery: { buy: 0.001, sell: 0.001 },
-        intraday: { buy: 0, sell: 0.00025 }
-      },
-      ETF: {
-        delivery: { buy: 0, sell: 0 },
-        intraday: { buy: 0, sell: 0 }
-      },
-      MUTUAL_FUND: {
-        delivery: { buy: 0, sell: 0 },
-        intraday: { buy: 0, sell: 0 }
-      }
-    };
+    // STT: allocate the note's printed total across the trades (delivery at the
+    // exact 0.1%; the leftover intraday pool pro-rata by squared-off turnover,
+    // split 50/50 buy/sell). Shared with every broker — see ./stt.
+    const sttArr = allocateStt(
+      tradesToProcess.map(t => ({
+        securityName: t.securityName,
+        type: t.type as "Buy" | "Sell",
+        quantity: t.quantity,
+        price: t.price,
+        exempt: classifyInstrument(t.securityName) !== "EQUITY",
+      })),
+      summary.stt || 0
+    );
 
     const trades: Trade[] = tradesToProcess.map((t, idx) => {
       const s = securityStats.get(t.securityName);
@@ -881,10 +881,8 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       }
       
       const tradeType = isIntraday ? "Intraday" : "Delivery";
-      const tradeTypeKey = isIntraday ? "intraday" : "delivery";
-      const sideKey = t.type === "Buy" ? "buy" : "sell";
-      const rate = INSTRUMENT_RULES[instrumentType][tradeTypeKey][sideKey];
-      const stt = rt(grossTotal * rate);
+      // STT pre-allocated across all trades from the note's printed total (see ./stt).
+      const stt = sttArr[idx];
 
       const etc = isMutualFund ? 0 : isSingleTrade ? rt(summary.etc) : rt(summary.etc * ratio);
       const sebiFees = isMutualFund ? 0 : isSingleTrade ? rt(summary.sebiFees) : rt(summary.sebiFees * ratio);

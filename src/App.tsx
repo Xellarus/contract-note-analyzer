@@ -828,11 +828,16 @@ export default function App() {
   };
 
   // ── Right after a successful parse, confirm each security's name against the
-  // NSE/BSE list. Runs for Integrated notes (ISIN-bearing) and Transaction
-  // Reports (name-only, no ISIN) — for the latter this is the only chance to map
-  // a name the list doesn't recognise, otherwise its Holding/LTST would split. ──
+  // NSE/BSE list. Runs for EVERY broker that produced named securities:
+  // ISIN-bearing notes (Integrated, Zerodha, Share India, Standard) confirm
+  // primarily by ISIN — but when a note's ISIN isn't in the master they'd
+  // otherwise fall through to fuzzy name-matching with no human check, so the
+  // popup catches that. The name-only Transaction Report confirms by name — for
+  // it this is the only chance to map a name the list doesn't recognise,
+  // otherwise its Holding/LTST would split. Skipped only when the parse yielded
+  // no named securities (nothing to confirm). ──
   const confirmSecurities = async (parsed: ContractNoteResult) => {
-    if (parsed.brokerName !== 'integrated' && parsed.brokerName !== 'transaction-report') return;
+    if (!parsed.trades.some(t => t.securityName && t.securityName.trim())) return;
     let master: ScripMaster;
     try {
       master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
@@ -938,7 +943,7 @@ export default function App() {
         const merged = mergeResults(results);
         setData(merged);
         setPendingFiles(null);
-        confirmSecurities(merged);  // name-confirmation popup for Integrated notes & Transaction Reports
+        confirmSecurities(merged);  // security-confirmation popup for every broker (Integrated, Zerodha, Share India, Standard, Transaction Report)
       }
     } catch (err: any) {
       setError(err?.message || "Failed to parse the files. Please check if they are valid contract notes.");

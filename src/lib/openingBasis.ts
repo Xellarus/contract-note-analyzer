@@ -476,12 +476,19 @@ export interface OpeningPosAsOf { name: string; qty: number; avgCost: number; }
 
 /**
  * Replay the batch opening-basis transactions to a past date → each scrip's surviving
- * quantity + weighted-average cost as of `asOfTs`. Per scrip, per day: same-day buys/sells
- * are netted (an intraday round-trip drops out, so it can't distort the average — mirrors
- * the FY26 engine's `squareOffIntraday`); BONUS/RIGHT add held×ratio (₹0 / rights price),
- * SPLIT rescales (qty ×f, cost ÷f), all from `resolutions`. Rows dated after `asOfTs` are
- * excluded; undated rows (ts ≤ 0) are treated as always-held. Keyed by `obKey(name)`; the
- * caller maps that to the scrip-master key when seeding. Pure (no gapi).
+ * quantity + weighted-average cost as of `asOfTs`.
+ *
+ * QUANTITY comes from the broker's own running **BAL QTY** when the statement carries it
+ * (the last balance on/before the date) — it's exact, always whole, and already reflects the
+ * ACTUAL rights subscribed / bonus / split, so it's immune to a wrong or fractional corp-action
+ * ratio (e.g. a 1:15 rights on 500 held wrongly computing 533.33). Only when there's no balance
+ * column does it fall back to the reconstructed net (buy − sell + resolved corp actions).
+ *
+ * COST/SHARE is the weighted average from replaying the rows: per scrip, per day, same-day
+ * buys/sells net (intraday round-trip drops out — mirrors the FY26 engine's `squareOffIntraday`);
+ * BONUS/RIGHT add held×ratio (₹0 / rights price), SPLIT rescales (qty ×f, cost ÷f), all from
+ * `resolutions`. Rows dated after `asOfTs` are excluded; undated rows (ts ≤ 0) are always-held.
+ * Keyed by `obKey(name)`; the caller maps that to the scrip-master key when seeding. Pure (no gapi).
  */
 export function replayOpeningTxnsAsOf(
   txns: TxnStatementRow[],
@@ -532,7 +539,12 @@ export function replayOpeningTxnsAsOf(
       else if (e.kind === "BONUS") { const r = resolutions[corpActionKey(k, "BONUS", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const c = qty * avg; qty += add; avg = qty > 0 ? c / qty : 0; } } }
       else if (e.kind === "RIGHT") { const r = resolutions[corpActionKey(k, "RIGHT", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const nq = qty + add; avg = nq > 0 ? (qty * avg + add * (r.price || 0)) / nq : 0; qty = nq; } } }
     }
-    if (qty > 1e-9) out[k] = { name: displayName, qty: r6(qty), avgCost: r6(avg) };
+    // Prefer the broker's running balance for QUANTITY (authoritative, whole, immune to a bad
+    // corp-action ratio); keep the replay's weighted-average cost/share. Rows are already ≤ asOfTs.
+    let finalQty = qty;
+    const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
+    if (sorted.some(r => r.balQty !== 0)) finalQty = sorted[sorted.length - 1].balQty;
+    if (finalQty > 1e-9) out[k] = { name: displayName, qty: r6(finalQty), avgCost: r6(avg) };
   }
   return out;
 }

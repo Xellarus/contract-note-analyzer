@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import {
-  UploadCloud, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, AlertTriangle, X, Layers, CalendarClock, Link2Off, Wand2, Pencil, Layers3, RotateCcw, History,
+  UploadCloud, FileSpreadsheet, Loader2, CheckCircle2, AlertCircle, AlertTriangle, X, Layers, CalendarClock, Link2Off, Link2, Wand2, Pencil, Layers3, RotateCcw, History,
 } from 'lucide-react';
 import {
   parseTransactionStatement, parseHoldingPeriodReport, reconstructOpeningLots, accumulateReportLots, advanceTxnNet,
@@ -12,9 +12,10 @@ import { loadOpeningCorpActions, loadOpeningCorpActionRows, saveOpeningCorpActio
 import { loadOpeningBasisState, saveOpeningBasisState, resetOpeningBasisState, OpeningBasisState } from '../lib/openingBasisState';
 import { rebuildHoldingTab, syncCapitalGains } from '../lib/holdingsCalc';
 import { PORTFOLIOS, portfolioById } from '../lib/portfolios';
-import { loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { loadScripMaster, lookupScrip, invalidateScripCache, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { toast, ModalShell } from './ui/overlay';
+import OpeningScripMapModal from './OpeningScripMapModal';
 
 // Standardize a lot's security to the scrip master's canonical name + ISIN, so
 // opening lots FIFO-match the same stock in FY26 contract notes.
@@ -54,6 +55,7 @@ export default function OpeningBasisImport() {
   const [resolutions, setResolutions] = useState<Record<string, ActionResolution>>({});
   const [modalOpen, setModalOpen] = useState(false);
   const [draft, setDraft] = useState<Record<string, DraftRow>>({});
+  const [mapOpen, setMapOpen] = useState(false);   // "map unmatched scrips to the master" popup
 
   // ── Reconstruct the preview ──────────────────────────────────────────────────
   // Replace mode: replay the full statement (needs the 31-Mar holding statement).
@@ -485,8 +487,14 @@ export default function OpeningBasisImport() {
               {/* Unmatched scrips (not in the scrip master) */}
               {unmatched.length > 0 && (
                 <div className="m-4 p-3 rounded-xl border border-rose-200 bg-rose-50">
-                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-rose-700 mb-1.5"><Link2Off className="w-4 h-4" /> {unmatched.length} scrip(s) not in the scrip master</div>
-                  <p className="text-[11px] text-rose-700/90 mb-1.5">They'll still import (under the statement name), but add them to the scrip master so they line up with your FY26 contract notes.</p>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-1.5 text-[12px] font-bold text-rose-700"><Link2Off className="w-4 h-4" /> {unmatched.length} scrip(s) not in the scrip master</div>
+                    <button onClick={() => setMapOpen(true)} disabled={!master}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold rounded-lg cursor-pointer disabled:opacity-50">
+                      <Link2 className="w-3.5 h-3.5" /> Map to a stock
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-rose-700/90 mb-1.5">Pick the right stock for each (Map to a stock) so they line up with your FY26 contract notes — or leave them to import under the statement name.</p>
                   <p className="text-[11px] text-rose-800 break-words">{unmatched.slice(0, 40).join(', ')}{unmatched.length > 40 ? ` +${unmatched.length - 40} more` : ''}</p>
                 </div>
               )}
@@ -670,6 +678,25 @@ export default function OpeningBasisImport() {
           </div>
         </div>
       </ModalShell>
+
+      {/* Map unmatched statement names to existing scrip-master entries (user picks the stock). */}
+      {master && (
+        <OpeningScripMapModal
+          open={mapOpen}
+          spreadsheetId={SCRIP_MASTER_SPREADSHEET_ID}
+          master={master}
+          names={unmatched}
+          onClose={() => setMapOpen(false)}
+          onApplied={async () => {
+            setMapOpen(false);
+            invalidateScripCache();
+            const m = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).catch(() => null);
+            if (m) setMaster(m);
+            setReloadTick(t => t + 1);   // re-resolve the preview + running position against the new aliases
+            toast.success('Scrip mappings saved — re-resolving.');
+          }}
+        />
+      )}
     </div>
   );
 }
