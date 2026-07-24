@@ -539,11 +539,24 @@ export function replayOpeningTxnsAsOf(
       else if (e.kind === "BONUS") { const r = resolutions[corpActionKey(k, "BONUS", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const c = qty * avg; qty += add; avg = qty > 0 ? c / qty : 0; } } }
       else if (e.kind === "RIGHT") { const r = resolutions[corpActionKey(k, "RIGHT", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const nq = qty + add; avg = nq > 0 ? (qty * avg + add * (r.price || 0)) / nq : 0; qty = nq; } } }
     }
-    // Prefer the broker's running balance for QUANTITY (authoritative, whole, immune to a bad
-    // corp-action ratio); keep the replay's weighted-average cost/share. Rows are already ≤ asOfTs.
+    // QUANTITY: prefer the broker's running balance (whole, immune to a fractional corp-action
+    // ratio) — BUT only when it's a believable version of the reconstructed net, so a corrupt
+    // balance value can't multiply into a garbage invested figure. Two cases keep the balance:
+    //   • a RIGHTS action is present — the entitlement may be partly/not subscribed, so the
+    //     balance is authoritative even when it diverges a lot (1:15 rights: net 533.33, bal 500);
+    //   • the balance ≈ the net (splits/bonuses are automatic, so the resolved reconstruction
+    //     already equals the balance; the only gap is fractional-share rounding).
+    // Otherwise the balance is a bad statement value (e.g. a mis-keyed 8,00,000 for 8,000) →
+    // keep the reconstruction. Cost/share stays the replay's weighted average (invested is then
+    // qty × avg, internally consistent). Rows are already ≤ asOfTs.
     let finalQty = qty;
     const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
-    if (sorted.some(r => r.balQty !== 0)) finalQty = sorted[sorted.length - 1].balQty;
+    if (sorted.some(r => r.balQty !== 0)) {
+      const bal = sorted[sorted.length - 1].balQty;
+      const hasRights = corp.some(c => c.kind === "RIGHT");
+      const believable = Math.abs(bal - qty) <= Math.max(1, Math.abs(qty) * 0.02);
+      if (hasRights || believable) finalQty = bal;
+    }
     if (finalQty > 1e-9) out[k] = { name: displayName, qty: r6(finalQty), avgCost: r6(avg) };
   }
   return out;
