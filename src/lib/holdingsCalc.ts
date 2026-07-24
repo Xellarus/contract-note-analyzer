@@ -167,6 +167,32 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
       h.quantity += p.qty;
       h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0;
     }
+
+    // COST: defer to the reconciled Holding Period Report (the "Opening Holdings" the live
+    // Holdings view uses and that the user checked against the broker) for any stock it covers
+    // whose replayed opening position reconciles with it. The txn-replay cost is re-summed from
+    // the raw statement and doesn't tie to the broker's HPR figure to the rupee (per-lot charge
+    // rounding), so a covered, unchanged holding would otherwise drift by a few thousand ₹.
+    // Matched on the split-INVARIANT invested total, so it lines up regardless of a later split;
+    // a divergence beyond 2% means the position genuinely differs at this date (interim
+    // buys/sells the HPR's surviving lots don't represent) → keep the replay cost.
+    const openingLots = await loadOpeningHoldings(spreadsheetId).catch(() => []);
+    if (openingLots.length) {
+      const hprInvestedByKey = new Map<string, number>();   // resolved key → Σ HPR cost basis
+      for (const ol of openingLots) {
+        const r = resolveScrip(master, ol.isin, ol.name);
+        const key = r.status === "resolved" ? r.key : ((ol.isin || "").trim() || normName(ol.name));
+        hprInvestedByKey.set(key, (hprInvestedByKey.get(key) || 0) + ol.qty * ol.costPerShare);
+      }
+      for (const [key, h] of byKey) {
+        const hprInvested = hprInvestedByKey.get(key);
+        if (hprInvested === undefined || hprInvested <= 0 || h.quantity <= 1e-9) continue;
+        const replayBasis = h.quantity * h.avgBuyPrice;
+        if (Math.abs(replayBasis - hprInvested) <= hprInvested * 0.02) {
+          h.avgBuyPrice = hprInvested / h.quantity;   // invested becomes the reconciled HPR figure
+        }
+      }
+    }
   }
 
   // 2. FY26 trades from True Entry, replayed on top. Tolerant: a missing/empty tab just means
