@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useGoogleLogin } from '@react-oauth/google';
-import { Briefcase, ShieldCheck, Loader2 } from 'lucide-react';
+import { ShieldCheck, Loader2 } from 'lucide-react';
 import { PortfolioUser } from '../types';
 import { persistGoogleToken } from '../lib/googleAuth';
+import blackSpinnSvg from '../assets/black-spinn.svg?url';
 
 interface LoginProps {
   onLoginSuccess: (user: PortfolioUser) => void;
@@ -63,34 +64,30 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-indigo-500/10 blur-[120px] pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-emerald-500/5 blur-[100px] pointer-events-none" />
 
-      {/* Top Header Row */}
-      <header className="relative z-10 px-8 py-6 flex items-center justify-between border-b border-white/5 bg-slate-950/20 backdrop-blur-md">
-        <div className="flex items-center gap-3">
-          <div className="bg-indigo-650 text-white p-2 rounded-xl shadow shadow-indigo-500/20">
-            <Briefcase className="w-5 h-5 text-indigo-200" />
-          </div>
-          <div>
-            <span className="font-black text-sm text-white tracking-widest uppercase leading-none mt-1 block">Backoffice</span>
-          </div>
-        </div>
-      </header>
+      {/* Animated "Black Spinn" backdrop — large, centered, behind all content (z-0 < z-10 header/card) */}
+      <img
+        src={blackSpinnSvg}
+        alt=""
+        aria-hidden="true"
+        className="pointer-events-none select-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[130vmin] h-[130vmin] max-w-none z-0 opacity-90"
+      />
 
       {/* Main Content Card Box */}
       <div className="relative z-10 flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-sm bg-white/5 border border-white/10 rounded-3xl p-8 backdrop-blur-xl shadow-2xl flex flex-col items-center">
 
           {/* Logo illustration */}
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/25 mb-6">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/25 mb-5">
             <ShieldCheck className="w-8 h-8 text-white" />
           </div>
+
+          {/* Brand */}
+          <span className="font-black text-[11px] text-indigo-300 tracking-[0.25em] uppercase mb-1.5">Backoffice</span>
 
           {/* Typography */}
           <h2 className="text-xl font-black tracking-tight text-white text-center font-sans">
             Portfolio & Ledger Control
           </h2>
-          <p className="text-[11px] text-slate-400 text-center mt-2">
-            One sign-in connects your account and Google Sheets together.
-          </p>
 
           <div className="w-full h-px bg-white/10 my-6" />
 
