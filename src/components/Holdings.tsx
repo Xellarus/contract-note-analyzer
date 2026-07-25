@@ -18,6 +18,7 @@ import { deleteSheetRow } from '../lib/sheetTabs';
 import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
+import CubeLoader from './ui/CubeLoader';
 import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
 import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
@@ -258,6 +259,9 @@ export default function Holdings({
   const [showAddForm, setShowAddForm] = useState(false);
   // Manual trade entry drawer (writes real trades to the portfolio's sheet).
   const [showAddTrade, setShowAddTrade] = useState(false);
+  // "Edit Trade" mode — reveals inline row editing in the Trade Book (replaces the
+  // always-on per-row Edit button). Toggled from the detail page's Position card.
+  const [editMode, setEditMode] = useState(false);
   const [newSymbol, setNewSymbol] = useState('');
   const [newName, setNewName] = useState('');
   const [newIsin, setNewIsin] = useState('');
@@ -2053,7 +2057,7 @@ export default function Holdings({
 
         {/* Nested Tabs Panel */}
         <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden" id="detail-granular-tabs-container">
-          <div className="flex border-b border-slate-200 bg-slate-50 px-4">
+          <div className="flex items-center border-b border-slate-200 bg-slate-50 px-4">
             <button
               onClick={() => setActiveDetailTab('trade_book')}
               className={`px-4 py-3 text-xs font-black tracking-tight border-b-2 cursor-pointer transition-all ${
@@ -2087,6 +2091,29 @@ export default function Holdings({
             >
               Realised Inventory
             </button>
+            {activePortfolio !== 'local' && (
+              <div className="ml-auto flex items-center gap-1.5 py-1.5">
+                {/* Add a trade for THIS security — the company is pre-filled since we're inside it. */}
+                <button
+                  id="detail-add-trade"
+                  onClick={() => setShowAddTrade(true)}
+                  title={`Add a trade for ${name}`}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3 h-3" /> Add Trade
+                </button>
+                {/* Toggle inline editing of the Trade Book ledger rows. */}
+                <button
+                  id="detail-edit-trade"
+                  aria-pressed={editMode}
+                  onClick={() => setEditMode(m => { const next = !m; if (next) setActiveDetailTab('trade_book'); else setEditingTx(null); return next; })}
+                  title="Edit the Trade Book rows inline"
+                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer transition-colors border ${editMode ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
+                >
+                  <Edit2 className="w-3 h-3" /> {editMode ? 'Editing' : 'Edit Trade'}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="p-4 bg-slate-50/50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -2130,13 +2157,13 @@ export default function Holdings({
                         {sortTh('BROKERAGE', 'brokerage', 'right')}
                         {sortTh('AMOUNT', 'amount', 'right')}
                         {sortTh('BAL QTY', 'balanceQuantity', 'right')}
-                        <th className="px-6 py-3 text-center">EDIT</th>
+                        {editMode && <th className="px-6 py-3 text-center">EDIT</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
                       {sortedTxs.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="px-6 py-12 text-center text-slate-400 italic font-medium">
+                          <td colSpan={editMode ? 8 : 7} className="px-6 py-12 text-center text-slate-400 italic font-medium">
                             No matching ledger line items found.
                           </td>
                         </tr>
@@ -2148,9 +2175,71 @@ export default function Holdings({
                           const isSell = side === "SELL";
                           const isBuy = side === "BUY" && !isCorp;
                           const isDiv = type.includes("DIVIDEND");
-                          
+                          const editable = !!t.editSource && activePortfolio !== 'local';
+                          const isOpening = t.editSource === 'opening';
+                          const isEditingThis = editMode && editingTx != null && t.sheetRow != null &&
+                            editingTx.editSource === t.editSource && editingTx.sheetRow === t.sheetRow;
+
+                          // Inline-edit input styling + a setter that keeps turnover = qty × price in sync.
+                          const inCls = "w-full px-1.5 py-1 text-xs border border-indigo-200 rounded-md font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white";
+                          const setF = (k: string, v: string) => setEditForm(p => {
+                            const next: Record<string, string> = { ...p, [k]: v };
+                            if (k === 'quantity' || k === 'price') {
+                              next.turnover = String(Math.round(numCell(next.quantity) * numCell(next.price) * 100) / 100);
+                            }
+                            return next;
+                          });
+
+                          if (isEditingThis) {
+                            return (
+                              <tr key={idx} className="bg-indigo-50/40">
+                                <td className="px-3 py-2">
+                                  <input value={editForm.tradeDate ?? ''} onChange={e => setF('tradeDate', e.target.value)} className={inCls} />
+                                </td>
+                                <td className="px-3 py-2">
+                                  {isOpening
+                                    ? <span className="text-[10px] font-bold uppercase text-violet-700">Opening Buy</span>
+                                    : <input value={editForm.transactionType ?? ''} onChange={e => setF('transactionType', e.target.value)} className={inCls} />}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <input type="number" step="any" value={editForm.quantity ?? ''} onChange={e => setF('quantity', e.target.value)} className={`${inCls} text-right`} />
+                                </td>
+                                <td className="px-3 py-2">
+                                  <input type="number" step="any" value={editForm.price ?? ''} onChange={e => setF('price', e.target.value)} className={`${inCls} text-right`} />
+                                </td>
+                                <td className="px-3 py-2">
+                                  {isOpening
+                                    ? <span className="block text-right text-slate-300">—</span>
+                                    : <input type="number" step="any" value={editForm.brokerage ?? ''} onChange={e => setF('brokerage', e.target.value)} className={`${inCls} text-right`} />}
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-[11px] text-slate-500" title="Recomputed on save">
+                                  {formatINR(numCell(editForm.quantity) * numCell(editForm.price))}
+                                </td>
+                                <td className="px-3 py-2 text-right text-slate-300">—</td>
+                                <td className="px-3 py-2">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button onClick={saveEdit} disabled={savingEdit || deletingEdit} title="Save & recompute"
+                                      className="p-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer disabled:opacity-50">
+                                      {savingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                                    </button>
+                                    <button onClick={() => setEditingTx(null)} disabled={savingEdit || deletingEdit} title="Cancel"
+                                      className="p-1.5 rounded-md border border-slate-200 text-slate-500 hover:bg-slate-100 cursor-pointer disabled:opacity-50">
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button onClick={deleteEntry} disabled={savingEdit || deletingEdit} title="Delete entry"
+                                      className="p-1.5 rounded-md border border-rose-200 text-rose-600 hover:bg-rose-50 cursor-pointer disabled:opacity-50">
+                                      {deletingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          }
+
                           return (
-                            <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
+                            <tr key={idx}
+                              onClick={editMode && editable ? () => openEdit(t) : undefined}
+                              className={`transition-colors ${editMode && editable ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
                               <td className="px-6 py-3.5 font-medium text-slate-600">{t.tradeDate}</td>
                               <td className="px-6 py-3.5">
                                 <span className={`inline-block px-2.5 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none ${
@@ -2178,19 +2267,21 @@ export default function Holdings({
                               <td className="px-6 py-3.5 text-right font-mono text-slate-450">
                                 {t.balanceQuantity !== undefined ? formatNum(t.balanceQuantity) : '—'}
                               </td>
-                              <td className="px-6 py-3.5 text-center">
-                                {t.editSource && activePortfolio !== 'local' ? (
-                                  <button
-                                    onClick={() => openEdit(t)}
-                                    title="Edit this entry"
-                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:text-white hover:bg-indigo-600 border border-indigo-200 hover:border-indigo-600 rounded-md transition-colors cursor-pointer"
-                                  >
-                                    <Edit2 className="w-3 h-3" /> Edit
-                                  </button>
-                                ) : (
-                                  <span className="text-slate-300">—</span>
-                                )}
-                              </td>
+                              {editMode && (
+                                <td className="px-6 py-3.5 text-center">
+                                  {editable ? (
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); openEdit(t); }}
+                                      title="Edit this entry inline"
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:text-white hover:bg-indigo-600 border border-indigo-200 hover:border-indigo-600 rounded-md transition-colors cursor-pointer"
+                                    >
+                                      <Edit2 className="w-3 h-3" /> Edit
+                                    </button>
+                                  ) : (
+                                    <span className="text-slate-300">—</span>
+                                  )}
+                                </td>
+                              )}
                             </tr>
                           );
                         })
@@ -2320,6 +2411,21 @@ export default function Holdings({
           </div>
         </div>
         {editEntryModal}
+        {/* Add Trade drawer, pre-filled with THIS security. Mounted here too because the
+            detail view early-returns before the main return's copy would render. */}
+        <AddTradeModal
+          open={showAddTrade}
+          onClose={() => setShowAddTrade(false)}
+          defaultPortfolio={activePortfolio === 'local' ? DEFAULT_PORTFOLIO_ID : activePortfolio}
+          master={scrip}
+          holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
+          prefill={{ company: name, isin: displayIsin || isin }}
+          onSaved={(pid) => {
+            if (pid !== activePortfolio) return;
+            fetchSheetHoldings(pid, true);
+            if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+          }}
+        />
       </div>
     );
   };
@@ -2815,7 +2921,7 @@ export default function Holdings({
                 {/* Live spreadsheet synchronization loaders */}
                 {isLoadingSheet ? (
                   <div className="py-20 text-center space-y-3">
-                    <RefreshCw className="w-10 h-10 text-indigo-600 animate-spin mx-auto" />
+                    <CubeLoader className="w-24 mx-auto text-indigo-600" />
                     <p className="text-xs font-black text-slate-500 animate-pulse">Loading holdings ledger values...</p>
                   </div>
                 ) : sheetError ? (

@@ -15,6 +15,7 @@ interface AddTradeModalProps {
   master: ScripMaster | null;
   onSaved: (pid: string) => void;
   holdings?: { name: string; isin: string; qty: number }[];   // active-portfolio holdings, to prefill "shares held" for Bonus/Split
+  prefill?: { company: string; isin: string };                // pre-select a security (opened from a stock's detail page)
 }
 
 const portfolioLabel = (id: string) => { const p = portfolioById(id); return p ? `${p.label} · ${p.code}` : id; };
@@ -91,7 +92,7 @@ const todayISO = (): string => {
 const isFreeShares = (a: ManualAction) => a === 'Bonus' || a === 'Split';
 const isDeliveryLocked = (a: ManualAction) => isFreeShares(a) || a === 'IPO' || a === 'Rights';
 
-export default function AddTradeModal({ open, onClose, defaultPortfolio, master, onSaved, holdings }: AddTradeModalProps) {
+export default function AddTradeModal({ open, onClose, defaultPortfolio, master, onSaved, holdings, prefill }: AddTradeModalProps) {
   const titleId = useId();
   const [portfolio, setPortfolio] = useState<string>(defaultPortfolio);
   const [tradeDate, setTradeDate] = useState<string>(todayISO());
@@ -128,12 +129,13 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     if (!open) return;
     setPortfolio(defaultPortfolio);
     setTradeDate(todayISO());
-    setLines([blankLine()]);
+    // Opened from a stock's detail page → seed the first line with that security.
+    setLines([prefill?.company ? { ...blankLine(), company: prefill.company, isin: prefill.isin || '' } : blankLine()]);
     setSaving(false); setError(null); setResult(null);
     setMode('trades'); setCaType('Merger'); setCaDate(todayISO());
     setCaFrom(''); setCaTo(''); setCaSharesIn(''); setCaCost(''); setCaNotes('');
     setCaSaving(false); setCaError(null); setCaResult(null);
-  }, [open, defaultPortfolio]);
+  }, [open, defaultPortfolio, prefill?.company, prefill?.isin]);
 
   // Company autocomplete is handled by <ScripCombobox> (a filtered typeahead), not a
   // native <datalist> — the latter silently stops rendering suggestions once the master

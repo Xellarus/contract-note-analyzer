@@ -23,6 +23,7 @@ import SecurityConfirmModal, { ConfirmSecurity } from './components/SecurityConf
 import { toast, confirmDialog } from './components/ui/overlay';
 import { useVirtualRows } from './components/ui/useVirtualRows';
 import { processFile, mergeResults, calculateReconciliation } from './lib/parsers';
+import sessionVaultSvg from './assets/session-vault.svg?url';
 import CsvAuditor from './components/CsvAuditor';
 import Dashboard from './components/Dashboard';
 import Holdings from './components/Holdings';
@@ -1695,9 +1696,7 @@ export default function App() {
       {sessionExpired && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
           <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-6 text-center">
-            <div className="mx-auto w-12 h-12 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center mb-3">
-              <ShieldCheck className="w-6 h-6" />
-            </div>
+            <img src={sessionVaultSvg} alt="" aria-hidden="true" className="mx-auto w-28 h-28 mb-2 select-none pointer-events-none" />
             <h3 className="text-sm font-black text-slate-800 dark:text-slate-100 uppercase tracking-tight">Session expired</h3>
             <button
               onClick={() => login()}
