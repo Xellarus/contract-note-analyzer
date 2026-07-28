@@ -152,9 +152,12 @@ export const obKey = (name: string): string =>
   (name || "").toLowerCase().replace(/[.,()'"]/g, " ").replace(/\b(ltd|limited|the)\b/g, " ").replace(/\s+/g, " ").trim();
 
 // Broker rights-entitlement placeholders — a temporary security named like "XYZ Right
-// Issue Ltd" (or "Rights Issue") — are NOT real holdings. Skip them in every upload
-// (user directive 2026-07-21). Matches "right issue" / "rights issue", any spacing/case.
-export const isRightIssueName = (name: string): boolean => /rights?\s*issue/i.test(name || "");
+// Issue Ltd", "Rights Issue", or "… (Rights Entitlements (REs))" — are NOT real holdings:
+// they're transient (they convert to (partly-paid) shares or lapse within the rights window),
+// so the app can't extinguish them in a replay and they'd wrongly persist. Skip them on every
+// upload AND when reading the persisted history (user directive 2026-07-21; widened 2026-07-28
+// to also catch "Rights Entitlement(s)" / a "(RE)"/"(REs)" marker). Any spacing/case.
+export const isRightIssueName = (name: string): boolean => /rights?\s*(issue|entitlement)|\(res?\)/i.test(name || "");
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 /** Parse a 31-Mar holding / historical-valuation CSV. Header-driven (tolerant of

@@ -1,6 +1,6 @@
 import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
-import { TxnStatementRow, obKey } from "./openingBasis";
+import { TxnStatementRow, obKey, isRightIssueName } from "./openingBasis";
 
 /**
  * Raw dated transaction history from a BATCH (date-sliced) opening-basis import. Each batch
@@ -49,6 +49,10 @@ export async function loadOpeningTxns(spreadsheetId: string): Promise<TxnStateme
     const name = (r[2] ?? "").toString().trim();
     const type = (r[1] ?? "").toString().trim();
     if (!name || !type) continue;
+    // Drop rights-entitlement placeholders even if they slipped into the persisted history
+    // before the filter covered them (e.g. a "… (Rights Entitlements (REs))" row) — they're
+    // transient non-holdings that the replay can't extinguish. See isRightIssueName.
+    if (isRightIssueName(name)) continue;
     const { iso, ts } = readDate(r[0]);
     out.push({ dateStr: iso, iso, ts, type, name, qty: toNum(r[3]), price: toNum(r[4]), amount: toNum(r[5]), balQty: toNum(r[6]) });
   }
