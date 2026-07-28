@@ -14,11 +14,12 @@ import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
 import { loadScripMaster, lookupScrip, normName, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { loadScripPrices, ScripPrice } from '../lib/scripPrices';
 import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
-import { deleteSheetRow } from '../lib/sheetTabs';
+import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
 import CubeLoader from './ui/CubeLoader';
+import { GainBar } from './ui/HoldingsViz';
 import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
 import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
@@ -224,6 +225,8 @@ export default function Holdings({
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingEdit, setDeletingEdit] = useState(false);
+  // Row that just saved successfully — flashes emerald once, then clears.
+  const [justSavedRow, setJustSavedRow] = useState<{ editSource: string; sheetRow: number } | null>(null);
   // Args of the current drill-down, so an edit can re-fetch the same scrip after saving.
   const [lastTxFetch, setLastTxFetch] = useState<{ companyName: string; isin: string } | null>(null);
   // "Show Sold" toggle: also list companies that were traded but are no longer held.
@@ -989,6 +992,8 @@ export default function Holdings({
     if (!t || t.sheetRow == null) return;
     const spreadsheetId = sheetIdForId(activePortfolio);
     if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
+    // Identity of the row we're saving, so the refreshed Trade Book can flash it.
+    const savedId = t.editSource ? { editSource: t.editSource, sheetRow: t.sheetRow } : null;
     setSavingEdit(true);
     try {
       if (t.editSource === 'opening') {
@@ -1008,29 +1013,59 @@ export default function Holdings({
       try { await syncCapitalGains(spreadsheetId); } catch (e: any) { toast.error('Capital-gains sync failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
       await fetchSheetHoldings(activePortfolio, true);
       if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+      // Flash the just-saved row green (once the refreshed rows are on screen).
+      if (savedId) {
+        setJustSavedRow(savedId);
+        window.setTimeout(() => setJustSavedRow(cur =>
+          cur && cur.editSource === savedId.editSource && cur.sheetRow === savedId.sheetRow ? null : cur), 1400);
+      }
     } catch (e: any) {
-      toast.error('Save failed: ' + (e?.result?.error?.message || e?.message || 'error'));
+      toast.error('Save failed: ' + (e?.result?.error?.message || e?.message || 'error'),
+        { action: { label: 'Retry', onClick: () => { void saveEdit(); } } });
     } finally {
       setSavingEdit(false);
+    }
+  };
+
+  // Rebuild Holding + capital gains from the (now-changed) ledger, then refresh the
+  // on-screen holdings and Trade Book. Shared by the delete + undo paths.
+  const rebuildAndRefresh = async (spreadsheetId: string) => {
+    try { await rebuildHoldingTab(spreadsheetId); } catch (e: any) { toast.error('Holding rebuild failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
+    try { await syncCapitalGains(spreadsheetId); } catch (e: any) { toast.error('Capital-gains sync failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
+    await fetchSheetHoldings(activePortfolio, true);
+    if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+  };
+
+  // Re-insert a just-deleted row at its original position, then recompute.
+  const undoDelete = async (spreadsheetId: string, tab: string, rowIndex: number, values: any[]) => {
+    try {
+      await insertSheetRow(spreadsheetId, tab, rowIndex, values);
+      toast.success('Delete undone — rebuilding Holdings & capital gains…');
+      await rebuildAndRefresh(spreadsheetId);
+    } catch (e: any) {
+      toast.error('Undo failed: ' + (e?.result?.error?.message || e?.message || 'error'));
     }
   };
 
   // Delete the entry entirely: removes its row from True Entry (or the Opening
   // Holdings lot), then rebuilds Holdings + capital gains so everything reflects
   // the removal. Confirmed first — it's destructive and shifts the sheet's rows.
+  // The exact row is captured (unformatted) beforehand so the result toast can
+  // offer a faithful Undo that re-inserts it at its original position.
   const deleteEntry = async () => {
     const t = editingTx;
     if (!t || t.sheetRow == null) return;
     const spreadsheetId = sheetIdForId(activePortfolio);
     if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
     const isOpening = t.editSource === 'opening';
+    const tab = isOpening ? OPENING_HOLDINGS_TAB : 'True Entry';
     const ok = await confirmDialog({
       title: 'Delete this entry?',
       body: (
         <span>
-          Permanently remove this {isOpening ? 'opening lot' : 'ledger row'} for <b>{t.assetName}</b>
+          Remove this {isOpening ? 'opening lot' : 'ledger row'} for <b>{t.assetName}</b>
           {' '}({(t.transactionType || 'lot')} · {formatNum(t.quantity)} @ {formatINR(t.price)}, {t.tradeDate}).
-          {' '}Holdings and capital gains will be recomputed. This can't be undone.
+          {' '}Holdings and capital gains will be recomputed — you'll have a moment to undo.
         </span>
       ),
       danger: true,
@@ -1040,13 +1075,23 @@ export default function Holdings({
     if (!ok) return;
     setDeletingEdit(true);
     try {
-      await deleteSheetRow(spreadsheetId, isOpening ? OPENING_HOLDINGS_TAB : 'True Entry', t.sheetRow);
+      // Capture the exact row (serials/numbers unformatted) so Undo restores it verbatim.
+      const restoreRow = t.sheetRow;
+      let captured: any[] | null = null;
+      try {
+        const resp = await (gapi.client as any).sheets.spreadsheets.values.get({
+          spreadsheetId, range: `'${tab}'!${restoreRow}:${restoreRow}`, valueRenderOption: 'UNFORMATTED_VALUE',
+        });
+        const v = resp?.result?.values?.[0];
+        if (v && v.length) captured = v;
+      } catch { /* undo simply won't be offered */ }
+
+      await deleteSheetRow(spreadsheetId, tab, restoreRow);
       setEditingTx(null);
-      toast.success('Entry deleted — rebuilding Holdings & capital gains…');
-      try { await rebuildHoldingTab(spreadsheetId); } catch (e: any) { toast.error('Holding rebuild failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
-      try { await syncCapitalGains(spreadsheetId); } catch (e: any) { toast.error('Capital-gains sync failed: ' + (e?.result?.error?.message || e?.message || 'error')); }
-      await fetchSheetHoldings(activePortfolio, true);
-      if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+      await rebuildAndRefresh(spreadsheetId);
+      toast.success('Entry deleted.', captured
+        ? { action: { label: 'Undo', onClick: () => { void undoDelete(spreadsheetId, tab, restoreRow, captured!); } }, duration: 8000 }
+        : undefined);
     } catch (e: any) {
       toast.error('Delete failed: ' + (e?.result?.error?.message || e?.message || 'error'));
     } finally {
@@ -2098,7 +2143,7 @@ export default function Holdings({
                   id="detail-add-trade"
                   onClick={() => setShowAddTrade(true)}
                   title={`Add a trade for ${name}`}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer transition-colors"
+                  className="btn-press inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer"
                 >
                   <Plus className="w-3 h-3" /> Add Trade
                 </button>
@@ -2108,7 +2153,7 @@ export default function Holdings({
                   aria-pressed={editMode}
                   onClick={() => setEditMode(m => { const next = !m; if (next) setActiveDetailTab('trade_book'); else setEditingTx(null); return next; })}
                   title="Edit the Trade Book rows inline"
-                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer transition-colors border ${editMode ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
+                  className={`btn-press inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer border ${editMode ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
                 >
                   <Edit2 className="w-3 h-3" /> {editMode ? 'Editing' : 'Edit Trade'}
                 </button>
@@ -2140,9 +2185,9 @@ export default function Holdings({
 
           <div className="overflow-x-auto">
             {isLoadingTransactions ? (
-              <div className="py-24 flex flex-col items-center justify-center gap-3 animate-pulse" id="transactions-loading-spinner">
-                <RefreshCw className="w-8 h-8 text-indigo-650 animate-spin" />
-                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider select-none">Syncing ledger records live...</span>
+              <div className="py-24 flex flex-col items-center justify-center gap-3" id="transactions-loading-spinner">
+                <CubeLoader className="w-16 text-indigo-600" />
+                <span className="text-xs text-slate-500 font-bold uppercase tracking-wider select-none animate-pulse">Syncing ledger records live...</span>
               </div>
             ) : (
               <>
@@ -2179,6 +2224,8 @@ export default function Holdings({
                           const isOpening = t.editSource === 'opening';
                           const isEditingThis = editMode && editingTx != null && t.sheetRow != null &&
                             editingTx.editSource === t.editSource && editingTx.sheetRow === t.sheetRow;
+                          const justSaved = !isEditingThis && justSavedRow != null && t.sheetRow != null &&
+                            justSavedRow.editSource === t.editSource && justSavedRow.sheetRow === t.sheetRow;
 
                           // Inline-edit input styling + a setter that keeps turnover = qty × price in sync.
                           const inCls = "w-full px-1.5 py-1 text-xs border border-indigo-200 rounded-md font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white";
@@ -2219,15 +2266,15 @@ export default function Holdings({
                                 <td className="px-3 py-2">
                                   <div className="flex items-center justify-center gap-1">
                                     <button onClick={saveEdit} disabled={savingEdit || deletingEdit} title="Save & recompute"
-                                      className="p-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer disabled:opacity-50">
+                                      className="btn-press p-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer disabled:opacity-50">
                                       {savingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                                     </button>
                                     <button onClick={() => setEditingTx(null)} disabled={savingEdit || deletingEdit} title="Cancel"
-                                      className="p-1.5 rounded-md border border-slate-200 text-slate-500 hover:bg-slate-100 cursor-pointer disabled:opacity-50">
+                                      className="btn-press p-1.5 rounded-md border border-slate-200 text-slate-500 hover:bg-slate-100 cursor-pointer disabled:opacity-50">
                                       <X className="w-3.5 h-3.5" />
                                     </button>
                                     <button onClick={deleteEntry} disabled={savingEdit || deletingEdit} title="Delete entry"
-                                      className="p-1.5 rounded-md border border-rose-200 text-rose-600 hover:bg-rose-50 cursor-pointer disabled:opacity-50">
+                                      className="btn-press p-1.5 rounded-md border border-rose-200 text-rose-600 hover:bg-rose-50 cursor-pointer disabled:opacity-50">
                                       {deletingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                                     </button>
                                   </div>
@@ -2239,7 +2286,7 @@ export default function Holdings({
                           return (
                             <tr key={idx}
                               onClick={editMode && editable ? () => openEdit(t) : undefined}
-                              className={`transition-colors ${editMode && editable ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
+                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${editMode && editable ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
                               <td className="px-6 py-3.5 font-medium text-slate-600">{t.tradeDate}</td>
                               <td className="px-6 py-3.5">
                                 <span className={`inline-block px-2.5 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none ${
@@ -2811,7 +2858,7 @@ export default function Holdings({
                       </button>
                       <button
                         onClick={() => setShowAddTrade(true)}
-                        className="px-4 py-2.5 bg-slate-900 border border-slate-900 hover:bg-slate-800 text-white font-black text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
+                        className="btn-press px-4 py-2.5 bg-slate-900 border border-slate-900 hover:bg-slate-800 text-white font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
                       >
                         <Plus className="w-4 h-4 font-bold" /> Add Trade
                       </button>
@@ -2910,7 +2957,7 @@ export default function Holdings({
                     <div className="flex items-end">
                       <button
                         type="submit"
-                        className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs rounded-xl cursor-pointer transition-colors"
+                        className="btn-press w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs rounded-xl cursor-pointer"
                       >
                         Log Field Position
                       </button>
@@ -2935,14 +2982,14 @@ export default function Holdings({
                       {!hasAuthorizedGoogle() && (
                         <button
                           onClick={() => login()}
-                          className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-sm cursor-pointer transition-colors"
+                          className="btn-press px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-sm cursor-pointer"
                         >
                           Reconnect Google Sheets
                         </button>
                       )}
                       <button
                         onClick={() => fetchSheetHoldings(activePortfolio as string)}
-                        className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-sm cursor-pointer transition-colors"
+                        className="btn-press px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg shadow-sm cursor-pointer"
                       >
                         Try Re-fetching
                       </button>
@@ -2985,7 +3032,7 @@ export default function Holdings({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
-                        {sortedHoldings.map((h) => {
+                        {sortedHoldings.map((h, idx) => {
                           const isPositive = h.unrealizedGain >= 0;
 
                           return (
@@ -2999,7 +3046,8 @@ export default function Holdings({
                                 setCustomCmp(null);
                                 fetchTransactionsForStock(h.original.companyName || h.original.name, h.original.isin);
                               }}
-                              className="hover:bg-slate-50/80 cursor-pointer transition-colors"
+                              style={{ animationDelay: `${Math.min(idx, 15) * 30}ms` }}
+                              className="hover:bg-slate-50/80 cursor-pointer transition-colors animate-riseIn"
                             >
                               <td className="px-6 py-4">
                                 <div className="flex items-center gap-2">
@@ -3040,7 +3088,7 @@ export default function Holdings({
                                     />
                                     <button
                                       onClick={() => handleSavePriceEdit(h.id)}
-                                      className="bg-indigo-600 hover:bg-emerald-600 font-extrabold text-[10px] text-white px-1.5 py-0.5 rounded shadow cursor-pointer"
+                                      className="btn-press bg-indigo-600 hover:bg-emerald-600 font-extrabold text-[10px] text-white px-1.5 py-0.5 rounded shadow cursor-pointer"
                                     >
                                       Save
                                     </button>
@@ -3065,6 +3113,9 @@ export default function Holdings({
                                 <div className="text-[10px] font-semibold block">
                                   {isPositive ? '+' : ''}{h.unrealizedGainPct.toFixed(2)}%
                                 </div>
+                                {h.currentValue > 0 && !h.discrepancy && (
+                                  <div className="w-24 ml-auto"><GainBar pct={h.unrealizedGainPct} /></div>
+                                )}
                               </td>
 
                               {activePortfolio === 'local' && (

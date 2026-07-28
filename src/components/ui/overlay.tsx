@@ -158,17 +158,20 @@ interface ConfirmState extends ConfirmOptions {
    Toasts
    ────────────────────────────────────────────────────────────────────────── */
 export type ToastKind = 'success' | 'error' | 'info';
-interface ToastItem { id: number; kind: ToastKind; message: ReactNode; }
+/** Optional inline action button (e.g. "Retry" on a failed save). */
+export interface ToastAction { label: string; onClick: () => void; }
+export interface ToastOptions { action?: ToastAction; /** ms before auto-dismiss (default: error 7000, else 4000). */ duration?: number; }
+interface ToastItem { id: number; kind: ToastKind; message: ReactNode; action?: ToastAction; }
 
 interface ToastApi {
-  success: (message: ReactNode) => void;
-  error: (message: ReactNode) => void;
-  info: (message: ReactNode) => void;
+  success: (message: ReactNode, opts?: ToastOptions) => void;
+  error: (message: ReactNode, opts?: ToastOptions) => void;
+  info: (message: ReactNode, opts?: ToastOptions) => void;
 }
 
 const ToastCtx = createContext<ToastApi | null>(null);
 
-let _toastHandler: ((kind: ToastKind, message: ReactNode) => void) | null = null;
+let _toastHandler: ((kind: ToastKind, message: ReactNode, action?: ToastAction, duration?: number) => void) | null = null;
 const fallbackToast = (kind: ToastKind, message: ReactNode) => {
   if (typeof message === 'string') {
     // eslint-disable-next-line no-alert
@@ -177,9 +180,9 @@ const fallbackToast = (kind: ToastKind, message: ReactNode) => {
 };
 /** Singleton toast API — drop-in for alert(). */
 export const toast: ToastApi = {
-  success: (m) => (_toastHandler ?? fallbackToast)('success', m),
-  error: (m) => (_toastHandler ?? fallbackToast)('error', m),
-  info: (m) => (_toastHandler ?? fallbackToast)('info', m),
+  success: (m, opts) => (_toastHandler ?? fallbackToast)('success', m, opts?.action, opts?.duration),
+  error: (m, opts) => (_toastHandler ?? fallbackToast)('error', m, opts?.action, opts?.duration),
+  info: (m, opts) => (_toastHandler ?? fallbackToast)('info', m, opts?.action, opts?.duration),
 };
 
 export function useToast(): ToastApi {
@@ -222,16 +225,16 @@ export function OverlayProvider({ children }: { children: ReactNode }) {
     setToasts((cur) => cur.filter((t) => t.id !== id));
   }, []);
 
-  const pushToast = useCallback((kind: ToastKind, message: ReactNode) => {
+  const pushToast = useCallback((kind: ToastKind, message: ReactNode, action?: ToastAction, duration?: number) => {
     const id = seq.current++;
-    setToasts((cur) => [...cur, { id, kind, message }]);
-    window.setTimeout(() => dismissToast(id), kind === 'error' ? 7000 : 4000);
+    setToasts((cur) => [...cur, { id, kind, message, action }]);
+    window.setTimeout(() => dismissToast(id), duration ?? (kind === 'error' ? 7000 : 4000));
   }, [dismissToast]);
 
   const toastApi: ToastApi = {
-    success: (m) => pushToast('success', m),
-    error: (m) => pushToast('error', m),
-    info: (m) => pushToast('info', m),
+    success: (m, opts) => pushToast('success', m, opts?.action, opts?.duration),
+    error: (m, opts) => pushToast('error', m, opts?.action, opts?.duration),
+    info: (m, opts) => pushToast('info', m, opts?.action, opts?.duration),
   };
 
   // Register the singletons against this (root) provider.
@@ -272,14 +275,14 @@ export function OverlayProvider({ children }: { children: ReactNode }) {
                 <button
                   data-autofocus={confirmState.danger ? '' : undefined}
                   onClick={() => closeConfirm(false)}
-                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                  className="btn-press px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 rounded-lg cursor-pointer"
                 >
                   {confirmState.cancelLabel ?? 'Cancel'}
                 </button>
                 <button
                   data-autofocus={confirmState.danger ? undefined : ''}
                   onClick={() => closeConfirm(true)}
-                  className={`px-4 py-2 text-xs font-black text-white rounded-lg transition-colors cursor-pointer ${confirmState.danger ? 'bg-rose-600 hover:bg-rose-500' : 'bg-slate-900 hover:bg-slate-800'}`}
+                  className={`btn-press px-4 py-2 text-xs font-black text-white rounded-lg cursor-pointer ${confirmState.danger ? 'bg-rose-600 hover:bg-rose-500' : 'bg-slate-900 hover:bg-slate-800'}`}
                 >
                   {confirmState.confirmLabel ?? 'Confirm'}
                 </button>
@@ -302,6 +305,14 @@ export function OverlayProvider({ children }: { children: ReactNode }) {
                 >
                   {s.icon}
                   <div className="flex-1 min-w-0 break-words">{t.message}</div>
+                  {t.action && (
+                    <button
+                      onClick={() => { dismissToast(t.id); t.action!.onClick(); }}
+                      className="btn-press shrink-0 self-center rounded-md border border-current/30 px-2 py-1 text-[11px] font-black uppercase tracking-wider hover:bg-black/5 cursor-pointer"
+                    >
+                      {t.action.label}
+                    </button>
+                  )}
                   <button
                     onClick={() => dismissToast(t.id)}
                     aria-label="Dismiss notification"

@@ -29,6 +29,52 @@ html, body, #root, * {
 .cube-tile { animation: cubePulse 2.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .cube-tile { animation: none; opacity: 0; } }   /* static line-art cube */
 
+/* Success flash — a just-saved table row glows emerald once, then fades to
+   nothing. Beats a CSS animation over any static/hover background of the row. */
+@keyframes flashSave { 0% { background-color: rgb(16 185 129 / 0.30); } 100% { background-color: rgb(16 185 129 / 0); } }
+.row-flash-save { animation: flashSave 1.3s ease-out; }
+@media (prefers-reduced-motion: reduce) { .row-flash-save { animation: none; } }
+
+/* ── Motion system ──────────────────────────────────────────────────────────
+   A small, consistent set of entrance/reveal animations. Durations stay short
+   and easings soft (a gentle overshoot-free ease-out) so a data-dense tool
+   reads as polished, not sluggish. All disabled under prefers-reduced-motion.
+   `both` holds the start frame through any animation-delay, so inline delays
+   stagger a group of siblings. */
+@keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.animate-riseIn { animation: riseIn 0.42s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Popovers / alert boxes scale up slightly as they fade in. */
+@keyframes scaleIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+.animate-scaleIn { animation: scaleIn 0.24s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Donut slices fade in one after another (delay set inline per slice). */
+@keyframes donutReveal { from { opacity: 0; } to { opacity: 1; } }
+.donut-arc { animation: donutReveal 0.5s ease-out both; }
+
+/* Diverging gain/loss bar grows from its anchored centre edge (transform-origin
+   is set inline: left for gains, right for losses). */
+@keyframes barGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.bar-grow { animation: barGrow 0.7s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-riseIn, .animate-scaleIn, .donut-arc, .bar-grow { animation: none; }
+}
+
+/* Tactile primary buttons: subtle hover-lift + press-scale. Add `btn-press`
+   alongside a button's colour classes. The transition also covers colour/shadow
+   so it fully replaces (not fights) a Tailwind `transition-colors` on the same
+   element. Skips :disabled; disabled under prefers-reduced-motion. */
+.btn-press {
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1),
+              background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.btn-press:hover:not(:disabled) { transform: translateY(-1px); }
+.btn-press:active:not(:disabled) { transform: scale(0.97); }
+@media (prefers-reduced-motion: reduce) {
+  .btn-press:hover:not(:disabled), .btn-press:active:not(:disabled) { transform: none; }
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
    GLASS surfaces — translucent + frosted panels. Apply on LARGE containers
    (cards, panels, bars) only; dense tables stay opaque for readability.
@@ -243,25 +289,44 @@ html, body, #root, * {
 .dark .from-indigo-700     { --tw-gradient-from: #d9a441; }
 .dark .to-violet-600       { --tw-gradient-to: #8a6a2a; }
 
+/* ── Dark-mode wash-out guards ───────────────────────────────────────────────
+   Opacity-suffixed light backgrounds (bg-*-50/NN, hover:bg-*-50/NN) are NOT
+   covered by the solid-colour remaps above, so at high opacity they fall back
+   to Tailwind's near-WHITE base and wash out the light dark-mode text — a
+   hovered holdings row went almost white. Remap every ≥40%-opacity light
+   variant actually in use to the same warm-dark tint as its solid form. */
+.dark .bg-slate-50\/80              { background-color: rgb(36 32 25 / 0.85); }
+.dark .hover\:bg-slate-50\/80:hover { background-color: #242019; }
+.dark .bg-indigo-50\/70             { background-color: rgb(46 40 32 / 0.70); }
+.dark .bg-indigo-50\/55             { background-color: rgb(46 40 32 / 0.55); }
+.dark .bg-indigo-50\/40             { background-color: rgb(46 40 32 / 0.40); }
+.dark .hover\:bg-indigo-50\/40:hover { background-color: rgb(46 40 32 / 0.50); }
+.dark .bg-amber-50\/60              { background-color: rgb(42 32 8 / 0.70); }
+.dark .bg-amber-50\/50              { background-color: rgb(42 32 8 / 0.60); }
+.dark .bg-amber-50\/40              { background-color: rgb(42 32 8 / 0.50); }
+.dark .bg-emerald-50\/50            { background-color: rgb(18 41 30 / 0.60); }
+.dark .bg-red-50\/40                { background-color: rgb(46 22 20 / 0.50); }
+
 /* ──────────────────────────────────────────────────────────────────────────
-   LIGHT THEME — "MONO"
-   Stark black-and-white light mode: ink (#0a0a0a) replaces every decorative
-   accent hue (indigo/violet/blue/purple); green/red remain ONLY for money and
-   errors; slate neutrals lose their blue cast. Same mechanism as the dark
-   layer above — unlayered remaps of the utilities the components already
-   carry — but scoped to `html:not(.dark)`, so DARK MODE IS UNTOUCHED by
-   construction. Colors only; no layout/spacing/typography changes.
+   LIGHT THEME — "BRASS ON PAPER"
+   Warm parchment ground with an antique-brass (#8a6a1e) accent replacing every
+   decorative hue (indigo/violet/blue/purple) — the light mirror of the dark
+   Brass Terminal. Green/red remain ONLY for money and errors; slate neutrals
+   lose their blue cast for warm ink. Same mechanism as the dark layer above —
+   unlayered remaps of the utilities the components already carry — scoped to
+   `html:not(.dark)`, so DARK MODE IS UNTOUCHED by construction. Colours only;
+   no layout/spacing/typography changes.
    ────────────────────────────────────────────────────────────────────────── */
 
-/* Ink replaces the indigo accent (nav pills, buttons, links, active states) */
+/* Brass replaces the indigo accent (nav pills, buttons, links, active states) */
 html:not(.dark) .bg-indigo-600,
 html:not(.dark) .bg-blue-600,
-html:not(.dark) .bg-violet-600      { background-color: #0a0a0a; }
-html:not(.dark) .bg-indigo-500      { background-color: #171717; }
+html:not(.dark) .bg-violet-600      { background-color: #8a6a1e; }
+html:not(.dark) .bg-indigo-500      { background-color: #9a7726; }
 html:not(.dark) .hover\:bg-indigo-500:hover,
-html:not(.dark) .hover\:bg-indigo-600:hover { background-color: #262626; }
+html:not(.dark) .hover\:bg-indigo-600:hover { background-color: #75591a; }
 html:not(.dark) .hover\:bg-indigo-700:hover,
-html:not(.dark) .active\:bg-indigo-700:active { background-color: #000000; }
+html:not(.dark) .active\:bg-indigo-700:active { background-color: #5f4914; }
 
 html:not(.dark) .text-indigo-600,
 html:not(.dark) .text-indigo-700,
@@ -274,15 +339,15 @@ html:not(.dark) .text-violet-800,
 html:not(.dark) .text-blue-600,
 html:not(.dark) .text-blue-800,
 html:not(.dark) .text-purple-600,
-html:not(.dark) .text-purple-800    { color: #0a0a0a; }
-html:not(.dark) .text-indigo-900\/70 { color: rgb(10 10 10 / 0.7); }
-html:not(.dark) .text-indigo-500    { color: #6b6b6b; }
-html:not(.dark) .text-indigo-400    { color: #7a7a7a; }
+html:not(.dark) .text-purple-800    { color: #8a6a1e; }
+html:not(.dark) .text-indigo-900\/70 { color: rgb(138 106 30 / 0.7); }
+html:not(.dark) .text-indigo-500    { color: #7d7460; }
+html:not(.dark) .text-indigo-400    { color: #9a9179; }
 /* light-indigo text sits on dark surfaces (drawer chip, gradient panels) */
-html:not(.dark) .text-indigo-200    { color: #d6d6d6; }
+html:not(.dark) .text-indigo-200    { color: #d9cbb0; }
 html:not(.dark) .hover\:text-indigo-600:hover,
 html:not(.dark) .hover\:text-indigo-700:hover,
-html:not(.dark) .hover\:text-indigo-800:hover { color: #000000; }
+html:not(.dark) .hover\:text-indigo-800:hover { color: #5f4914; }
 
 /* Accent chip fills → neutral grays */
 html:not(.dark) .bg-indigo-50,
@@ -312,19 +377,19 @@ html:not(.dark) .border-indigo-600,
 html:not(.dark) .hover\:border-indigo-400:hover,
 html:not(.dark) .hover\:border-indigo-600:hover,
 html:not(.dark) .focus\:border-indigo-400:focus,
-html:not(.dark) .focus\:border-indigo-500:focus { border-color: #0a0a0a; }
+html:not(.dark) .focus\:border-indigo-500:focus { border-color: #8a6a1e; }
 html:not(.dark) .hover\:border-indigo-300:hover { border-color: #b3a88d; }
 html:not(.dark) .border-indigo-100  { border-color: #e4dbc6; }
 html:not(.dark) .border-indigo-200,
 html:not(.dark) .border-violet-200  { border-color: #d9cfb6; }
 html:not(.dark) .border-blue-100    { border-color: #e0d7c1; }
-html:not(.dark) .border-indigo-300\/60 { border-color: rgb(0 0 0 / 0.3); }
-html:not(.dark) .border-indigo-300\/50 { border-color: rgb(0 0 0 / 0.25); }
+html:not(.dark) .border-indigo-300\/60 { border-color: rgb(94 73 20 / 0.35); }
+html:not(.dark) .border-indigo-300\/50 { border-color: rgb(94 73 20 / 0.3); }
 html:not(.dark) .focus\:ring-indigo-500:focus,
-html:not(.dark) .ring-indigo-500    { --tw-ring-color: #0a0a0a; }
-html:not(.dark) .outline-indigo-500 { outline-color: #0a0a0a; }
-html:not(.dark) .focus-visible\:outline-indigo-500:focus-visible { outline-color: #0a0a0a; }
-html:not(.dark) .accent-indigo-600  { accent-color: #0a0a0a; }
+html:not(.dark) .ring-indigo-500    { --tw-ring-color: #8a6a1e; }
+html:not(.dark) .outline-indigo-500 { outline-color: #8a6a1e; }
+html:not(.dark) .focus-visible\:outline-indigo-500:focus-visible { outline-color: #8a6a1e; }
+html:not(.dark) .accent-indigo-600  { accent-color: #8a6a1e; }
 
 /* Colored shadows → neutral */
 html:not(.dark) .shadow-indigo-500\/25,
@@ -333,8 +398,8 @@ html:not(.dark) .shadow-indigo-200  { --tw-shadow-color: rgb(0 0 0 / 0.12); }
 
 /* Decorative gradient stops → ink (panel accent bar, CsvAuditor header) */
 html:not(.dark) .from-blue-600,
-html:not(.dark) .from-indigo-700    { --tw-gradient-from: #0a0a0a; }
-html:not(.dark) .to-violet-600      { --tw-gradient-to: #3a3a3a; }
+html:not(.dark) .from-indigo-700    { --tw-gradient-from: #8a6a1e; }
+html:not(.dark) .to-violet-600      { --tw-gradient-to: #b8923a; }
 
 /* Money / semantic text retints (match the Mono mock exactly) */
 html:not(.dark) .text-emerald-600   { color: #0d8a4f; }

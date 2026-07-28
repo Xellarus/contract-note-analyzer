@@ -5,7 +5,7 @@ import {
   Upload, X, Download, FileText, Info, CheckCircle2, AlertCircle, 
   ArrowRightLeft, ListChecks, Play, Trash2, PlusCircle, AlertTriangle, 
   RefreshCw, Check, ShieldAlert, Award, ChevronRight, Gauge,
-  Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3, Moon, Sun,
+  Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3,
   Briefcase, ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -22,6 +22,8 @@ import { PORTFOLIOS, portfolioByUcc, portfolioById, sheetIdForId, DEFAULT_PORTFO
 import SecurityConfirmModal, { ConfirmSecurity } from './components/SecurityConfirmModal';
 import { toast, confirmDialog } from './components/ui/overlay';
 import { useVirtualRows } from './components/ui/useVirtualRows';
+import CubeLoader from './components/ui/CubeLoader';
+import ThemeToggle from './components/ui/ThemeToggle';
 import { processFile, mergeResults, calculateReconciliation } from './lib/parsers';
 import sessionVaultSvg from './assets/session-vault.svg?url';
 import CsvAuditor from './components/CsvAuditor';
@@ -1812,14 +1814,7 @@ export default function App() {
         <div className="flex-1 hidden md:block" />
 
         <div className="flex-1 flex justify-end items-center gap-3">
-          <button
-            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-            aria-label="Toggle dark mode"
-            className="p-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer shrink-0 flex items-center justify-center"
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
+          <ThemeToggle theme={theme} onToggle={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} />
           {currentView === 'imports' && (
             <>
               {/* Sheets access is granted at login; this only appears if the
@@ -2400,7 +2395,7 @@ export default function App() {
 
             {isLoading && (
               <div className="text-center py-20 max-w-md mx-auto">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+                <CubeLoader className="w-16 mx-auto mb-4 text-indigo-600" />
                 <p className="text-slate-800 font-bold text-md">Parsing Contract Notes</p>
                 <p className="text-slate-400 text-xs mt-1">Processing {fileCount.processed}/{fileCount.total} files inside sandboxed container...</p>
               </div>
@@ -3126,7 +3121,7 @@ export default function App() {
               
               {testResults.length === 0 ? (
                 <div className="bg-white border rounded-2xl p-10 text-center text-slate-500 text-sm italic shadow-sm hover:border-slate-300 transition-all">
-                  <RefreshCw className="w-10 h-10 text-slate-400 animate-spin mx-auto mb-3" />
+                  <CubeLoader className="w-14 text-slate-400 mx-auto mb-3" />
                   Evaluating test suite libraries in browser loop...
                 </div>
               ) : (

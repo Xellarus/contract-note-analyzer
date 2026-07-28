@@ -52,3 +52,39 @@ export async function deleteSheetRow(spreadsheetId: string, tabTitle: string, ro
     },
   });
 }
+
+/**
+ * Insert a blank row at the given 1-based index (shifting rows below it down) and
+ * write `values` into it. The inverse of deleteSheetRow — used to "Undo" a deleted
+ * Trade Book / Opening Holdings row, restoring it to its original position. Values
+ * should be captured with valueRenderOption: "UNFORMATTED_VALUE" and are written
+ * RAW so dates (serials) and numbers round-trip exactly.
+ */
+export async function insertSheetRow(
+  spreadsheetId: string, tabTitle: string, rowIndex1Based: number, values: any[],
+): Promise<void> {
+  if (!(rowIndex1Based >= 1)) throw new Error(`Invalid row index ${rowIndex1Based}`);
+  const meta = await (gapi.client as any).sheets.spreadsheets.get({ spreadsheetId });
+  const sheet = (meta?.result?.sheets || []).find(
+    (s: any) => (s.properties?.title || "").toString().trim().toLowerCase() === tabTitle.trim().toLowerCase()
+  );
+  if (!sheet) throw new Error(`Tab "${tabTitle}" not found in this spreadsheet.`);
+  const sheetId = sheet.properties.sheetId;
+  await (gapi.client as any).sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    resource: {
+      requests: [{
+        insertDimension: {
+          range: { sheetId, dimension: "ROWS", startIndex: rowIndex1Based - 1, endIndex: rowIndex1Based },
+          inheritFromBefore: false,
+        },
+      }],
+    },
+  });
+  await (gapi.client as any).sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${tabTitle}'!A${rowIndex1Based}`,
+    valueInputOption: "RAW",
+    resource: { values: [values] },
+  });
+}

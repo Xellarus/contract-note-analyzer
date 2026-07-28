@@ -96,7 +96,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             <button
               onClick={() => { setLoginError(null); setIsSigningIn(true); login(); }}
               disabled={isSigningIn}
-              className="w-full flex items-center justify-center gap-3 rounded-xl bg-white text-slate-800 font-bold text-sm p-3 shadow hover:scale-[1.01] active:scale-[0.99] transition-transform cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+              className="btn-press w-full flex items-center justify-center gap-3 rounded-xl bg-white text-slate-800 font-bold text-sm p-3 shadow cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
               {isSigningIn ? <Loader2 className="w-5 h-5 animate-spin" /> : <GoogleGLogo />}
               {isSigningIn ? 'Signing in…' : 'Sign in with Google'}

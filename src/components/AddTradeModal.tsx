@@ -304,7 +304,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 )}
               </div>
             )}
-            <button onClick={onClose} className="px-5 py-2 mt-6 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer">Done</button>
+            <button onClick={onClose} className="btn-press px-5 py-2 mt-6 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer">Done</button>
           </div>
         ) : mode === 'corpaction' ? (
           /* ── Corporate action form ── */
@@ -372,8 +372,8 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
             </div>
 
             <div className="border-t border-slate-200 px-6 py-4 shrink-0 flex items-center justify-end gap-3">
-              <button onClick={onClose} disabled={caSaving} className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl disabled:opacity-40 cursor-pointer">Cancel</button>
-              <button onClick={handleSaveCa} disabled={caSaving || !caValid || !hasValidGoogleToken()} className="px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">
+              <button onClick={onClose} disabled={caSaving} className="btn-press px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl disabled:opacity-40 cursor-pointer">Cancel</button>
+              <button onClick={handleSaveCa} disabled={caSaving || !caValid || !hasValidGoogleToken()} className="btn-press px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">
                 {caSaving ? <><Loader2 className="w-4 h-4 animate-spin" /> Recording…</> : <>Record {caType}</>}
               </button>
             </div>
@@ -401,8 +401,8 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
               </div>
             )}
             <div className="flex gap-3 mt-6">
-              <button onClick={() => { setResult(null); setLines([blankLine()]); }} className="px-4 py-2 text-xs font-bold text-indigo-600 border border-indigo-200 hover:bg-indigo-50 rounded-xl cursor-pointer">Add more</button>
-              <button onClick={onClose} className="px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer">Done</button>
+              <button onClick={() => { setResult(null); setLines([blankLine()]); }} className="btn-press px-4 py-2 text-xs font-bold text-indigo-600 border border-indigo-200 hover:bg-indigo-50 rounded-xl cursor-pointer">Add more</button>
+              <button onClick={onClose} className="btn-press px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer">Done</button>
             </div>
           </div>
         ) : (
@@ -630,10 +630,10 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 charges <span className="font-mono text-slate-700">{inr(totals.charges)}</span>
               </div>
               <div className="flex items-center gap-3">
-                <button onClick={onClose} disabled={saving} className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl disabled:opacity-40 cursor-pointer">Cancel</button>
+                <button onClick={onClose} disabled={saving} className="btn-press px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl disabled:opacity-40 cursor-pointer">Cancel</button>
                 <button
                   onClick={handleSave} disabled={!canSave}
-                  className="px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  className="btn-press px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
                   {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</> : <>Save {validLines.length > 0 ? validLines.length : ''} trade{validLines.length === 1 ? '' : 's'}</>}
                 </button>

@@ -4,6 +4,7 @@ import { fetchImportLog, markImportReversed } from '../lib/accessLog';
 import { reverseImport } from '../lib/importReverse';
 import { portfolioByCode } from '../lib/portfolios';
 import { confirmDialog, toast } from './ui/overlay';
+import CubeLoader from './ui/CubeLoader';
 
 const DEFAULT_HEADER = ["Date", "Time", "Contract Note Name", "Broker", "User", "Import ID", "Portfolio", "Rows", "Status"];
 
@@ -121,8 +122,9 @@ export default function ImportHistory() {
 
         {/* Body */}
         {loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-slate-500 text-sm">
-            <Loader2 className="w-5 h-5 animate-spin" /> Fetching import history…
+          <div className="flex flex-col items-center justify-center gap-3 py-16 text-slate-500 text-sm">
+            <CubeLoader className="w-12 text-indigo-600" />
+            <span className="animate-pulse">Fetching import history…</span>
           </div>
         ) : error ? (
           <div className="flex items-start gap-2 m-5 p-3 rounded-xl border border-rose-200 bg-rose-50 text-[12px] text-rose-700">
