@@ -235,6 +235,7 @@ export default function Holdings({
   const [showSold, setShowSold] = useState(false);
   const [soldHoldings, setSoldHoldings] = useState<SheetHolding[]>([]);
   const [isLoadingSold, setIsLoadingSold] = useState(false);
+  const [rebuildingHoldings, setRebuildingHoldings] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState<'trade_book' | 'inventory' | 'realised_inventory'>('trade_book');
   const [customCmp, setCustomCmp] = useState<number | null>(null);
   const [isEditingCmp, setIsEditingCmp] = useState(false);
@@ -1036,6 +1037,21 @@ export default function Holdings({
     if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
   };
 
+  // Force a full rebuild of the Holding tab (+ capital gains) from the ledger, for when the
+  // cached tab has drifted from Opening Holdings / True Entry (e.g. opening lots added without
+  // a rebuild — see the Deccan stale-tab case). Rewrites the WHOLE tab for every stock.
+  const rebuildHoldingsNow = async () => {
+    const spreadsheetId = sheetIdForId(activePortfolio);
+    if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
+    setRebuildingHoldings(true);
+    try {
+      await rebuildAndRefresh(spreadsheetId);
+      toast.success('Holdings rebuilt from the ledger.');
+    } finally {
+      setRebuildingHoldings(false);
+    }
+  };
+
   // Re-insert a just-deleted row at its original position, then recompute.
   const undoDelete = async (spreadsheetId: string, tab: string, rowIndex: number, values: any[]) => {
     try {
@@ -1760,15 +1776,28 @@ export default function Holdings({
       : avgBuyPrice;
     
     const finalInvestedValue = finalHoldingQty * finalAvgBuyPrice;
-    // Position-size Invested Value / Avg Buy Price mirror the Holding tab (which now
-    // uses the Incl-STT all-in cost) so the detail matches the summary page. The
-    // transaction FIFO replay above (turnover-based) still feeds the inventory/
-    // realised tables + Total Buy/Sell amounts. Falls back to the replay for the
-    // local sandbox or when the tab lacks a figure.
-    // A sold-out position has no cost / market value / unrealised gain left — don't
-    // surface the stale sheet figures (which still describe the pre-sale position).
-    const displayInvestedValue = soldOut ? 0 : ((!isLocal && investedValue > 0) ? investedValue : finalInvestedValue);
-    const displayAvgBuyPrice = soldOut ? 0 : ((!isLocal && investedValue > 0) ? avgBuyPrice : finalAvgBuyPrice);
+    // Position-size Invested Value / Avg Buy Price normally mirror the Holding tab (all-in
+    // incl-STT cost) so the detail matches the summary card — BUT only when the tab is in
+    // SYNC with the live ledger, i.e. its quantity equals the FIFO's. When they diverge, the
+    // Holding tab is STALE (rebuilt before some opening lots / trades were added — e.g. Deccan:
+    // the tab holds only the first lot's 25,000 @ ₹48.22 while three opening lots total 63,180),
+    // and pairing that stale cost with the live quantity fabricates a gain. So when out of sync,
+    // fall back to the ledger's own weighted-average cost, which is self-consistent with
+    // finalHoldingQty. (Rebuild the Holding tab to resync the summary/list — see the detail note.)
+    // A sold-out position has no cost / market value / unrealised gain left.
+    const holdingTabInSync = !isLocal && investedValue > 0 &&
+      Math.abs(quantity - finalHoldingQty) <= Math.max(1, finalHoldingQty * 0.01);
+    const displayInvestedValue = soldOut ? 0 : (holdingTabInSync ? investedValue : finalInvestedValue);
+    const displayAvgBuyPrice = soldOut ? 0 : (holdingTabInSync ? avgBuyPrice : finalAvgBuyPrice);
+
+    // Real long-term quantity: lots acquired MORE than 12 months before today (the listed-
+    // equity LTCG threshold), summed from the live inventory — replaces the old hardcoded
+    // `finalHoldingQty × 0.81` placeholder [[holdings-no-mock-data]]. Only meaningful when we
+    // have the per-lot dates (hasTransactions); the badge is hidden otherwise.
+    const ltCutoffTs = (() => { const d = new Date(); d.setFullYear(d.getFullYear() - 1); return d.getTime(); })();
+    const longTermQty = hasTransactions
+      ? filteredInventory.reduce((s, l) => { const ts = parseDateStr(l.date); return s + (ts > 0 && ts < ltCutoffTs ? l.remainingQty : 0); }, 0)
+      : 0;
     const totalHoldingValue = soldOut ? 0 : finalHoldingQty * cmpPrice;
     const unrealizedGain = totalHoldingValue - displayInvestedValue;
     const totalGain = unrealizedGain + realisedGain + totalDividend;
@@ -1994,9 +2023,11 @@ export default function Holdings({
                   <span className="text-base font-black font-mono text-slate-800" id="detail-holding-qty">
                     {formatNum(finalHoldingQty)}
                   </span>
-                  <span className="bg-sky-50 border border-sky-100 text-sky-700 font-bold text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5" title="Long Term Locked blocks">
-                    <ShieldCheck className="w-2.5 h-2.5" /> LT {formatNum(Math.round(finalHoldingQty * 0.81))}
-                  </span>
+                  {hasTransactions && (
+                    <span className="bg-sky-50 border border-sky-100 text-sky-700 font-bold text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5" title="Long-term shares — lots held more than 12 months (listed-equity LTCG threshold)">
+                      <ShieldCheck className="w-2.5 h-2.5" /> LT {formatNum(longTermQty)}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="space-y-1 border-t border-slate-100 pt-3">
@@ -2841,6 +2872,14 @@ export default function Holdings({
                     </button>
                   ) : (
                     <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={rebuildHoldingsNow}
+                        disabled={rebuildingHoldings}
+                        title="Recompute the Holding tab from Opening Holdings + True Entry — use if the list looks out of date after editing opening lots"
+                        className="btn-press px-3.5 py-2.5 bg-white border border-slate-200 text-slate-600 hover:border-indigo-300 font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${rebuildingHoldings ? 'animate-spin' : ''}`} /> {rebuildingHoldings ? 'Rebuilding…' : 'Rebuild'}
+                      </button>
                       <button
                         onClick={() => setShowSold(v => !v)}
                         role="switch" aria-checked={showSold}
