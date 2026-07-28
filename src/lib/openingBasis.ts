@@ -292,6 +292,42 @@ export function classifyTxn(type: string): "BUY" | "SELL" | "BONUS" | "SPLIT" | 
 // the wrong ratio. Real corp actions are never same-scrip · same-kind · same-day.
 export const corpActionKey = (scripKey: string, kind: string, iso: string): string => `${scripKey}#${kind}#${iso}`;
 
+/**
+ * Corp-action keys whose shares are ALREADY carried by an accompanying same-day share-credit
+ * BUY row — so the replay must NOT also apply their stored ratio, or the event is double-counted.
+ *
+ * Some brokers record a bonus/rights BOTH as a typed BONUS/RIGHT row (qty 0, which drives the
+ * ratio) AND as a real credit row on the same date (bonus allotted at ₹0, rights at the issue
+ * price). If the replay adds the credit row (a BUY) *and* applies the ratio, the event lands
+ * twice — e.g. a 1:3 bonus already in the rows gets diluted again, so cost/share ends at
+ * ₹959 × (3/4)² = ₹539.49 instead of the correct ₹959 × 3/4 = ₹719.33 (the real Sonata case).
+ *
+ * Rule: a BONUS is "already credited" if the same date has a ₹0-price BUY; a RIGHT if the same
+ * date has any BUY (the entitlement is booked as a priced purchase). SPLIT never comes as a
+ * buy row (it rescales existing lots), so it's never skipped. When a bonus/rights arrives ONLY
+ * as a qty-0 typed row (no credit buy), nothing is skipped and the ratio applies as before.
+ */
+export function alreadyCreditedCorpActions(rows: TxnStatementRow[], scripKey: string): Set<string> {
+  const skip = new Set<string>();
+  const buyByTs = new Map<number, { qty: number; zeroPriceQty: number }>();
+  for (const r of rows) {
+    if (classifyTxn(r.type) !== "BUY" || !(r.qty > 0)) continue;
+    const e = buyByTs.get(r.ts) || { qty: 0, zeroPriceQty: 0 };
+    e.qty += r.qty;
+    const perShare = r.amount > 0 ? r.amount / r.qty : r.price;
+    if (!(perShare > 1e-4)) e.zeroPriceQty += r.qty;   // ₹0 credit ⇒ a bonus allotment
+    buyByTs.set(r.ts, e);
+  }
+  for (const r of rows) {
+    const kind = classifyTxn(r.type);
+    if (kind !== "BONUS" && kind !== "RIGHT") continue;
+    const b = buyByTs.get(r.ts);
+    if (!b) continue;
+    if (kind === "BONUS" ? b.zeroPriceQty > 1e-9 : b.qty > 1e-9) skip.add(corpActionKey(scripKey, kind, r.iso));
+  }
+  return skip;
+}
+
 // gcd on rounded ints, for turning a balance jump into a tidy prefill ratio.
 const gcd = (a: number, b: number): number => { a = Math.abs(Math.round(a)); b = Math.abs(Math.round(b)); while (b) { [a, b] = [b, a % b]; } return a || 1; };
 function reduceRatio(n: number, d: number, fallbackNum = 1, fallbackDen = 1): { num: number; den: number } {
@@ -342,6 +378,7 @@ function replayScrip(
   seed: FifoLot[] = [],
 ): { lots: FifoLot[]; buys: number; sells: number; oversold: number; unknown: string[] } {
   const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
+  const creditedSkip = alreadyCreditedCorpActions(rows, scripKey);
   // Carried-in lots (batch accumulate) seed the queue oldest-first, so a SELL in this
   // slice consumes them before any BUY made in the slice — FIFO continues across the seam.
   const lots: FifoLot[] = seed.slice().sort((a, b) => a.ts - b.ts).map(l => ({ ...l }));
@@ -367,6 +404,7 @@ function replayScrip(
       }
       if (need > 1e-9) oversold += need;
     } else if (kind === "BONUS" || kind === "RIGHT") {
+      if (creditedSkip.has(corpActionKey(scripKey, kind, row.iso))) continue; // shares already added by a same-day credit buy
       const res = resolutions[corpActionKey(scripKey, kind, row.iso)];
       if (res && res.den > 0) {
         const add = heldNow() * (res.num / res.den);
@@ -400,12 +438,14 @@ export function netQtyFromTxns(
   const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
   const hasBal = rows.some(r => r.balQty !== 0);
   if (hasBal) return rows[rows.length - 1].balQty;   // broker's closing balance = net position
+  const creditedSkip = alreadyCreditedCorpActions(rows, scripKey);
   let q = 0;
   for (const row of rows) {
     const kind = classifyTxn(row.type);
     if (kind === "BUY") q += row.qty;
     else if (kind === "SELL") q -= Math.abs(row.qty);
     else if (kind === "BONUS" || kind === "RIGHT") {
+      if (creditedSkip.has(corpActionKey(scripKey, kind, row.iso))) continue; // already in a same-day credit buy
       const res = resolutions[corpActionKey(scripKey, kind, row.iso)];
       if (res && res.den > 0) q += q * (res.num / res.den);
     } else if (kind === "SPLIT") {
@@ -447,6 +487,7 @@ export function advanceTxnNet(
 
   for (const [k, rowsRaw] of byName) {
     const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);
+    const creditedSkip = alreadyCreditedCorpActions(rows, k);
     let q = out[k]?.qty ?? 0;
     const name = out[k]?.name || rows[0].name;
     let brokerBal = out[k]?.brokerBal ?? null;
@@ -455,6 +496,7 @@ export function advanceTxnNet(
       if (kind === "BUY") q += row.qty;
       else if (kind === "SELL") q -= Math.abs(row.qty);
       else if (kind === "BONUS" || kind === "RIGHT") {
+        if (creditedSkip.has(corpActionKey(k, kind, row.iso))) continue; // already in a same-day credit buy
         const res = resolutions[corpActionKey(k, kind, row.iso)];
         if (res && res.den > 0) q += q * (res.num / res.den);
       } else if (kind === "SPLIT") {
@@ -505,6 +547,8 @@ export function replayOpeningTxnsAsOf(
   const out: Record<string, OpeningPosAsOf> = {};
   for (const [k, rows] of byName) {
     const displayName = rows[0].name;
+    // A bonus/rights already credited as a same-day BUY row must not also apply its ratio.
+    const creditedSkip = alreadyCreditedCorpActions(rows, k);
     // Net same-day buys/sells per day (intraday square-off); keep corp actions separate.
     interface Ev { ts: number; ord: number; kind: string; qty: number; price: number; iso: string; }
     const dayMap = new Map<number, { buyQ: number; buyV: number; sellQ: number }>();
@@ -518,6 +562,7 @@ export function replayOpeningTxnsAsOf(
         const d = dayMap.get(t.ts) || { buyQ: 0, buyV: 0, sellQ: 0 };
         d.sellQ += Math.abs(t.qty); dayMap.set(t.ts, d);
       } else if (kind === "BONUS" || kind === "RIGHT" || kind === "SPLIT") {
+        if ((kind === "BONUS" || kind === "RIGHT") && creditedSkip.has(corpActionKey(k, kind, t.iso))) continue; // shares already in a same-day credit buy
         corp.push({ ts: t.ts, ord: 1, kind, qty: 0, price: 0, iso: t.iso });
       }
     }
@@ -539,23 +584,26 @@ export function replayOpeningTxnsAsOf(
       else if (e.kind === "BONUS") { const r = resolutions[corpActionKey(k, "BONUS", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const c = qty * avg; qty += add; avg = qty > 0 ? c / qty : 0; } } }
       else if (e.kind === "RIGHT") { const r = resolutions[corpActionKey(k, "RIGHT", e.iso)]; if (r && r.den > 0) { const add = qty * (r.num / r.den); if (add > 1e-9) { const nq = qty + add; avg = nq > 0 ? (qty * avg + add * (r.price || 0)) / nq : 0; qty = nq; } } }
     }
-    // QUANTITY: prefer the broker's running balance (whole, immune to a fractional corp-action
-    // ratio) — BUT only when it's a believable version of the reconstructed net, so a corrupt
-    // balance value can't multiply into a garbage invested figure. Two cases keep the balance:
-    //   • a RIGHTS action is present — the entitlement may be partly/not subscribed, so the
-    //     balance is authoritative even when it diverges a lot (1:15 rights: net 533.33, bal 500);
-    //   • the balance ≈ the net (splits/bonuses are automatic, so the resolved reconstruction
-    //     already equals the balance; the only gap is fractional-share rounding).
-    // Otherwise the balance is a bad statement value (e.g. a mis-keyed 8,00,000 for 8,000) →
-    // keep the reconstruction. Cost/share stays the replay's weighted average (invested is then
-    // qty × avg, internally consistent). Rows are already ≤ asOfTs.
+    // QUANTITY: the broker's running BAL QTY is its own SETTLED share count — it already
+    // reflects the ACTUAL corp-action outcome + any rights actually subscribed, so it's
+    // authoritative and we prefer it over the additive reconstruction. Reject it ONLY when it
+    // diverges from the reconstruction by an ORDER OF MAGNITUDE (the fingerprint of a mis-keyed
+    // statement value, e.g. 8,00,000 for 8,000) with no rights to explain it — then fall back
+    // to the reconstructed net so a corrupt balance can't multiply into a garbage figure.
+    // A MODEST divergence is the normal result of messy/duplicate corp-action rows the additive
+    // replay can't perfectly net — a bonus booked as BOTH a BONUS row and a ₹0 credit buy, plus
+    // a wash buy+sell (Sonata 2022: replay nets 5,000 but the broker's settled 6,666 is right).
+    // Cost/share stays the replay's weighted average (correct even when the replay's OWN qty
+    // isn't — see the credited-corp-action guard), so invested = balanceQty × avg reconciles to
+    // the Holding Period Report. Rows are already ≤ asOfTs.
     let finalQty = qty;
     const sorted = rows.slice().sort((a, b) => a.ts - b.ts);
     if (sorted.some(r => r.balQty !== 0)) {
       const bal = sorted[sorted.length - 1].balQty;
       const hasRights = corp.some(c => c.kind === "RIGHT");
-      const believable = Math.abs(bal - qty) <= Math.max(1, Math.abs(qty) * 0.02);
-      if (hasRights || believable) finalQty = bal;
+      // grossly off = balance vs reconstruction differ by more than ~3× → a corrupt value.
+      const grosslyOff = qty > 1e-9 ? (bal > qty * 3 || bal < qty / 3) : Math.abs(bal) > 1;
+      if (hasRights || !grosslyOff) finalQty = bal;
     }
     if (finalQty > 1e-9) out[k] = { name: displayName, qty: r6(finalQty), avgCost: r6(avg) };
   }
