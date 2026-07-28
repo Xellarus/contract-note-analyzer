@@ -10,7 +10,7 @@ import { loadCorporateActions, CorpAction } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
 import { loadOpeningTxns } from "./openingTxns";
 import { loadOpeningCorpActions } from "./openingCorpActions";
-import { replayOpeningTxnsAsOf, TxnStatementRow, ActionResolution } from "./openingBasis";
+import { replayOpeningTxnsAsOf, classifyTxn, TxnStatementRow, ActionResolution } from "./openingBasis";
 import { ledgerSide, isSplitType } from "./tradeRowSchema";
 
 export interface UnresolvedScrip {
@@ -168,28 +168,57 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
       h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0;
     }
 
-    // COST: defer to the reconciled Holding Period Report (the "Opening Holdings" the live
-    // Holdings view uses and that the user checked against the broker) for any stock it covers
-    // whose replayed opening position reconciles with it. The txn-replay cost is re-summed from
-    // the raw statement and doesn't tie to the broker's HPR figure to the rupee (per-lot charge
-    // rounding), so a covered, unchanged holding would otherwise drift by a few thousand ₹.
-    // Matched on the split-INVARIANT invested total, so it lines up regardless of a later split;
-    // a divergence beyond 2% means the position genuinely differs at this date (interim
-    // buys/sells the HPR's surviving lots don't represent) → keep the replay cost.
+    // Prefer the Holding Period Report ("Opening Holdings" — what the live Holdings view uses,
+    // the user checked against the broker, and the app's Edit writes to) over the raw txn replay:
+    //   • SETTLED stock (no buy/sell/corp-action AND no HPR lot dated after the as-of date) → the
+    //     position is unchanged since then, so use the HPR entry VERBATIM (qty + cost). This makes
+    //     the report reflect qty AND cost edits made in the app, and gives the exact HPR figure.
+    //   • Otherwise (activity after this date) → the past position genuinely differs from the
+    //     current HPR (interim buys/sells the survivors don't represent), so keep the replay's
+    //     quantity; still adopt the exact HPR cost when the split-INVARIANT invested total
+    //     reconciles within 2% (avoids a few-₹k per-lot charge-rounding drift), else keep replay.
     const openingLots = await loadOpeningHoldings(spreadsheetId).catch(() => []);
     if (openingLots.length) {
       const hprInvestedByKey = new Map<string, number>();   // resolved key → Σ HPR cost basis
+      const hprQtyByKey = new Map<string, number>();         // resolved key → Σ HPR qty
+      const hprFutureLot = new Set<string>();               // keys with an HPR lot acquired AFTER the as-of date
       for (const ol of openingLots) {
         const r = resolveScrip(master, ol.isin, ol.name);
         const key = r.status === "resolved" ? r.key : ((ol.isin || "").trim() || normName(ol.name));
         hprInvestedByKey.set(key, (hprInvestedByKey.get(key) || 0) + ol.qty * ol.costPerShare);
+        hprQtyByKey.set(key, (hprQtyByKey.get(key) || 0) + ol.qty);
+        if (parseDateTs(ol.acqDate) > asOfTs) hprFutureLot.add(key);
+      }
+      // Keys with a position/cost-changing Opening-Txns row AFTER the as-of date. For these the
+      // position at this past date genuinely differs from the CURRENT HPR (interim buys/sells/
+      // corp actions), so the HPR can't be back-applied wholesale.
+      const activityAfterAsOf = new Set<string>();
+      for (const t of openingTxns) {
+        const kind = classifyTxn(t.type);
+        if (t.ts > asOfTs && (kind === "BUY" || kind === "SELL" || kind === "BONUS" || kind === "SPLIT" || kind === "RIGHT")) {
+          const r = resolveScrip(master, "", t.name);
+          activityAfterAsOf.add(r.status === "resolved" ? r.key : normName(t.name));
+        }
       }
       for (const [key, h] of byKey) {
         const hprInvested = hprInvestedByKey.get(key);
         if (hprInvested === undefined || hprInvested <= 0 || h.quantity <= 1e-9) continue;
-        const replayBasis = h.quantity * h.avgBuyPrice;
-        if (Math.abs(replayBasis - hprInvested) <= hprInvested * 0.02) {
-          h.avgBuyPrice = hprInvested / h.quantity;   // invested becomes the reconciled HPR figure
+        const hprQty = hprQtyByKey.get(key) || 0;
+        const settled = hprQty > 0 && !activityAfterAsOf.has(key) && !hprFutureLot.has(key);
+        if (settled) {
+          // Nothing bought/sold/adjusted between this date and the opening-basis cutoff → the
+          // position is UNCHANGED since then, so it equals the current "Opening Holdings" (HPR)
+          // entry. Use it VERBATIM for both quantity and cost — so the report tracks qty AND cost
+          // edits made via the app (which write "Opening Holdings", not "Opening Txns") and gives
+          // the exact HPR figure (no charge-rounding drift). See [[opening-basis]].
+          h.quantity = hprQty;
+          h.avgBuyPrice = hprInvested / hprQty;
+        } else {
+          // Activity after this date → the past position differs from the current HPR; keep the
+          // replay's quantity, but still prefer the exact HPR cost when the invested totals
+          // reconcile (split-invariant), else keep the replay cost.
+          const replayBasis = h.quantity * h.avgBuyPrice;
+          if (Math.abs(replayBasis - hprInvested) <= hprInvested * 0.02) h.avgBuyPrice = hprInvested / h.quantity;
         }
       }
     }
