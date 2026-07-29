@@ -256,6 +256,24 @@ export default function Holdings({
   // States for fetching spreadsheet holdings
   const [sheetHoldings, setSheetHoldings] = useState<SheetHolding[]>([]);
   const [sheetTotal, setSheetTotal] = useState<number>(0);
+
+  // Keep the open stock-detail card in sync with the (re-)fetched Holding tab. `selectedStock`
+  // is a SNAPSHOT taken when the row was clicked; after an edit/delete, saveEdit rebuilds the
+  // Holding tab and refetches `sheetHoldings` but never re-points `selectedStock`, so the
+  // Position Size card kept showing the OLD invested/avg (only Holding Qty updated, since that
+  // comes from the re-fetched transactions). Re-point it to the fresh row so Invested Value /
+  // Avg Buy Price update immediately — no manual "Rebuild" needed.
+  useEffect(() => {
+    if (!selectedStock || activePortfolio === 'local') return;
+    const sel = selectedStock as SheetHolding;
+    const fresh = sheetHoldings.find(h =>
+      (sel.isin && h.isin && h.isin.toLowerCase() === sel.isin.toLowerCase()) ||
+      (!!h.companyName && h.companyName === sel.companyName));
+    if (fresh && (fresh.quantity !== sel.quantity || fresh.investedValue !== sel.investedValue || fresh.avgBuyPrice !== sel.avgBuyPrice)) {
+      setSelectedStock(fresh);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetHoldings]);
   // Per-portfolio Holding-tab totals for the summary cards. Keyed by portfolio id,
   // so each card keeps its own last-synced value — syncing/opening one portfolio
   // never zeroes the others (which happened when all cards read one sheetTotal).
