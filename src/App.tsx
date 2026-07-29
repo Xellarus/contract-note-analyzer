@@ -13,6 +13,7 @@ import { useGoogleLogin } from '@react-oauth/google';
 import { ContractNoteResult, ReconciliationStatus, PortfolioHolding, PortfolioUser } from './types';
 import { persistGoogleToken, restoreGoogleToken, clearGoogleToken, hasValidGoogleToken } from './lib/googleAuth';
 import { installSheetsRetry } from './lib/sheetsRetry';
+import { registerBackStep } from './lib/appBack';
 import { logAccess, logImport } from './lib/accessLog';
 import { rebuildHoldingTab, syncCapitalGains } from './lib/holdingsCalc';
 import { ensureSheetTabs } from './lib/sheetTabs';
@@ -558,6 +559,21 @@ export default function App() {
 
   const [activePortfolio, setActivePortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
   const [isDetailView, setIsDetailView] = useState(false);
+
+  // Browser / mouse BACK button → top-level nav (the app has no router). A shared handler
+  // ([appBack](./lib/appBack.ts)) runs the DEEPEST active level: stock detail (registered in
+  // Holdings) → holdings list → top-level view → home. Refs keep the predicates on CURRENT
+  // state; registered once. See [[spa-navigation-back-button]].
+  const currentViewRef = useRef(currentView);
+  currentViewRef.current = currentView;
+  const isDetailViewRef = useRef(isDetailView);
+  isDetailViewRef.current = isDetailView;
+  useEffect(() => {
+    const unList = registerBackStep(2, () => currentViewRef.current === 'holdings' && isDetailViewRef.current, () => setIsDetailView(false));
+    const unView = registerBackStep(1, () => currentViewRef.current !== 'dashboard', () => setCurrentView('dashboard'));
+    return () => { unList(); unView(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 

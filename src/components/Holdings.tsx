@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
@@ -15,6 +15,7 @@ import { loadScripMaster, lookupScrip, normName, ScripMaster, SCRIP_MASTER_SPREA
 import { loadScripPrices, ScripPrice } from '../lib/scripPrices';
 import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
+import { registerBackStep } from '../lib/appBack';
 import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
@@ -158,6 +159,15 @@ export default function Holdings({
 
   // Drilldown states
   const [selectedStock, setSelectedStock] = useState<SheetHolding | PortfolioHolding | null>(null);
+
+  // Browser / mouse BACK button → close an open stock detail (deepest level, → back to the list).
+  // The app has no router; a shared handler ([appBack](../lib/appBack.ts)) runs the deepest active
+  // level so Back walks detail → list → top-view instead of unloading the SPA. The ref keeps the
+  // predicate reading CURRENT state; registered once. The list & top-level steps live in App.tsx
+  // (they own isDetailView / currentView). See [[spa-navigation-back-button]].
+  const selectedStockRef = useRef(selectedStock);
+  selectedStockRef.current = selectedStock;
+  useEffect(() => registerBackStep(3, () => selectedStockRef.current != null, () => { setSelectedStock(null); setCustomCmp(null); }), []);
   // Scrip master (NSE/BSE/ISIN reference) for the stock-detail header pills.
   const [scrip, setScrip] = useState<ScripMaster | null>(null);
   // Current-price snapshot (from the screener.in import) — values holdings live-ish.
@@ -266,6 +276,9 @@ export default function Holdings({
   // "Edit Trade" mode — reveals inline row editing in the Trade Book (replaces the
   // always-on per-row Edit button). Toggled from the detail page's Position card.
   const [editMode, setEditMode] = useState(false);
+  // Multi-select delete (edit mode): selected row keys `${editSource}:${sheetRow}`.
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [newSymbol, setNewSymbol] = useState('');
   const [newName, setNewName] = useState('');
   const [newIsin, setNewIsin] = useState('');
@@ -722,6 +735,7 @@ export default function Holdings({
   const fetchTransactionsForStock = async (companyName: string, isin: string) => {
     setIsLoadingTransactions(true);
     setTransactions([]);
+    setSelectedRows(new Set());   // drop any multi-select carried over from another stock
     setLastTxFetch({ companyName, isin });
 
     if (activePortfolio === 'local') {
@@ -1112,6 +1126,82 @@ export default function Holdings({
       toast.error('Delete failed: ' + (e?.result?.error?.message || e?.message || 'error'));
     } finally {
       setDeletingEdit(false);
+    }
+  };
+
+  // ── Bulk delete (multi-select in edit mode) ───────────────────────────────
+  // Re-insert every captured row, so Undo restores the whole batch. Insert ASCENDING by
+  // original index with a running offset (each prior insert shifts the tab down by one), so
+  // rows land back at their original positions. Per-tab (True Entry / Opening Holdings are
+  // independent). Immediate action (toast), so no other edits intervene.
+  const undoBulkDelete = async (spreadsheetId: string, captured: { tab: string; row: number; values: any[] }[]) => {
+    try {
+      const byTab = new Map<string, { row: number; values: any[] }[]>();
+      for (const c of captured) (byTab.get(c.tab) || byTab.set(c.tab, []).get(c.tab)!).push(c);
+      for (const [tab, list] of byTab) {
+        list.sort((a, b) => a.row - b.row);
+        let inserted = 0;
+        for (const c of list) { await insertSheetRow(spreadsheetId, tab, c.row + inserted, c.values); inserted++; }
+      }
+      toast.success('Delete undone — rebuilding Holdings & capital gains…');
+      await rebuildAndRefresh(spreadsheetId);
+    } catch (e: any) {
+      toast.error('Undo failed: ' + (e?.result?.error?.message || e?.message || 'error'));
+    }
+  };
+
+  const deleteSelectedEntries = async () => {
+    const spreadsheetId = sheetIdForId(activePortfolio);
+    if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
+    const rows = transactions.filter(t => t.editSource && t.sheetRow != null && selectedRows.has(`${t.editSource}:${t.sheetRow}`));
+    if (rows.length === 0) return;
+    const n = rows.length;
+    const ok = await confirmDialog({
+      title: `Delete ${n} ${n === 1 ? 'entry' : 'entries'}?`,
+      body: (
+        <span>
+          Remove the <b>{n}</b> selected {n === 1 ? 'row' : 'rows'} for <b>{name}</b>.
+          {' '}Holdings and capital gains will be recomputed — you'll have a moment to undo.
+        </span>
+      ),
+      danger: true,
+      confirmLabel: `Delete ${n}`,
+      cancelLabel: 'Keep them',
+    });
+    if (!ok) return;
+    setBulkDeleting(true);
+    try {
+      // Group selected rows by their sheet tab.
+      const byTab = new Map<string, number[]>();
+      for (const t of rows) {
+        const tab = t.editSource === 'opening' ? OPENING_HOLDINGS_TAB : 'True Entry';
+        (byTab.get(tab) || byTab.set(tab, []).get(tab)!).push(t.sheetRow!);
+      }
+      const captured: { tab: string; row: number; values: any[] }[] = [];
+      for (const [tab, sheetRows] of byTab) {
+        // Capture each row's values BEFORE any delete in this tab (indices still original).
+        for (const r of sheetRows) {
+          try {
+            const resp = await (gapi.client as any).sheets.spreadsheets.values.get({
+              spreadsheetId, range: `'${tab}'!${r}:${r}`, valueRenderOption: 'UNFORMATTED_VALUE',
+            });
+            const v = resp?.result?.values?.[0];
+            if (v && v.length) captured.push({ tab, row: r, values: v });
+          } catch { /* undo just won't include this row */ }
+        }
+        // Delete HIGHEST index first so earlier deletes don't shift the not-yet-deleted rows.
+        for (const r of [...sheetRows].sort((a, b) => b - a)) await deleteSheetRow(spreadsheetId, tab, r);
+      }
+      setEditingTx(null);
+      setSelectedRows(new Set());
+      await rebuildAndRefresh(spreadsheetId);
+      toast.success(`${n} ${n === 1 ? 'entry' : 'entries'} deleted.`, captured.length
+        ? { action: { label: 'Undo', onClick: () => { void undoBulkDelete(spreadsheetId, captured); } }, duration: 8000 }
+        : undefined);
+    } catch (e: any) {
+      toast.error('Bulk delete failed: ' + (e?.result?.error?.message || e?.message || 'error'));
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -2178,11 +2268,22 @@ export default function Holdings({
                 >
                   <Plus className="w-3 h-3" /> Add Trade
                 </button>
+                {/* Delete the checkbox-selected rows in one go (edit mode only). */}
+                {editMode && selectedRows.size > 0 && (
+                  <button
+                    onClick={deleteSelectedEntries}
+                    disabled={bulkDeleting}
+                    title={`Delete the ${selectedRows.size} selected ${selectedRows.size === 1 ? 'entry' : 'entries'}`}
+                    className="btn-press inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer border border-rose-300 bg-rose-600 text-white hover:bg-rose-500 disabled:opacity-50"
+                  >
+                    {bulkDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />} Delete {selectedRows.size}
+                  </button>
+                )}
                 {/* Toggle inline editing of the Trade Book ledger rows. */}
                 <button
                   id="detail-edit-trade"
                   aria-pressed={editMode}
-                  onClick={() => setEditMode(m => { const next = !m; if (next) setActiveDetailTab('trade_book'); else setEditingTx(null); return next; })}
+                  onClick={() => setEditMode(m => { const next = !m; if (next) setActiveDetailTab('trade_book'); else { setEditingTx(null); setSelectedRows(new Set()); } return next; })}
                   title="Edit the Trade Book rows inline"
                   className={`btn-press inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer border ${editMode ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
                 >
@@ -2226,6 +2327,19 @@ export default function Holdings({
                   <table className="w-full text-xs text-left" id="trade-book-table">
                     <thead className="bg-[#f8fafc] border-b border-slate-200 font-bold text-slate-600 uppercase tracking-wider">
                       <tr>
+                        {editMode && (
+                          <th className="px-3 py-3 text-center w-8">
+                            {(() => {
+                              const keys = sortedTxs.filter(t => t.editSource && t.sheetRow != null).map(t => `${t.editSource}:${t.sheetRow}`);
+                              const allSel = keys.length > 0 && keys.every(k => selectedRows.has(k));
+                              return (
+                                <input type="checkbox" aria-label="Select all rows" checked={allSel} disabled={keys.length === 0}
+                                  onChange={() => setSelectedRows(allSel ? new Set() : new Set(keys))}
+                                  className="cursor-pointer accent-indigo-600 align-middle" />
+                              );
+                            })()}
+                          </th>
+                        )}
                         {sortTh('DATE', 'tradeDate')}
                         {sortTh('TRANSACTION TYPE', 'transactionType')}
                         {sortTh('QUANTITY', 'quantity', 'right')}
@@ -2239,7 +2353,7 @@ export default function Holdings({
                     <tbody className="divide-y divide-slate-200">
                       {sortedTxs.length === 0 ? (
                         <tr>
-                          <td colSpan={editMode ? 8 : 7} className="px-6 py-12 text-center text-slate-400 italic font-medium">
+                          <td colSpan={editMode ? 9 : 7} className="px-6 py-12 text-center text-slate-400 italic font-medium">
                             No matching ledger line items found.
                           </td>
                         </tr>
@@ -2271,6 +2385,7 @@ export default function Holdings({
                           if (isEditingThis) {
                             return (
                               <tr key={idx} className="bg-indigo-50/40">
+                                {editMode && <td className="px-3 py-2" />}
                                 <td className="px-3 py-2">
                                   <input value={editForm.tradeDate ?? ''} onChange={e => setF('tradeDate', e.target.value)} className={inCls} />
                                 </td>
@@ -2318,6 +2433,24 @@ export default function Holdings({
                             <tr key={idx}
                               onClick={editMode && editable ? () => openEdit(t) : undefined}
                               className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${editMode && editable ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
+                              {editMode && (
+                                <td className="px-3 py-3.5 text-center" onClick={e => e.stopPropagation()}>
+                                  {editable ? (
+                                    <input
+                                      type="checkbox"
+                                      aria-label="Select row for deletion"
+                                      className="cursor-pointer accent-indigo-600 align-middle"
+                                      checked={selectedRows.has(`${t.editSource}:${t.sheetRow}`)}
+                                      onChange={() => setSelectedRows(prev => {
+                                        const next = new Set(prev);
+                                        const k = `${t.editSource}:${t.sheetRow}`;
+                                        next.has(k) ? next.delete(k) : next.add(k);
+                                        return next;
+                                      })}
+                                    />
+                                  ) : null}
+                                </td>
+                              )}
                               <td className="px-6 py-3.5 font-medium text-slate-600">{t.tradeDate}</td>
                               <td className="px-6 py-3.5">
                                 <span className={`inline-block px-2.5 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none ${
