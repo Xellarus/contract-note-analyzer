@@ -342,7 +342,7 @@ function reduceRatio(n: number, d: number, fallbackNum = 1, fallbackDen = 1): { 
 
 /** Walk every scrip's rows and surface each Bonus/Split/Rights row as a PendingAction
  *  with a prefilled ratio derived from the running-balance jump (best-effort). */
-function collectPendingActions(byName: Map<string, TxnStatementRow[]>): PendingAction[] {
+export function collectPendingActions(byName: Map<string, TxnStatementRow[]>): PendingAction[] {
   const out: PendingAction[] = [];
   for (const [scripKey, rowsRaw] of byName) {
     const rows = rowsRaw.slice().sort((a, b) => a.ts - b.ts);

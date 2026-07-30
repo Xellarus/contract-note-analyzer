@@ -35,6 +35,7 @@ import Login from './components/Login';
 import Reports, { StockFocus } from './components/Reports';
 import ScreenerImport from './components/ScreenerImport';
 import OpeningBasisImport from './components/OpeningBasisImport';
+import CorpActionsImport from './components/CorpActionsImport';
 import LiveClock from './components/LiveClock';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
@@ -2408,6 +2409,9 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* Corp-actions-only import: detect Bonus/Split/Rights from a FY26 statement (trades ignored) */}
+            {!data && !isLoading && <CorpActionsImport />}
 
             {isLoading && (
               <div className="text-center py-20 max-w-md mx-auto">
