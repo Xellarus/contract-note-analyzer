@@ -57,6 +57,12 @@ function EntryPicker({ master, seed, value, onPick }: {
           placeholder="Search the scrip master…"
           className="flex-1 py-1.5 text-[12px] font-medium bg-transparent focus:outline-none"
         />
+        {q && (
+          <button type="button" onClick={() => setQ('')} aria-label="Clear search"
+            className="shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded cursor-pointer">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
       {openList && (
         <ul className="absolute z-20 mt-1 w-full max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg text-[12px]">

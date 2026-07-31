@@ -2386,9 +2386,15 @@ export default function Holdings({
                 placeholder="Search ledger details..."
                 value={txSearchTerm}
                 onChange={(e) => setTxSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-3 py-1.5 border border-slate-200 rounded-lg outline-none text-xs bg-white focus:ring-1 focus:ring-indigo-500 font-medium"
+                className="w-full pl-9 pr-8 py-1.5 border border-slate-200 rounded-lg outline-none text-xs bg-white focus:ring-1 focus:ring-indigo-500 font-medium"
                 id="tab-search-input"
               />
+              {txSearchTerm && (
+                <button type="button" onClick={() => setTxSearchTerm('')} aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 rounded cursor-pointer">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
             <div className="shrink-0">
               <span className="text-[10px] font-black text-slate-500 uppercase tracking-wider block">
@@ -3072,8 +3078,14 @@ export default function Holdings({
                       placeholder="Filter holdings by symbol, name, sector..."
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full pl-9 pr-4 py-2.5 text-xs rounded-xl border border-slate-200 focus:ring-1 focus:ring-indigo-500 outline-none"
+                      className="w-full pl-9 pr-9 py-2.5 text-xs rounded-xl border border-slate-200 focus:ring-1 focus:ring-indigo-500 outline-none"
                     />
+                    {searchTerm && (
+                      <button type="button" onClick={() => setSearchTerm('')} aria-label="Clear search"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 rounded cursor-pointer">
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                   {activePortfolio === 'local' ? (
                     <button
