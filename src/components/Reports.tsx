@@ -4,6 +4,7 @@ import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
 import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { loadOpeningHoldings } from '../lib/openingHoldings';
 import { useVirtualRows } from './ui/useVirtualRows';
 
 type Step = 'home' | 'portfolio' | 'config' | 'result';
@@ -218,6 +219,40 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
           .filter(r => (r || []).some((c: any) => (c ?? '').toString().trim() !== ''))
           .map(r => header.map((_, i) => ((r as any[])?.[i] ?? '').toString()));
 
+        // Transaction Report: prepend the carried-in opening lots as "Opening Buy" rows so
+        // the ledger starts from the real opening position rather than the first FY26 trade.
+        // (The Trade Book on a stock's detail page already seeds these; the report did not.)
+        // They then flow through the same date + stock-scope filters as the True Entry rows.
+        if (reportType === 'transactions') {
+          try {
+            const opening = await loadOpeningHoldings(portfolio.sheetId);
+            if (opening.length) {
+              const findHdr = (...names: string[]) => { for (const n of names) { const i = header.findIndex(h => (h ?? '').toString().trim().toLowerCase() === n.toLowerCase()); if (i >= 0) return i; } return -1; };
+              const dIdx = findHdr('Trade Date', 'Date');
+              const isinIdx2 = findHdr('ISIN');
+              const nameIdx2 = findHdr('Stock Name', 'Security Name');
+              const typeIdx = findHdr('Transaction Type');
+              const qtyIdx = findHdr('Number of Shares', 'Quantity');
+              const priceIdx = findHdr('Avg Price', 'Price');
+              const turnIdx = findHdr('Total Amount (Turnover)', 'Turnover');
+              const openRows = opening.map(ol => {
+                const row = header.map(() => '');
+                if (dIdx >= 0) row[dIdx] = ol.acqDate || '';
+                if (isinIdx2 >= 0) row[isinIdx2] = ol.isin || '';
+                if (nameIdx2 >= 0) row[nameIdx2] = ol.name || '';
+                if (typeIdx >= 0) row[typeIdx] = 'Opening Buy';
+                if (qtyIdx >= 0) row[qtyIdx] = String(ol.qty);
+                if (priceIdx >= 0) row[priceIdx] = String(ol.costPerShare);
+                if (turnIdx >= 0) row[turnIdx] = String(Math.round(ol.qty * ol.costPerShare * 100) / 100);
+                return row;
+              });
+              // Oldest first, ahead of the FY26 trades (they're the carried-in basis).
+              openRows.sort((a, b) => (parseCellDate(dIdx >= 0 ? a[dIdx] : '') ?? -Infinity) - (parseCellDate(dIdx >= 0 ? b[dIdx] : '') ?? -Infinity));
+              body = [...openRows, ...body];
+            }
+          } catch { /* no Opening Holdings tab → transactions stay FY26-only */ }
+        }
+
         // Filter to the requested period using the report's date column
         // (Sale Date for capital gains, Trade Date for transactions).
         const dateCol = header.findIndex(h => /date/i.test(h));
@@ -250,18 +285,20 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
 
   const downloadCsv = () => {
     if (!portfolio) return;
+    // Stock-scoped reports lead the filename with the scrip name (sanitised for a filename).
+    const stockTag = focus ? `${(focus.scripName || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}_` : '';
     let rows: any[][];
     let filename: string;
     if (reportType === 'holding') {
       rows = [["Company Name", "ISIN", "Quantity", "Avg Buy Price", "Invested Value"]];
       positions.forEach(p => rows.push([p.securityName, p.isin, String(p.quantity), String(p.avgBuyPrice), String(p.invested)]));
       rows.push(["Total", "", "", "", String(totalInvested)]);
-      filename = `Holding_${portfolio.code}_as_of_${asOf}.csv`;
+      filename = `Holding_${stockTag}${portfolio.code}_as_of_${asOf}.csv`;
     } else {
       rows = [genHeader, ...genRows];
-      const range = (fromDate || toDate) ? `_${fromDate || 'start'}_to_${toDate || 'today'}` : '';
+      const range = `_${fromDate || 'inception'}_to_${toDate || 'today'}`;
       const fnMap: Record<ReportType, string> = { holding: 'Holding', capgains: 'CapitalGains', transactions: 'Transactions', expenses: 'ExpenseReport', 'expenses-detailed': 'DetailedExpenseReport' };
-      filename = `${fnMap[reportType]}_${portfolio.code}${range}.csv`;
+      filename = `${fnMap[reportType]}_${stockTag}${portfolio.code}${range}.csv`;
     }
     const csv = rows.map(r => r.map(csvEsc).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
@@ -402,6 +439,14 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                       onChange={(e) => setFromDate(e.target.value)}
                       className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setFromDate('')}
+                      title="Include everything from the first trade / opening position"
+                      className={`text-[11px] font-bold px-2.5 py-2 rounded-lg border transition-colors cursor-pointer ${fromDate === '' ? 'bg-indigo-600 text-white border-indigo-600' : 'text-slate-500 border-slate-200 hover:bg-slate-100'}`}
+                    >
+                      Since inception
+                    </button>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-[11px] font-bold text-slate-500 w-9">To</span>
@@ -416,7 +461,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                     />
                   </div>
                 </div>
-                <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">{meta.desc} Leave <strong className="text-slate-500">From</strong> blank for all history.</p>
+                <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">{meta.desc} Pick <strong className="text-slate-500">Since inception</strong> (or clear From) for all history.</p>
               </>
             )}
 
@@ -452,7 +497,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                   {focus && <> · <strong className="text-indigo-700">{focus.scripName}</strong></>}
                   {reportType === 'holding'
                     ? ` · as of ${asOf} · ${positions.length} position${positions.length === 1 ? '' : 's'} · ${tradeRows} trades replayed`
-                    : ` · ${fromDate || 'start'} → ${toDate || 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
+                    : ` · ${fromDate || 'inception'} → ${toDate || 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
                 </p>
               </div>
               {hasResult && (

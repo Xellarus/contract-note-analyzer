@@ -557,6 +557,9 @@ export default function App() {
   // When set (via the "Report" button on a stock's detail page), the Reports view
   // opens locked to that stock + account. Cleared when Reports is opened normally.
   const [reportsFocus, setReportsFocus] = useState<StockFocus | null>(null);
+  // Set when Back is pressed inside a stock-scoped Report: tells Holdings to re-open that
+  // stock's detail page (Holdings unmounts while Reports is shown, losing its selection).
+  const [reopenStock, setReopenStock] = useState<StockFocus | null>(null);
 
   const [activePortfolio, setActivePortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
   const [isDetailView, setIsDetailView] = useState(false);
@@ -569,10 +572,20 @@ export default function App() {
   currentViewRef.current = currentView;
   const isDetailViewRef = useRef(isDetailView);
   isDetailViewRef.current = isDetailView;
+  const reportsFocusRef = useRef(reportsFocus);
+  reportsFocusRef.current = reportsFocus;
   useEffect(() => {
     const unList = registerBackStep(2, () => currentViewRef.current === 'holdings' && isDetailViewRef.current, () => setIsDetailView(false));
+    // Back from a stock-scoped Report → return to that stock's detail page (not the tab/home).
+    // Depth 2 so it beats the "→ dashboard" step; only active while a focused Report is open.
+    const unReport = registerBackStep(2, () => currentViewRef.current === 'reports' && reportsFocusRef.current != null, () => {
+      const f = reportsFocusRef.current!;
+      setReopenStock(f);
+      setActivePortfolio(f.portfolioId);
+      setCurrentView('holdings');
+    });
     const unView = registerBackStep(1, () => currentViewRef.current !== 'dashboard', () => setCurrentView('dashboard'));
-    return () => { unList(); unView(); };
+    return () => { unList(); unReport(); unView(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2257,6 +2270,8 @@ export default function App() {
             isDetailView={isDetailView}
             setIsDetailView={setIsDetailView}
             onOpenReport={(f) => { setReportsFocus(f); setCurrentView('reports'); }}
+            reopenStock={reopenStock}
+            onReopenHandled={() => setReopenStock(null)}
           />
         ) : currentView === 'reports' ? (
           <Reports

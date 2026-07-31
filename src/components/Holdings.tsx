@@ -74,6 +74,11 @@ interface HoldingsProps {
   // Open the Reports view locked to one stock + account (the "Report" button on a
   // stock's detail page). Structurally matches Reports' StockFocus.
   onOpenReport?: (focus: { portfolioId: string; scripName: string; isin: string }) => void;
+  // Set by App when the user presses Back from a stock-scoped Report: re-open THIS stock's
+  // detail page (Holdings unmounted when Reports opened, losing its selection). One-shot —
+  // Holdings calls onReopenHandled once it has re-selected the stock (or given up).
+  reopenStock?: { portfolioId: string; scripName: string; isin: string } | null;
+  onReopenHandled?: () => void;
 }
 
 interface SheetHolding {
@@ -153,7 +158,9 @@ export default function Holdings({
   setActivePortfolio,
   isDetailView,
   setIsDetailView,
-  onOpenReport
+  onOpenReport,
+  reopenStock,
+  onReopenHandled
 }: HoldingsProps) {
   const [sheetCmpOverrides, setSheetCmpOverrides] = useState<Record<string, number>>({});
 
@@ -276,6 +283,25 @@ export default function Holdings({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sheetHoldings]);
+
+  // Re-open a stock's detail page after the user returns from its scoped Report via Back.
+  // App hands us the stock in `reopenStock`; once THIS portfolio's holdings have loaded we
+  // match the row (by ISIN, else canonical name), open its detail, and clear the request so
+  // it fires only once. Waits for the right account + a populated Holding tab.
+  useEffect(() => {
+    if (!reopenStock || activePortfolio === 'local') return;
+    if (activePortfolio !== reopenStock.portfolioId) return;
+    if (!sheetHoldings.length) return;
+    const target = sheetHoldings.find(h =>
+      (reopenStock.isin && h.isin && h.isin.toLowerCase() === reopenStock.isin.toLowerCase()) ||
+      (!!h.companyName && normName(h.companyName) === normName(reopenStock.scripName)));
+    if (target) {
+      setSelectedStock(target);
+      setIsDetailView(true);
+    }
+    onReopenHandled?.();   // one-shot, whether or not a row matched
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reopenStock, sheetHoldings, activePortfolio]);
   // Per-portfolio Holding-tab totals for the summary cards. Keyed by portfolio id,
   // so each card keeps its own last-synced value — syncing/opening one portfolio
   // never zeroes the others (which happened when all cards read one sheetTotal).
