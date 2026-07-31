@@ -232,6 +232,8 @@ export default function Holdings({
   const [trueEntryHeaders, setTrueEntryHeaders] = useState<string[]>([]);
   // "Edit Entry" popup state.
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  // Trade Book row whose bifurcated expenses are shown in the breakdown popup (view mode).
+  const [expenseTx, setExpenseTx] = useState<Transaction | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingEdit, setDeletingEdit] = useState(false);
@@ -1351,6 +1353,71 @@ export default function Holdings({
     }).format(num);
   };
 
+  // Bifurcated-expenses popup (Trade Book) — clicking a row in view mode shows the
+  // individual charges booked against that entry, read straight from its True Entry
+  // charge columns (the same source the Edit popup edits). Opening lots carry none.
+  // Rendered alongside editEntryModal in both top-level return branches.
+  const expenseModal = (() => {
+    const t = expenseTx;
+    const raw = t?.rawRow || [];
+    const val = (header: string): number => {
+      const i = trueEntryHeaders.indexOf(header);
+      return i === -1 ? 0 : numCell(raw[i]);
+    };
+    const items = t ? [
+      { label: 'Brokerage', value: val('Total Brokerage') },
+      { label: 'STT', value: val('STT') },
+      { label: 'Exchange Turnover Charges', value: val('Exchange Turnover Charges') },
+      { label: 'SEBI Turnover Fees', value: val('SEBI Turnover Fees') },
+      { label: 'IPF Charges', value: val('IPF Charges') },
+      { label: 'Demat Charges', value: val('Demat Charges') },
+      { label: 'GST', value: val('Total GST') || val('IGST') },
+      { label: 'Stamp Duty', value: val('Stamp Duty') },
+    ].filter(x => Math.abs(x.value) > 0.0001) : [];
+    const storedTotal = val('Total Expenses (incl STT)');
+    const total = storedTotal > 0.0001 ? storedTotal : items.reduce((a, b) => a + b.value, 0);
+    const isOpening = t?.editSource === 'opening';
+    return (
+      <ModalShell open={!!expenseTx} onClose={() => setExpenseTx(null)} labelledBy="expense-breakdown-title">
+        <div className="relative z-10 w-full max-w-sm max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn">
+          <div className="flex items-start justify-between px-5 py-4 border-b border-slate-200">
+            <div>
+              <h3 id="expense-breakdown-title" className="text-sm font-black text-slate-800 flex items-center gap-2"><Wallet className="w-4 h-4 text-indigo-600" /> Expense breakdown</h3>
+              {t && (
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {t.assetName}<span className="mx-1.5 text-slate-300">·</span>
+                  <span className="font-semibold text-slate-600">{t.transactionType}</span><span className="mx-1.5 text-slate-300">·</span>
+                  <span className="font-mono">{t.tradeDate}</span>
+                </p>
+              )}
+            </div>
+            <button onClick={() => setExpenseTx(null)} className="p-1.5 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-4 h-4 text-slate-500" /></button>
+          </div>
+          <div className="overflow-y-auto px-5 py-4">
+            {isOpening ? (
+              <p className="text-[12px] text-slate-500 py-4 text-center">Carried-in opening lot — no charges recorded.</p>
+            ) : items.length === 0 ? (
+              <p className="text-[12px] text-slate-500 py-4 text-center">No charges recorded for this entry.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {items.map(it => (
+                  <div key={it.label} className="flex items-center justify-between text-[12px]">
+                    <span className="text-slate-500">{it.label}</span>
+                    <span className="font-mono text-slate-700">{formatINR(it.value)}</span>
+                  </div>
+                ))}
+                <div className="flex items-center justify-between pt-2 mt-1 border-t border-slate-200 text-[12px]">
+                  <span className="font-black uppercase tracking-wider text-slate-600">Total expenses (incl STT)</span>
+                  <span className="font-mono font-black text-slate-850">{formatINR(total)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </ModalShell>
+    );
+  })();
+
   const formatValueOnly = (num: number) => {
     return new Intl.NumberFormat('en-IN', {
       minimumFractionDigits: 2,
@@ -2362,7 +2429,6 @@ export default function Holdings({
                         {sortTh('TRANSACTION TYPE', 'transactionType')}
                         {sortTh('QUANTITY', 'quantity', 'right')}
                         {sortTh('PRICE', 'price', 'right')}
-                        {sortTh('BROKERAGE', 'brokerage', 'right')}
                         {sortTh('AMOUNT', 'amount', 'right')}
                         {sortTh('BAL QTY', 'balanceQuantity', 'right')}
                         {editMode && <th className="px-6 py-3 text-center">EDIT</th>}
@@ -2371,7 +2437,7 @@ export default function Holdings({
                     <tbody className="divide-y divide-slate-200">
                       {sortedTxs.length === 0 ? (
                         <tr>
-                          <td colSpan={editMode ? 9 : 7} className="px-6 py-12 text-center text-slate-400 italic font-medium">
+                          <td colSpan={editMode ? 8 : 6} className="px-6 py-12 text-center text-slate-400 italic font-medium">
                             No matching ledger line items found.
                           </td>
                         </tr>
@@ -2418,11 +2484,6 @@ export default function Holdings({
                                 <td className="px-3 py-2">
                                   <input type="number" step="any" value={editForm.price ?? ''} onChange={e => setF('price', e.target.value)} className={`${inCls} text-right`} />
                                 </td>
-                                <td className="px-3 py-2">
-                                  {isOpening
-                                    ? <span className="block text-right text-slate-300">—</span>
-                                    : <input type="number" step="any" value={editForm.brokerage ?? ''} onChange={e => setF('brokerage', e.target.value)} className={`${inCls} text-right`} />}
-                                </td>
                                 <td className="px-3 py-2 text-right font-mono text-[11px] text-slate-500" title="Recomputed on save">
                                   {formatINR(numCell(editForm.quantity) * numCell(editForm.price))}
                                 </td>
@@ -2449,8 +2510,9 @@ export default function Holdings({
 
                           return (
                             <tr key={idx}
-                              onClick={editMode && editable ? () => openEdit(t) : undefined}
-                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${editMode && editable ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
+                              onClick={editMode ? (editable ? () => openEdit(t) : undefined) : () => setExpenseTx(t)}
+                              title={editMode ? undefined : 'View expense breakdown'}
+                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${(editMode && editable) || !editMode ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
                               {editMode && (
                                 <td className="px-3 py-3.5 text-center" onClick={e => e.stopPropagation()}>
                                   {editable ? (
@@ -2486,9 +2548,6 @@ export default function Holdings({
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">
                                 {isDiv ? '—' : formatINR(t.price)}
-                              </td>
-                              <td className="px-6 py-3.5 text-right font-mono text-slate-400">
-                                {formatINR(t.brokerage)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-850">
                                 {formatINR(t.amount)}
@@ -2640,6 +2699,7 @@ export default function Holdings({
           </div>
         </div>
         {editEntryModal}
+        {expenseModal}
         {/* Add Trade drawer, pre-filled with THIS security. Mounted here too because the
             detail view early-returns before the main return's copy would render. */}
         <AddTradeModal
@@ -2754,6 +2814,7 @@ export default function Holdings({
       />
 
       {editEntryModal}
+      {expenseModal}
       {lastPriceUpdate && (
         <div className="flex justify-end">
           <span className="text-[11px] text-slate-400">
