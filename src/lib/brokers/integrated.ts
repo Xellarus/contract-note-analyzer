@@ -133,7 +133,11 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
     let colMap: any = {};
     for (let i = 0; i < lines.length; i++) {
       const line = cleanText(lines[i]).toLowerCase();
-      if (line.includes("exchange") && (line.includes("clg") || line.includes("corp")) && line.includes("contract")) {
+      // See parseHtml: also match the Combined Contract Note charge header (no "contract" word).
+      const isChargeHeader =
+        (line.includes("exchange") && (line.includes("clg") || line.includes("corp")) && line.includes("contract")) ||
+        (line.includes("payin") && (line.includes("securities transaction") || line.includes("stt")) && (line.includes("sebi") || line.includes("stamp")));
+      if (isChargeHeader) {
         headerLineIdx = i;
         const tokens = lines[i].trim().split(/\s{2,}/);
         const cleanTokens = tokens.length >= 5 ? tokens.map(t => cleanText(t).toLowerCase()) : lines[i].trim().split(/\s+/).map(t => cleanText(t).toLowerCase());
@@ -377,7 +381,16 @@ export class IntegratedBrokerStrategy implements BrokerStrategy {
         const text = cleanText(row.textContent);
         if (text.includes("security name") || text.includes("isin") || text.includes("symbol")) continue;
 
-        if (text.includes("exchange") && (text.includes("clg") || text.includes("corp")) && text.includes("contract")) {
+        // Charge-summary ("Obligation Detail") header. Old notes: "Exchange … Clg./Corp. … Contract".
+        // The Combined Contract Note format's header is "Exchange/Clg.Corp. | Payin/Payout Obligation |
+        // Securities Transaction Tax | … | Sebi turnover Fees | Stamp Duty | …" — it has NO "contract"
+        // word, so ALSO detect it by its charge columns; otherwise the reliable column-mapped reader
+        // never fires and the line-scanner fallback misreads the STT total (e.g. picks the SEBI/F&O
+        // figure ~₹84 instead of the equity STT ₹81,529), and allocateStt then spreads that wrong total.
+        const isChargeHeader =
+          (text.includes("exchange") && (text.includes("clg") || text.includes("corp")) && text.includes("contract")) ||
+          (text.includes("payin") && (text.includes("securities transaction") || text.includes("stt")) && (text.includes("sebi") || text.includes("stamp")));
+        if (isChargeHeader) {
           const colMap: any = {};
           const cells = Array.from(row.querySelectorAll("td, th"));
           cells.forEach((c, idx) => {

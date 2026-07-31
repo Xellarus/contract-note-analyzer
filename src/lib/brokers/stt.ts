@@ -92,7 +92,15 @@ export function allocateStt(trades: SttTradeInput[], noteTotalStt: number): numb
     totalIntradayTo += matchBuyTo + matchSellTo;
   }
 
-  const hasTotal = noteTotalStt > 0.005;
+  // Delivery equity STT is statutorily 0.1% per side, so a genuine note's printed total can
+  // never be LESS than the delivery minimum. If the total reads implausibly low (a mis-parsed
+  // or missing STT total on the note), DON'T anchor on it — that would scale the delivery legs
+  // down to a bogus figure. Fall through to statutory rates instead (delivery at the exact
+  // 0.1%). Seen on S713 Integrated notes where the printed STT total parsed as a few rupees,
+  // making an ₹8 cr delivery sale show ₹83 STT instead of ₹81,023. The parser reading the total
+  // correctly is the real fix; this just refuses to trust a total that's physically impossible.
+  const statutoryDeliveryStt = totalDeliveryTo * DELIVERY_RATE;
+  const hasTotal = noteTotalStt > 0.005 && noteTotalStt >= statutoryDeliveryStt * 0.5;
   const hasIntraday = totalIntradayTo > 0;
   const hasDelivery = totalDeliveryTo > 0;
 
