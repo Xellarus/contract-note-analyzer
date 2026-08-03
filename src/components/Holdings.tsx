@@ -12,7 +12,10 @@ import { persistGoogleToken, hasValidGoogleToken } from '../lib/googleAuth';
 import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedScrip } from '../lib/holdingsCalc';
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
 import { loadScripMaster, lookupScrip, normName, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
-import { loadScripPrices, ScripPrice } from '../lib/scripPrices';
+import { loadScripPrices, invalidatePriceCache, ScripPrice, PriceSource } from '../lib/scripPrices';
+import { refreshYahooPrices, hasYahooWebApp } from '../lib/yahooPrices';
+import PriceStatusButton from './PriceStatusButton';
+import SourceBadge from './SourceBadge';
 import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
@@ -184,6 +187,34 @@ export default function Holdings({
     loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).then(setPriceRows).catch(() => {});
   }, []);
 
+  // On-demand market-price refresh (Yahoo, via the Apps Script web app), then re-value.
+  // If no web app is configured, or the live pull fails, fall back to re-reading the
+  // last-saved Prices tab (the scheduled trigger keeps it reasonably fresh regardless).
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
+  // Bumped after a price refresh so the "unpriced" button re-reads the Price Status tab.
+  const [priceRefreshTick, setPriceRefreshTick] = useState(0);
+  const handleRefreshPrices = async () => {
+    setRefreshingPrices(true);
+    try {
+      if (hasYahooWebApp()) {
+        try {
+          const r = await refreshYahooPrices();
+          toast.success(`Prices updated — ${r.updated ?? 0} of ${r.total ?? 0} scrips` + (r.missed ? ` · ${r.missed} unpriced` : ''));
+        } catch (e: any) {
+          toast.error('Live price refresh failed: ' + (e?.message || 'error') + ' — showing last saved prices');
+        }
+      } else {
+        toast.info('Reloaded saved prices. Configure the Yahoo web-app URL for a live refresh.');
+      }
+      invalidatePriceCache();
+      const rows = await loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID, { force: true });
+      setPriceRows(rows);
+      setPriceRefreshTick(t => t + 1);
+    } finally {
+      setRefreshingPrices(false);
+    }
+  };
+
   // Index the imported prices under several keys (canonical scrip key, raw ISIN,
   // normalized name) so a holding matches whether it carries an ISIN or not.
   const priceMap = useMemo(() => {
@@ -202,6 +233,24 @@ export default function Holdings({
     if (scrip) { const e = lookupScrip(scrip, isin, name).entry; if (e) { const v = priceMap.get('key:' + e.key); if (v !== undefined) return v; } }
     if (isin) { const v = priceMap.get('isin:' + isin.toUpperCase()); if (v !== undefined) return v; }
     return priceMap.get('name:' + normName(name));
+  };
+
+  // Which feed set a scrip's shown price (Yahoo / Screener) — powers the CMP source badge.
+  // Indexed exactly like priceMap so a holding matches with or without an ISIN.
+  const priceSourceMap = useMemo(() => {
+    const m = new Map<string, PriceSource>();
+    for (const p of priceRows) {
+      if (!(p.price > 0) || !p.source) continue;
+      if (p.isin) m.set('isin:' + p.isin.toUpperCase(), p.source);
+      if (p.name) m.set('name:' + normName(p.name), p.source);
+      if (scrip) { const e = lookupScrip(scrip, p.isin, p.name).entry; if (e) m.set('key:' + e.key, p.source); }
+    }
+    return m;
+  }, [priceRows, scrip]);
+  const getCmpSource = (isin: string, name: string): PriceSource | undefined => {
+    if (scrip) { const e = lookupScrip(scrip, isin, name).entry; if (e) { const v = priceSourceMap.get('key:' + e.key); if (v) return v; } }
+    if (isin) { const v = priceSourceMap.get('isin:' + isin.toUpperCase()); if (v) return v; }
+    return priceSourceMap.get('name:' + normName(name));
   };
 
   // Previous-day price baseline (Prices tab "Previous Price" column, rolled once per
@@ -2202,6 +2251,9 @@ export default function Holdings({
                   <span className={`text-[10px] font-black ${changePct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="cmp-price-percentage">
                     ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
                   </span>
+                  {/* Which feed the shown price came from — only when it's the real fetched CMP
+                      (not a manual override or an avg-cost fallback). */}
+                  <SourceBadge source={customCmp === null && realDetailCmp !== undefined ? getCmpSource(isin, name) : undefined} />
                 </div>
               )}
             </div>
@@ -3122,6 +3174,15 @@ export default function Holdings({
                     </button>
                   ) : (
                     <div className="flex items-center gap-2 shrink-0">
+                      <PriceStatusButton refreshKey={priceRefreshTick} />
+                      <button
+                        onClick={handleRefreshPrices}
+                        disabled={refreshingPrices}
+                        title="Fetch the latest market prices from Yahoo Finance and re-value holdings"
+                        className="btn-press px-3.5 py-2.5 bg-white border border-slate-200 text-slate-600 hover:border-indigo-300 font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        <TrendingUp className={`w-4 h-4 ${refreshingPrices ? 'animate-pulse' : ''}`} /> {refreshingPrices ? 'Updating…' : 'Refresh Prices'}
+                      </button>
                       <button
                         onClick={rebuildHoldingsNow}
                         disabled={rebuildingHoldings}

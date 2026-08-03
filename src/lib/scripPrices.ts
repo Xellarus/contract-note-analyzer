@@ -10,8 +10,17 @@ import { lookupScrip, normName, ScripMaster } from "./scripMaster";
  * last import, not live.
  */
 const PRICES_TAB = "Prices";
+// Scrips the Yahoo updater couldn't price on its last run — written by YahooPriceUpdate.gs,
+// surfaced in the app's "unpriced" button. Lives in the same shared scrip-master sheet.
+const PRICE_STATUS_TAB = "Price Status";
 
-export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; }
+/** Which feed last set a scrip's price. Drives the source badge on the stock page. */
+export type PriceSource = "yahoo" | "screener" | "";
+
+export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; source?: PriceSource; }
+
+/** A scrip the Yahoo updater could not fetch a price for (no symbol, or Yahoo had none). */
+export interface PriceMiss { isin: string; name: string; reason: string; checked: string; }
 
 let _priceCache: { id: string; rows: ScripPrice[]; ts: number } | null = null;
 const PRICE_TTL_MS = 60_000;
@@ -41,8 +50,9 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const price = toNum(r[2]);
     const updated = (r[3] || "").toString().trim();
     const previousPrice = toNum(r[4]);
+    const source = (r[5] || "").toString().trim().toLowerCase() as PriceSource;
     if ((!isin && !name) || isNaN(price)) continue;
-    rows.push({ isin, name, price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice });
+    rows.push({ isin, name, price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: source === "yahoo" || source === "screener" ? source : "" });
   }
   return rows;
 }
@@ -55,7 +65,7 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
 async function fetchPriceRows(spreadsheetId: string): Promise<ScripPrice[]> {
   let res: any;
   try {
-    res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId, range: `${PRICES_TAB}!A1:D50000` });
+    res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId, range: `${PRICES_TAB}!A1:F50000` });
   } catch (e: any) {
     const msg = e?.result?.error?.message || e?.message || "";
     if (/unable to parse range/i.test(msg)) return [];   // tab not created yet
@@ -75,6 +85,29 @@ export async function loadScripPrices(spreadsheetId: string, opts?: { force?: bo
   try { rows = await fetchPriceRows(spreadsheetId); } catch { rows = []; }
   _priceCache = { id: spreadsheetId, rows, ts: now };
   return rows;
+}
+
+/**
+ * Read the "Price Status" tab — the scrips the Yahoo updater couldn't price on its last
+ * run (ISIN | Name | Reason | Checked). Empty list if the tab doesn't exist yet or on any
+ * read error (the feature is informational — never blocks). Not cached (small + on demand).
+ */
+export async function loadPriceMisses(spreadsheetId: string): Promise<PriceMiss[]> {
+  let res: any;
+  try {
+    res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId, range: `${PRICE_STATUS_TAB}!A1:D50000` });
+  } catch { return []; }
+  const vals: any[][] = res?.result?.values || [];
+  const out: PriceMiss[] = [];
+  const start = vals.length > 0 && /isin|name|reason|checked/i.test((vals[0] || []).join(",")) ? 1 : 0;
+  for (let i = start; i < vals.length; i++) {
+    const r = vals[i]; if (!r) continue;
+    const isin = (r[0] || "").toString().trim().toUpperCase();
+    const name = (r[1] || "").toString().trim();
+    if (!isin && !name) continue;
+    out.push({ isin, name, reason: (r[2] || "").toString().trim(), checked: (r[3] || "").toString().trim() });
+  }
+  return out;
 }
 
 /**
@@ -104,13 +137,15 @@ export async function saveScripPrices(
     if (prev && prev.price > 0 && stampDate(prev.updated) && stampDate(prev.updated) !== today) {
       previousPrice = prev.price;
     }
-    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice });
+    // A manual screener import stamps source 'screener'; rows it doesn't touch (e.g. Yahoo-fed)
+    // keep their existing source.
+    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice, source: "screener" });
     updated++;
   }
 
-  const rows: any[][] = [["ISIN", "Name", "Current Price", "Updated", "Previous Price"]];
+  const rows: any[][] = [["ISIN", "Name", "Current Price", "Updated", "Previous Price", "Source"]];
   for (const p of [...map.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-    rows.push([p.isin, p.name, p.price, p.updated, p.previousPrice || ""]);
+    rows.push([p.isin, p.name, p.price, p.updated, p.previousPrice || "", p.source || ""]);
   }
 
   await ensureSheetTabs(spreadsheetId, [PRICES_TAB]);

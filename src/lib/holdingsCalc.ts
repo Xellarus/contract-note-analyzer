@@ -117,6 +117,104 @@ function squareOffIntraday(trades: ReplayTrade[], keyOf: (t: ReplayTrade) => str
   return out;
 }
 
+// ── FIFO holding replay ─────────────────────────────────────────────────────
+// Shared by the live Holding tab (`rebuildHoldingTab`) and the Historical Holding
+// Report (`computeHoldingsAsOf`) so a portfolio's holding is computed the SAME way the
+// FIFO capital-gains engine consumes lots — a SELL removes the OLDEST lots first, and
+// the survivors ARE the holding. This replaces the previous weighted-average cost basis.
+//
+// Only the LOT MATCHING changed. The per-lot cost basis is whatever the caller seeds /
+// buys at: the callers pass the all-in incl-STT buy cost, so "Invested Value" keeps its
+// established all-in meaning — a FIFO sell just decides WHICH lots' cost survives.
+//
+// `netQty` is tracked independently of the surviving lots so an oversold position (more
+// sold than ever held — a data error) surfaces as a NEGATIVE quantity, exactly like the
+// old weighted-average path, instead of being silently clamped.
+export interface FifoSeedLot { qty: number; price: number; ts: number; }
+export type FifoHoldingEvent =
+  | { kind: "BUY"; key: string; ts: number; qty: number; price: number }
+  | { kind: "SELL"; key: string; ts: number; qty: number }
+  | { kind: "SPLIT"; key: string; ts: number; qty: number }
+  | { kind: "MERGER"; ts: number; fromKey: string; toKey: string; sharesIn: number; cost: number }
+  | { kind: "DEMERGER"; ts: number; fromKey: string; toKey: string; sharesIn: number; cost: number };
+export interface FifoHoldingOut { netQty: number; invested: number; }
+
+export function replayFifoHoldings(
+  seed: Map<string, FifoSeedLot[]>,
+  events: FifoHoldingEvent[],
+): Map<string, FifoHoldingOut> {
+  interface L { remaining: number; price: number; ts: number; }
+  const lots = new Map<string, L[]>();
+  const netQty = new Map<string, number>();
+  const bump = (k: string, dq: number) => netQty.set(k, (netQty.get(k) || 0) + dq);
+  const getLots = (k: string) => { let a = lots.get(k); if (!a) { a = []; lots.set(k, a); } return a; };
+
+  // Seed carried-in lots (oldest first within each scrip).
+  for (const [k, arr] of seed) {
+    const a = getLots(k);
+    for (const l of arr) { a.push({ remaining: l.qty, price: l.price, ts: l.ts }); bump(k, l.qty); }
+    a.sort((x, y) => x.ts - y.ts);
+  }
+
+  // Date order: BUY (0) → SPLIT / MERGER / DEMERGER (1) → SELL (2), mirroring the FIFO
+  // capital-gains engine so the surviving lots line up with it.
+  const ordOf = (e: FifoHoldingEvent) => (e.kind === "BUY" ? 0 : e.kind === "SELL" ? 2 : 1);
+  const evs = [...events].sort((a, b) => (a.ts - b.ts) || (ordOf(a) - ordOf(b)));
+
+  for (const e of evs) {
+    if (e.kind === "BUY") {
+      // If the scrip is currently oversold (netQty < 0 from a prior data-error sell), the
+      // buy first COVERS that deficit — only the surplus becomes a held lot — so Σremaining
+      // stays equal to netQty and invested isn't inflated by phantom shares. (Matches the old
+      // weighted-avg path, which reset cost to the buy price when a buy crossed back above 0.)
+      const cur = netQty.get(e.key) || 0;
+      const rem = cur < 0 ? Math.max(0, e.qty + cur) : e.qty;
+      getLots(e.key).push({ remaining: rem, price: e.price, ts: e.ts });
+      bump(e.key, e.qty);
+    } else if (e.kind === "SELL") {
+      let left = e.qty;
+      for (const l of getLots(e.key)) {
+        if (left <= 1e-9) break;
+        if (l.remaining <= 0) continue;
+        const m = Math.min(l.remaining, left);
+        l.remaining -= m; left -= m;
+      }
+      bump(e.key, -e.qty);   // may drive netQty negative → surfaced as a discrepancy
+    } else if (e.kind === "SPLIT") {
+      const a = getLots(e.key);
+      const held = a.reduce((s, l) => s + l.remaining, 0);
+      if (held > 1e-9 && e.qty > 0) {
+        const f = (held + e.qty) / held;   // total cost preserved: qty ×f, cost/share ÷f
+        for (const l of a) { l.remaining *= f; l.price = l.price / f; }
+        bump(e.key, e.qty);
+      }
+    } else if (e.kind === "MERGER") {
+      for (const l of getLots(e.fromKey)) l.remaining = 0;   // target absorbed
+      netQty.set(e.fromKey, 0);
+      const px = e.sharesIn > 0 ? e.cost / e.sharesIn : 0;
+      getLots(e.toKey).push({ remaining: e.sharesIn, price: px, ts: e.ts });
+      bump(e.toKey, e.sharesIn);
+    } else {   // DEMERGER — reduce parent lots' cost, spin off a fresh NewCo lot
+      const a = getLots(e.fromKey);
+      const remCost = a.reduce((s, l) => s + l.remaining * l.price, 0);
+      const f = remCost > 0 ? Math.max(0, (remCost - e.cost) / remCost) : 1;
+      for (const l of a) l.price = l.price * f;
+      const px = e.sharesIn > 0 ? e.cost / e.sharesIn : 0;
+      getLots(e.toKey).push({ remaining: e.sharesIn, price: px, ts: e.ts });
+      bump(e.toKey, e.sharesIn);
+    }
+  }
+
+  const out = new Map<string, FifoHoldingOut>();
+  const keys = new Set<string>([...netQty.keys(), ...lots.keys()]);
+  for (const k of keys) {
+    const nq = netQty.get(k) || 0;
+    const inv = nq > 1e-9 ? (lots.get(k) || []).reduce((s, l) => s + Math.max(0, l.remaining) * l.price, 0) : 0;
+    out.set(k, { netQty: nq, invested: inv });
+  }
+  return out;
+}
+
 export interface HistoricalHolding {
   securityName: string;
   isin: string;
@@ -150,11 +248,20 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     else if (isin && !h.isin) h.isin = isin;
     return h;
   };
+  // Same key resolve() groups under — used to bucket FIFO seed lots / events by scrip.
+  const keyFor = (isin: string, name: string): string => {
+    const r = resolveScrip(master, isin, name);
+    return r.status === "resolved" ? r.key : ((isin || "").trim() || normName(name));
+  };
 
   // 1. Seed the pre-FY26 opening position. HOW depends on whether the report date is on/after the
   //    opening-basis cutoff (FY25 close, 31-Mar-2025) or a genuinely earlier date:
   const openingAsOfTs = Date.parse("2025-03-31T23:59:59");   // FY25 close = the opening-basis date
   let openingCount = 0;
+  // Post-cutoff dates use the FIFO engine (mirrors the live Holding tab + capital-gains). The
+  // pre-cutoff legacy branch (fragile Opening-Txns replay + HPR reconciliation) stays weighted-avg.
+  const useFifo = asOfTs >= openingAsOfTs;
+  const asOfSeed = new Map<string, FifoSeedLot[]>();
 
   if (asOfTs >= openingAsOfTs) {
     // ── FY-END (31-Mar-2025) AND LATER — the AUTHORITATIVE opening position is the reconciled
@@ -166,10 +273,9 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     // True Entry trades then replay on top (step 2 below). See [[opening-basis]].
     const openingLots = await loadOpeningHoldings(spreadsheetId).catch(() => []);
     for (const ol of openingLots) {
-      const h = resolve(ol.isin, ol.name);   // ISIN→name via scrip master, so it merges with FY26 rows
-      const cost = h.quantity * h.avgBuyPrice + ol.qty * ol.costPerShare;   // weighted-avg merge (aliases → one key)
-      h.quantity += ol.qty;
-      h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0;
+      resolve(ol.isin, ol.name);   // register display name/ISIN (ISIN→name via scrip master, merges with FY26)
+      const key = keyFor(ol.isin, ol.name);
+      (asOfSeed.get(key) || asOfSeed.set(key, []).get(key)!).push({ qty: ol.qty, price: ol.costPerShare, ts: parseDateTs(ol.acqDate) || 0 });
     }
     openingCount = openingLots.length;
   } else {
@@ -251,6 +357,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
   }
 
   let replayed = 0;
+  const fifoEvents: FifoHoldingEvent[] = [];
   if (teRows.length >= 2) {
     const hdrs = teRows[0].map((h: any) => (h || "").toString().trim());
     const col = (name: string, fallback: number) => { const i = hdrs.indexOf(name); return i >= 0 ? i : fallback; };
@@ -287,14 +394,20 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
 
     // Only trades on/before the as-of date, with intraday round-trips squared off
     // (same-day buy+sell on a scrip is excluded so it can't lift the cost basis).
-    const keyOf = (t: ReplayTrade) => {
-      const r = resolveScrip(master, t.isin, t.name);
-      return r.status === "resolved" ? r.key : ((t.isin || "").trim() || normName(t.name));
-    };
     const window = trades.filter(t => t.ts <= asOfTs);
-    const playable = squareOffIntraday(window, keyOf);
+    const playable = squareOffIntraday(window, (t) => keyFor(t.isin, t.name));
     replayed = window.length;
     for (const t of playable) {
+      if (useFifo) {
+        // FIFO: collect events; the replay + survivors are computed in the aggregation below.
+        resolve(t.isin, t.name);   // register display name/ISIN
+        const key = keyFor(t.isin, t.name);
+        if (t.type === "BUY") fifoEvents.push({ kind: "BUY", key, ts: t.ts, qty: t.qty, price: t.price });
+        else if (t.type === "SPLIT") fifoEvents.push({ kind: "SPLIT", key, ts: t.ts, qty: t.qty });
+        else fifoEvents.push({ kind: "SELL", key, ts: t.ts, qty: t.qty });
+        continue;
+      }
+      // ── Legacy weighted-average path (genuinely pre-cutoff historical dates) ──
       const h = resolve(t.isin, t.name);
       if (t.type === "SPLIT") {
         // Subdivide: qty grows by the added shares, total cost unchanged → avg ÷factor.
@@ -316,13 +429,29 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     throw new Error("Nothing to report — this portfolio has no opening basis and no True Entry trades yet.");
   }
 
-  const active = [...byKey.values()].filter(h => h.quantity > 0).sort((a, b) => (b.quantity * b.avgBuyPrice) - (a.quantity * a.avgBuyPrice));
   let totalInvested = 0;
-  const positions: HistoricalHolding[] = active.map(h => {
-    const invested = h.quantity * h.avgBuyPrice;
-    totalInvested += invested;
-    return { securityName: h.securityName, isin: h.isin, quantity: h.quantity, avgBuyPrice: parseFloat(h.avgBuyPrice.toFixed(4)), invested: parseFloat(invested.toFixed(2)) };
-  });
+  let positions: HistoricalHolding[];
+  if (useFifo) {
+    // FIFO: SELLs consumed the oldest lots; the survivors are the as-of holding. Only
+    // positive positions are reported (as the historical report always has).
+    const fifoOut = replayFifoHoldings(asOfSeed, fifoEvents);
+    const rows: HistoricalHolding[] = [];
+    for (const [key, o] of fifoOut) {
+      if (o.netQty <= 1e-9) continue;
+      const h = byKey.get(key); if (!h) continue;
+      totalInvested += o.invested;
+      rows.push({ securityName: h.securityName, isin: h.isin, quantity: o.netQty, avgBuyPrice: parseFloat((o.invested / o.netQty).toFixed(4)), invested: parseFloat(o.invested.toFixed(2)) });
+    }
+    rows.sort((a, b) => b.invested - a.invested);
+    positions = rows;
+  } else {
+    const active = [...byKey.values()].filter(h => h.quantity > 0).sort((a, b) => (b.quantity * b.avgBuyPrice) - (a.quantity * a.avgBuyPrice));
+    positions = active.map(h => {
+      const invested = h.quantity * h.avgBuyPrice;
+      totalInvested += invested;
+      return { securityName: h.securityName, isin: h.isin, quantity: h.quantity, avgBuyPrice: parseFloat(h.avgBuyPrice.toFixed(4)), invested: parseFloat(invested.toFixed(2)) };
+    });
+  }
   return { positions, totalInvested: parseFloat(totalInvested.toFixed(2)), tradeRows: replayed + openingCount };
 }
 
@@ -447,43 +576,40 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   };
   const playable = squareOffIntraday(trades, keyOf);
 
-  // Corporate actions (merger / demerger) are applied in date order, interleaved
-  // with the trade replay, so a position's cost is right at the moment each acts.
+  // Corporate actions (merger / demerger) transform the FIFO lot queues in date order,
+  // interleaved with the trade replay, so a position's lots are right when each acts.
   const corpActions = await loadCorporateActions(spreadsheetId);
-  const applyMergerHolding = (ca: CorpAction) => {
-    const tgt = resolve("", ca.from);            // Target → removed
-    tgt.quantity = 0; tgt.avgBuyPrice = 0;
-    const acq = resolve("", ca.to);              // Acquirer → += sharesIn at carried cost
-    const newQty = acq.quantity + ca.sharesIn;
-    acq.avgBuyPrice = newQty > 0 ? ((acq.quantity * acq.avgBuyPrice) + ca.cost) / newQty : 0;
-    acq.quantity = newQty;
-  };
-  const applyDemergerHolding = (ca: CorpAction) => {
-    const parent = resolve("", ca.from);         // Parent → cost reduced, qty unchanged
-    const parentCost = parent.quantity * parent.avgBuyPrice;
-    const newParentCost = Math.max(0, parentCost - ca.cost);
-    parent.avgBuyPrice = parent.quantity > 0 ? newParentCost / parent.quantity : 0;
-    const nc = resolve("", ca.to);               // NewCo → += sharesIn at moved cost
-    const newQty = nc.quantity + ca.sharesIn;
-    nc.avgBuyPrice = newQty > 0 ? ((nc.quantity * nc.avgBuyPrice) + ca.cost) / newQty : 0;
-    nc.quantity = newQty;
-  };
 
-  type HEv = { ts: number; ord: number; trade?: ReplayTrade; ca?: CorpAction };
-  const hevents: HEv[] = [];
-  for (const t of playable) hevents.push({ ts: t.ts, ord: 0, trade: t });
-  for (const ca of corpActions) hevents.push({ ts: parseDateTs(ca.dateStr) || 0, ord: 1, ca });
-  hevents.sort((a, b) => (a.ts - b.ts) || (a.ord - b.ord));
-
-  // Seed opening lots (pre-FY26 basis) as the starting weighted-average position,
-  // so the Holding tab reflects carried-in holdings + FY26 trades. No-op if the
-  // Opening Holdings tab is absent.
+  // Seed the carried-in opening lots (pre-FY26 basis) as the oldest FIFO lots, so FY26
+  // sells consume them first — exactly as the capital-gains engine does. No-op if the
+  // Opening Holdings tab is absent. resolve() registers each scrip's display name/ISIN.
   const openingLots = await loadOpeningHoldings(spreadsheetId).catch(() => []);
+  const seed = new Map<string, FifoSeedLot[]>();
   for (const ol of openingLots) {
-    const h = resolve(ol.isin, ol.name);   // ISIN → name via scrip master, so it merges with FY26 rows
-    const newQty = h.quantity + ol.qty;
-    h.avgBuyPrice = newQty > 0 ? ((h.quantity * h.avgBuyPrice) + (ol.qty * ol.costPerShare)) / newQty : 0;
-    h.quantity = newQty;
+    resolve(ol.isin, ol.name);   // ISIN → canonical name via the scrip master (merges with FY26 rows)
+    const key = keyOf({ isin: ol.isin, name: ol.name } as ReplayTrade);
+    (seed.get(key) || seed.set(key, []).get(key)!).push({ qty: ol.qty, price: ol.costPerShare, ts: parseDateTs(ol.acqDate) || 0 });
+  }
+
+  // Build the dated FIFO event stream: trades (same-day round-trips already squared off)
+  // valued at their all-in incl-STT cost + corporate actions. resolve() registers display.
+  const fifoEvents: FifoHoldingEvent[] = [];
+  for (const t of playable) {
+    resolve(t.isin, t.name);
+    const key = keyOf(t);
+    if (t.type === "BUY") fifoEvents.push({ kind: "BUY", key, ts: t.ts, qty: t.qty, price: t.price });
+    else if (t.type === "SPLIT") fifoEvents.push({ kind: "SPLIT", key, ts: t.ts, qty: t.qty });
+    else fifoEvents.push({ kind: "SELL", key, ts: t.ts, qty: t.qty });
+  }
+  for (const ca of corpActions) {
+    resolve("", ca.from); resolve("", ca.to);
+    fifoEvents.push({
+      kind: ca.type === "Merger" ? "MERGER" : "DEMERGER",
+      ts: parseDateTs(ca.dateStr) || 0,
+      fromKey: keyOf({ isin: "", name: ca.from } as ReplayTrade),
+      toKey: keyOf({ isin: "", name: ca.to } as ReplayTrade),
+      sharesIn: ca.sharesIn, cost: ca.cost,
+    });
   }
 
   // Every name this portfolio actually references (trades + opening lots), normalized —
@@ -492,54 +618,38 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   for (const t of trades) seenNames.add(normName(t.name));
   for (const ol of openingLots) seenNames.add(normName(ol.name));
 
-  for (const ev of hevents) {
-    if (ev.ca) { ev.ca.type === "Merger" ? applyMergerHolding(ev.ca) : applyDemergerHolding(ev.ca); continue; }
-    const t = ev.trade!;
-    const h = resolve(t.isin, t.name);
-    if (t.type === "SPLIT") {
-      // Subdivide: qty grows by the added shares, total cost unchanged → avg ÷factor.
-      if (h.quantity > 1e-9 && t.qty > 0) { const cost = h.quantity * h.avgBuyPrice; h.quantity += t.qty; h.avgBuyPrice = h.quantity > 0 ? cost / h.quantity : 0; }
-      continue;
-    }
-    if (t.type === "BUY") {
-      const newQty = h.quantity + t.qty;
-      if (newQty > 0) {
-        h.avgBuyPrice = h.quantity < 0
-          ? t.price
-          : ((h.quantity * h.avgBuyPrice) + (t.qty * t.price)) / newQty;
-      } else {
-        h.avgBuyPrice = 0;
-      }
-      h.quantity = newQty;
-    } else {
-      h.quantity -= t.qty;
-      if (h.quantity <= 0) h.avgBuyPrice = 0;
-    }
-  }
+  // FIFO replay: a SELL consumes the oldest lots first; the survivors are the holding.
+  const fifoOut = replayFifoHoldings(seed, fifoEvents);
 
   // ── 4. Write Holding tab ──
-  // Keep NEGATIVE net positions too (|qty| > 0), not just positives: a negative
-  // holding is impossible in reality and flags a data discrepancy (a missing buy,
-  // a dropped/duplicated sell, a bad opening lot). Surfacing it — rather than
-  // silently dropping it — lets the Holdings view show it as a discrepancy so it
-  // can be traced and fixed. Negatives carry avgBuyPrice 0 (set on the sell that
-  // took them below zero) → invested 0, so they don't distort the invested total,
-  // and computeAum already skips qty<=0 so the dashboard AUM is unaffected.
-  const active = [...byKey.values()]
-    .filter(h => Math.abs(h.quantity) > 1e-9)
-    .sort((a, b) => (b.quantity * b.avgBuyPrice) - (a.quantity * a.avgBuyPrice));
+  // Keep NEGATIVE net positions too (|qty| > 0), not just positives: a negative holding
+  // is impossible in reality and flags a data discrepancy (a missing buy, a dropped/
+  // duplicated sell, a bad opening lot). Surfacing it — rather than silently dropping it —
+  // lets the Holdings view show it as a discrepancy so it can be traced and fixed.
+  // Negatives carry invested 0 so they don't distort the total, and computeAum already
+  // skips qty<=0 so the dashboard AUM is unaffected.
+  interface HoldingOut { securityName: string; isin: string; quantity: number; avgBuyPrice: number; invested: number; }
+  const active: HoldingOut[] = [];
+  for (const [key, o] of fifoOut) {
+    if (Math.abs(o.netQty) <= 1e-9) continue;
+    const h = byKey.get(key);
+    if (!h) continue;
+    const invested = o.netQty > 0 ? o.invested : 0;   // negatives → invested 0
+    const avg = o.netQty > 0 ? invested / o.netQty : 0;
+    active.push({ securityName: h.securityName, isin: h.isin, quantity: o.netQty, avgBuyPrice: avg, invested });
+  }
+  active.sort((a, b) => b.invested - a.invested);
 
   const rows: any[][] = [["Company Name", "ISIN", "Quantity", "Avg Buy Price", "Invested Value"]];
   let totalInvested = 0;
   for (const h of active) {
-    const invested = h.quantity * h.avgBuyPrice;
-    totalInvested += invested;
+    totalInvested += h.invested;
     rows.push([
       h.securityName,
       h.isin,
       h.quantity,
       parseFloat(h.avgBuyPrice.toFixed(4)),
-      parseFloat(invested.toFixed(2)),
+      parseFloat(h.invested.toFixed(2)),
     ]);
   }
   rows.push(["Total", "", "", "", parseFloat(totalInvested.toFixed(2))]);

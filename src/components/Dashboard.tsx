@@ -7,6 +7,7 @@ import { logAumSnapshot, loadAumHistory, AumSnapshot } from '../lib/aumHistory';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
 import CubeLoader from './ui/CubeLoader';
+import PriceStatusButton from './PriceStatusButton';
 
 interface DashboardProps {
   holdings: PortfolioHolding[];
@@ -374,12 +375,15 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
           <h2 className="text-lg font-black text-slate-800 tracking-tight">Dashboard</h2>
           <p className="text-xs text-slate-500 mt-0.5">Live assets under management across all portfolios.</p>
         </div>
-        <button
-          onClick={load} disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <PriceStatusButton />
+          <button
+            onClick={load} disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
+          </button>
+        </div>
       </div>
 
       {/* AUM hero */}
