@@ -28,7 +28,7 @@
 // CONFIG — edit these.
 // ────────────────────────────────────────────────────────────────────────────
 var CONFIG = {
-  DRY_RUN: true,                         // true = parse + email only, write nothing
+  DRY_RUN: false,                        // true = parse + email only, write nothing
   LABEL_INBOX: 'Contract Note',          // Gmail label your forwarding filter applies (must match EXACTLY, incl. spaces)
   LABEL_DONE: 'Contract Note - Imported',// applied after a thread is processed
   SCRIP_MASTER_ID: '1gLDfmeQe0wzfHWfaBReVk-6KsAvy1ZamfQAMrIVWsHg',
@@ -507,6 +507,24 @@ function finalize_(summary, rawTrades, tradeDate) {
   var remainingAmount = { etc: summary.etc, sebiFees: summary.sebiFees, clearingCharges: summary.clearingCharges, ipf: summary.ipf, dmat: summary.dmat || 0 };
   var numTrades = tradesToProcess.length;
 
+  // STT: allocate the note's PRINTED total (summary.stt) across the trades — delivery at the
+  // exact statutory 0.1% per side, the leftover intraday pool pro-rata by squared-off turnover
+  // and split 50/50 between the buy and sell legs. Faithful port of src/lib/brokers/stt.ts
+  // allocateStt (incl. the implausibly-low-total safeguard). Replaces the old per-security
+  // rate model so an auto-imported note gets the SAME STT as one imported through the app.
+  var sttArr = allocateStt_(
+    tradesToProcess.map(function (t) {
+      return {
+        securityName: t.securityName,
+        type: t.type,
+        quantity: t.quantity,
+        price: t.price,
+        exempt: String(t.securityName || '').toLowerCase().indexOf('liquidbees') >= 0
+      };
+    }),
+    summary.stt || 0
+  );
+
   var trades = tradesToProcess.map(function (t, idx) {
     var isLast = idx === numTrades - 1;
     var s = securityStats[t.securityName];
@@ -515,11 +533,8 @@ function finalize_(summary, rawTrades, tradeDate) {
     var ratio = totalTurnover > 0 ? grossTotal / totalTurnover : 0;
     var brokerage = rt(t.quantity * (t.brokeragePerShare || 0));
 
-    var stt;
-    if (t.securityName.toLowerCase().indexOf('liquidbees') >= 0) stt = 0;
-    else if (!isIntraday) stt = Math.round(grossTotal * 0.001);
-    else if (s.buyQty === s.sellQty) stt = 0;
-    else stt = t.type === 'Sell' ? Math.round(grossTotal * 0.00025) : 0;
+    // STT pre-allocated across all trades from the note's printed total (see allocateStt_).
+    var stt = sttArr[idx];
 
     var allocate = function (totalVal, key, r) {
       if (isLast) return rt(remainingAmount[key]);
@@ -571,6 +586,138 @@ function finalize_(summary, rawTrades, tradeDate) {
   });
 
   return { summary: summary, trades: trades };
+}
+
+// ── STT allocation (verbatim ES5 port of src/lib/brokers/stt.ts allocateStt) ──
+// Anchors on the note's PRINTED total STT: matched min(buyQty,sellQty) per security is
+// intraday, the excess is delivery. Delivery legs get the exact 0.1% per side; the intraday
+// POOL = total − Σ(delivery STT) is spread across intraday securities pro-rata by squared-off
+// turnover and split 50/50 buy/sell. Σ(per-trade) === total to the paise. ETF/liquid-bees
+// (exempt) stay 0. Fallbacks: no/implausibly-low total → statutory rates; pure-delivery →
+// whole total by turnover; delivery > total → scale delivery down. Aligned by input index.
+function allocateStt_(trades, noteTotalStt) {
+  var n = trades.length;
+  var out = [];
+  for (var z = 0; z < n; z++) out.push(0);
+  if (n === 0) return out;
+
+  var DELIVERY_RATE = 0.001;        // 0.1% each side
+  var INTRADAY_SELL_RATE = 0.00025; // fallback only (no printed total)
+  var paise = function (x) { return Math.round((x + Number.EPSILON) * 100) / 100; };
+  var rowTo = function (i) { return Math.max(0, trades[i].quantity) * Math.max(0, trades[i].price); };
+
+  var spread = function (idxs, amount) {
+    if (amount === 0 || idxs.length === 0) return;
+    var tot = 0, a;
+    for (a = 0; a < idxs.length; a++) tot += rowTo(idxs[a]);
+    if (tot <= 0) return;
+    for (a = 0; a < idxs.length; a++) out[idxs[a]] += amount * (rowTo(idxs[a]) / tot);
+  };
+
+  var tieOut = function (target) {
+    var r = out.map(paise), sum = 0, i;
+    for (i = 0; i < r.length; i++) sum += r[i];
+    var drift = paise(target - sum);
+    if (Math.abs(drift) >= 0.01) {
+      var mi = -1, mv = -Infinity;
+      for (i = 0; i < r.length; i++) { if (r[i] > mv) { mv = r[i]; mi = i; } }
+      if (mi >= 0) r[mi] = paise(r[mi] + drift);
+    }
+    return r;
+  };
+
+  // Per-security tallies (equity only; exempt rows never carry STT).
+  var secs = {}, order = [];
+  for (var i = 0; i < n; i++) {
+    var t = trades[i];
+    if (t.exempt) continue;
+    var name = t.securityName;
+    var s = secs[name];
+    if (!s) { s = { buyQty: 0, sellQty: 0, buyTo: 0, sellTo: 0, buyIdx: [], sellIdx: [] }; secs[name] = s; order.push(name); }
+    var g = rowTo(i);
+    if (t.type === 'Buy') { s.buyQty += t.quantity; s.buyTo += g; s.buyIdx.push(i); }
+    else { s.sellQty += t.quantity; s.sellTo += g; s.sellIdx.push(i); }
+  }
+
+  // Split each security into matched (intraday) / excess (delivery) turnover.
+  var splits = [], totalDeliveryTo = 0, totalIntradayTo = 0;
+  for (var oi = 0; oi < order.length; oi++) {
+    var sec = secs[order[oi]];
+    var matched = Math.min(sec.buyQty, sec.sellQty);
+    var fB = sec.buyQty > 0 ? matched / sec.buyQty : 0;
+    var fS = sec.sellQty > 0 ? matched / sec.sellQty : 0;
+    var matchBuyTo = sec.buyTo * fB;
+    var matchSellTo = sec.sellTo * fS;
+    var delBuyTo = sec.buyTo - matchBuyTo;
+    var delSellTo = sec.sellTo - matchSellTo;
+    splits.push({ s: sec, matchBuyTo: matchBuyTo, matchSellTo: matchSellTo, delBuyTo: delBuyTo, delSellTo: delSellTo });
+    totalDeliveryTo += delBuyTo + delSellTo;
+    totalIntradayTo += matchBuyTo + matchSellTo;
+  }
+
+  // A genuine note's printed total can't be below the delivery minimum (0.1% per side); an
+  // implausibly-low total is a mis-read → don't anchor on it, fall through to statutory rates.
+  var statutoryDeliveryStt = totalDeliveryTo * DELIVERY_RATE;
+  var hasTotal = noteTotalStt > 0.005 && noteTotalStt >= statutoryDeliveryStt * 0.5;
+  var hasIntraday = totalIntradayTo > 0;
+  var hasDelivery = totalDeliveryTo > 0;
+
+  if (!hasIntraday && !hasDelivery) return out.map(paise);   // all-exempt / empty
+
+  // Fallback: no usable printed total → statutory rates.
+  if (!hasTotal) {
+    for (var p = 0; p < splits.length; p++) {
+      var sp = splits[p];
+      spread(sp.s.buyIdx, sp.delBuyTo * DELIVERY_RATE);
+      spread(sp.s.sellIdx, sp.delSellTo * DELIVERY_RATE);
+      var intra = sp.matchSellTo * INTRADAY_SELL_RATE;   // real intraday STT is sell-side only…
+      spread(sp.s.buyIdx, intra / 2);                    // …but booked half on each leg
+      spread(sp.s.sellIdx, intra / 2);
+    }
+    return out.map(paise);
+  }
+
+  // Pure-delivery note → the whole total is delivery, spread by delivery turnover.
+  if (!hasIntraday) {
+    for (var q = 0; q < splits.length; q++) {
+      var sp2 = splits[q];
+      spread(sp2.s.buyIdx, noteTotalStt * (sp2.delBuyTo / totalDeliveryTo));
+      spread(sp2.s.sellIdx, noteTotalStt * (sp2.delSellTo / totalDeliveryTo));
+    }
+    return tieOut(noteTotalStt);
+  }
+
+  var deliveryStt = hasDelivery ? totalDeliveryTo * DELIVERY_RATE : 0;
+  var pool = noteTotalStt - deliveryStt;
+
+  // Delivery alone exceeds the printed total (shouldn't happen) → scale delivery down, no intraday.
+  if (pool < 0) {
+    var scale = deliveryStt > 0 ? noteTotalStt / deliveryStt : 0;
+    for (var r0 = 0; r0 < splits.length; r0++) {
+      var sp3 = splits[r0];
+      spread(sp3.s.buyIdx, sp3.delBuyTo * DELIVERY_RATE * scale);
+      spread(sp3.s.sellIdx, sp3.delSellTo * DELIVERY_RATE * scale);
+    }
+    return tieOut(noteTotalStt);
+  }
+
+  // Delivery at the exact rate …
+  for (var d = 0; d < splits.length; d++) {
+    var sp4 = splits[d];
+    spread(sp4.s.buyIdx, sp4.delBuyTo * DELIVERY_RATE);
+    spread(sp4.s.sellIdx, sp4.delSellTo * DELIVERY_RATE);
+  }
+  // … then the leftover pool across intraday securities (pro-rata by squared-off turnover),
+  // split 50/50 between each security's buy and sell legs.
+  for (var e = 0; e < splits.length; e++) {
+    var sp5 = splits[e];
+    var w = sp5.matchBuyTo + sp5.matchSellTo;
+    if (w <= 0) continue;
+    var share = pool * (w / totalIntradayTo);
+    spread(sp5.s.buyIdx, share / 2);
+    spread(sp5.s.sellIdx, share / 2);
+  }
+  return tieOut(noteTotalStt);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
