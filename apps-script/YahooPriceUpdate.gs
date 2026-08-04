@@ -60,6 +60,14 @@ var PORTFOLIOS = [
   { code: 'NJW724', sheetId: '1QoW51xsJfLtjkSGnEnaqsClgFd4AHJdbnVQKMLHhmYY' },
 ];
 
+// Scrips to skip entirely — ETFs / liquid funds that don't trade like equity and shouldn't be
+// chased for a CMP. Matched by ISIN or by normalized name (normName_), so punctuation/suffix
+// differences don't matter. Ignored scrips are neither fetched nor listed as "unpriced".
+var IGNORE = [
+  'GOLDBEES',
+  'Nippon India ETF Nifty 1D Rate Liquid BeES - DAILY - IDCW - Payout',
+];
+
 // ════════════════════════════════════════════════════════════════════════════
 // ENTRY POINTS
 // ════════════════════════════════════════════════════════════════════════════
@@ -98,6 +106,7 @@ function updatePrices() {
     var h = held[i];
     var key = (h.isin || h.name).toUpperCase();
     if (seen[key]) continue; seen[key] = true;
+    if (isIgnored_(h.isin, h.name)) continue;   // ETFs/liquid funds — skip (no fetch, no miss)
     var syms = symbolsFor_(master, h.isin, h.name);
     // Keep even no-symbol scrips: TradingView's name-search can still find them.
     targets.push({ isin: h.isin, name: h.name, primary: syms.primary, fallback: syms.fallback });
@@ -507,6 +516,20 @@ function normName_(s) {
     .replace(/[-.,()'"]/g, ' ')
     .replace(/\b(limited|ltd|private|pvt|the|co)\b/g, ' ')
     .replace(/\s+/g, ' ').trim();
+}
+
+// True if a held scrip is on the IGNORE list (ETFs/liquid funds), matched by ISIN or by
+// normalized name so punctuation/suffixes don't matter.
+function isIgnored_(isin, name) {
+  var wantIsin = String(isin == null ? '' : isin).trim().toUpperCase();
+  var wantName = normName_(name);
+  for (var i = 0; i < IGNORE.length; i++) {
+    var g = String(IGNORE[i] == null ? '' : IGNORE[i]).trim();
+    if (!g) continue;
+    if (wantIsin && g.toUpperCase() === wantIsin) return true;
+    if (wantName && normName_(g) === wantName) return true;
+  }
+  return false;
 }
 
 function indexOfAny_(hdr, names) {

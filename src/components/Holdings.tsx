@@ -3,7 +3,7 @@ import {
   Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
   Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
-  ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save
+  ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save, Upload
 } from 'lucide-react';
 import { PortfolioHolding, ContractNoteResult } from '../types';
 import { useGoogleLogin } from '@react-oauth/google';
@@ -22,6 +22,7 @@ import { registerBackStep } from '../lib/appBack';
 import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
+import StockOpeningImportModal from './StockOpeningImportModal';
 import CubeLoader from './ui/CubeLoader';
 import { GainBar } from './ui/HoldingsViz';
 import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
@@ -368,6 +369,8 @@ export default function Holdings({
   const [showAddForm, setShowAddForm] = useState(false);
   // Manual trade entry drawer (writes real trades to the portfolio's sheet).
   const [showAddTrade, setShowAddTrade] = useState(false);
+  // Temporary per-stock opening-basis CSV import (detail page → Trade Book toolbar).
+  const [showOpeningImport, setShowOpeningImport] = useState(false);
   // "Edit Trade" mode — reveals inline row editing in the Trade Book (replaces the
   // always-on per-row Edit button). Toggled from the detail page's Position card.
   const [editMode, setEditMode] = useState(false);
@@ -2444,6 +2447,15 @@ export default function Holdings({
                 >
                   <Plus className="w-3 h-3" /> Add Trade
                 </button>
+                {/* Import THIS stock's pre-FY26 trades from a broker CSV → rebuilds its opening basis. */}
+                <button
+                  id="detail-import-opening"
+                  onClick={() => setShowOpeningImport(true)}
+                  title={`Import ${name}'s trades (through 31-Mar-2025) from a CSV`}
+                  className="btn-press inline-flex items-center gap-1 px-2.5 py-1.5 border border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-700 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer"
+                >
+                  <Upload className="w-3 h-3" /> Import
+                </button>
                 {/* Delete the checkbox-selected rows in one go (edit mode only). */}
                 {editMode && selectedRows.size > 0 && (
                   <button
@@ -2812,6 +2824,21 @@ export default function Holdings({
             if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
           }}
         />
+        {/* Temporary per-stock opening-basis import (Google portfolios only). */}
+        {activePortfolio !== 'local' && (
+          <StockOpeningImportModal
+            open={showOpeningImport}
+            onClose={() => setShowOpeningImport(false)}
+            spreadsheetId={sheetIdForId(activePortfolio)}
+            stockName={name}
+            isin={displayIsin || isin}
+            accountLabel={portfolioById(activePortfolio)?.label}
+            onDone={() => {
+              fetchSheetHoldings(activePortfolio, true);
+              if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+            }}
+          />
+        )}
       </div>
     );
   };
