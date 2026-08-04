@@ -1,18 +1,21 @@
 import { PriceSource } from '../lib/scripPrices';
 
 /**
- * Tiny badge marking which feed a displayed CMP came from — Yahoo or Screener. Renders
- * nothing for an unknown source (e.g. an average-cost fallback with no live price). These
- * are clean labeled pills, NOT the brand logos (trademarked images we don't bundle) — swap
- * in real logo SVGs here if you want them.
+ * Tiny badge marking which feed a displayed CMP came from — Yahoo, Screener or TradingView.
+ * Renders nothing for an unknown source (e.g. an average-cost fallback with no live price).
+ * These are clean labeled pills, NOT the brand logos (trademarked images we don't bundle) —
+ * swap in real logo SVGs here if you want them.
  */
+const SOURCES: Record<string, { label: string; cls: string }> = {
+  yahoo: { label: 'Yahoo', cls: 'bg-violet-50 text-violet-700 border-violet-200' },
+  screener: { label: 'Screener', cls: 'bg-teal-50 text-teal-700 border-teal-200' },
+  tradingview: { label: 'TradingView', cls: 'bg-sky-50 text-sky-700 border-sky-200' },
+};
+
 export default function SourceBadge({ source, className = '' }: { source?: PriceSource; className?: string }) {
-  if (source !== 'yahoo' && source !== 'screener') return null;
-  const isYahoo = source === 'yahoo';
-  const label = isYahoo ? 'Yahoo' : 'Screener';
-  const cls = isYahoo
-    ? 'bg-violet-50 text-violet-700 border-violet-200'
-    : 'bg-teal-50 text-teal-700 border-teal-200';
+  const cfg = source ? SOURCES[source] : undefined;
+  if (!cfg) return null;
+  const { label, cls } = cfg;
   return (
     <span
       title={`Current price from ${label}`}

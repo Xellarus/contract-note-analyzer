@@ -1905,7 +1905,16 @@ export default function Holdings({
     if (realDetailCmp !== undefined) defaultCmp = realDetailCmp;
     else if (priceRows.length > 0) defaultCmp = avgBuyPrice;
     const cmpPrice = customCmp !== null ? customCmp : defaultCmp;
+    // Lifetime gain over cost — feeds the return/XIRR stat's fallback (NOT the CMP corner).
     const changePct = avgBuyPrice > 0 ? ((cmpPrice - avgBuyPrice) / avgBuyPrice) * 100 : 0;
+    // Day's move for the CMP corner: CMP vs yesterday's close (getRealPrevCmp → Prices tab
+    // "Previous Price"). Undefined — so the corner shows NO % rather than a misleading one —
+    // when there's no previous close, or the shown price is just the avg-cost fallback.
+    const usingAvgCostFallback = realDetailCmp === undefined && customCmp === null;
+    const detailPrevClose = getRealPrevCmp(isin, name);
+    const dayChangePct = !usingAvgCostFallback && detailPrevClose && detailPrevClose > 0
+      ? ((cmpPrice - detailPrevClose) / detailPrevClose) * 100
+      : undefined;
 
     // FIFO processing variables
     interface InventoryLot {
@@ -2248,9 +2257,13 @@ export default function Holdings({
                   <span className="text-sm font-black font-mono text-slate-850" id="cmp-display-price">
                     {formatINR(cmpPrice)}
                   </span>
-                  <span className={`text-[10px] font-black ${changePct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="cmp-price-percentage">
-                    ({changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%)
-                  </span>
+                  {/* Day's move vs yesterday's close — hidden when there's no previous close to
+                      compare against (never the gain-over-cost, which lives in the return stat). */}
+                  {dayChangePct !== undefined && (
+                    <span className={`text-[10px] font-black ${dayChangePct >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="cmp-price-percentage" title="Change vs previous close">
+                      ({dayChangePct >= 0 ? '+' : ''}{dayChangePct.toFixed(2)}%)
+                    </span>
+                  )}
                   {/* Which feed the shown price came from — only when it's the real fetched CMP
                       (not a manual override or an avg-cost fallback). */}
                   <SourceBadge source={customCmp === null && realDetailCmp !== undefined ? getCmpSource(isin, name) : undefined} />

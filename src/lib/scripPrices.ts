@@ -15,7 +15,7 @@ const PRICES_TAB = "Prices";
 const PRICE_STATUS_TAB = "Price Status";
 
 /** Which feed last set a scrip's price. Drives the source badge on the stock page. */
-export type PriceSource = "yahoo" | "screener" | "";
+export type PriceSource = "yahoo" | "screener" | "tradingview" | "";
 
 export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; source?: PriceSource; }
 
@@ -52,7 +52,8 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const previousPrice = toNum(r[4]);
     const source = (r[5] || "").toString().trim().toLowerCase() as PriceSource;
     if ((!isin && !name) || isNaN(price)) continue;
-    rows.push({ isin, name, price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: source === "yahoo" || source === "screener" ? source : "" });
+    const src: PriceSource = source === "yahoo" || source === "screener" || source === "tradingview" ? source : "";
+    rows.push({ isin, name, price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: src });
   }
   return rows;
 }

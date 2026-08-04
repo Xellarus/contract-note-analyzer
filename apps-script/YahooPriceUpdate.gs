@@ -12,9 +12,16 @@
  *      (NSE symbol → "<SYM>.NS", else BSE code → "<CODE>.BO").
  *   3. Fetches the last price from Yahoo's v8 chart endpoint (the reliable one; the v7
  *      quote batch endpoint now needs an auth crumb).
+ *   3b. FALLBACK: for scrips Yahoo can't price (stale/mislabelled ".BO", no symbol, etc.),
+ *      queries TradingView's scanner API (one batch POST, precise, reachable from Apps Script
+ *      — screener is IP-blocked from Google's servers). Stage A tries the code-based ticker;
+ *      stage B resolves the rest by company NAME (symbol_search, exact-name gated) — that's how
+ *      BSE-only scrips keyed by a numeric code get their real "BSE:SYM". Rows tagged source
+ *      "tradingview"; a real previous close is derived from the day's absolute change.
  *   4. Merges {ISIN, Name, Current Price, Updated, Previous Price} into the "Prices" tab
- *      of the Scrip Master spreadsheet — identical schema + daily "Previous Price" roll to
- *      saveScripPrices() in the app.
+ *      of the Scrip Master spreadsheet — same schema as saveScripPrices(). "Previous Price"
+ *      is Yahoo's OFFICIAL previous-day close (meta.previousClose), so daily % change is exact
+ *      from day one (a daily roll is kept only as a fallback when Yahoo omits it).
  *
  * TWO ENTRY POINTS:
  *   • scheduledUpdate()  — set as a time trigger (installPriceTrigger). Skips outside
@@ -23,9 +30,10 @@
  *                          The app's "Refresh Prices" button GETs the /exec URL to force a
  *                          fresh pull on demand. Returns JSON {ok, updated, total}.
  *
- * CAVEAT: Yahoo has no official API — unofficial, ~15-min delayed, occasionally rate-limited
- * or format-changed. Scrips with no NSE/BSE symbol (or that Yahoo doesn't list) are skipped;
- * their last price simply stays. SpreadsheetApp is used (no advanced service to enable).
+ * CAVEAT: Neither Yahoo nor TradingView has an official API — both are unofficial, ~15-min
+ * delayed, and can rate-limit or change format. When the TradingView fallback fails, those
+ * scrips just stay on their last price and are recorded as misses. Scrips with NO NSE/BSE
+ * symbol can't be looked up and are skipped. SpreadsheetApp is used (no advanced service).
  */
 
 var CONFIG = {
@@ -65,6 +73,11 @@ function scheduledUpdate() {
 
 // Web-app entry — the app's "Refresh Prices" button GETs this. Always fetches (manual intent).
 function doGet(e) {
+  // Diagnostic route: /exec?probe=tv → run ONLY the TradingView reachability check (no full
+  // update), so it can be tested straight from the URL. Remove once TradingView is decided.
+  if (e && e.parameter && e.parameter.probe === 'tv') {
+    return ContentService.createTextOutput(JSON.stringify(probeTradingView_())).setMimeType(ContentService.MimeType.JSON);
+  }
   var out;
   try { var r = updatePrices(); out = { ok: true, updated: r.updated, total: r.total, missed: r.missed, at: r.at }; }
   catch (err) { out = { ok: false, error: (err && err.message) ? err.message : String(err) }; }
@@ -78,7 +91,7 @@ function doGet(e) {
 function updatePrices() {
   var master = loadMasterSymbols_();
   var held = collectHeldScrips_();          // [{ isin, name }] union across portfolios
-  var targets = [];                          // [{ isin, name, primary, fallback }]
+  var targets = [];                          // [{ isin, name, primary, fallback }] — primary may be ''
   var misses = [];                           // [{ isin, name, reason }]
   var seen = {};
   for (var i = 0; i < held.length; i++) {
@@ -86,23 +99,36 @@ function updatePrices() {
     var key = (h.isin || h.name).toUpperCase();
     if (seen[key]) continue; seen[key] = true;
     var syms = symbolsFor_(master, h.isin, h.name);
-    if (!syms.primary) { misses.push({ isin: h.isin, name: h.name, reason: 'No NSE/BSE symbol in scrip master' }); continue; }
+    // Keep even no-symbol scrips: TradingView's name-search can still find them.
     targets.push({ isin: h.isin, name: h.name, primary: syms.primary, fallback: syms.fallback });
   }
 
   var priced = {};   // key → { isin, name, price }
+  // Yahoo runs only over scrips that HAVE an exchange symbol.
+  var yahooTargets = targets.filter(function (t) { return t.primary; });
   // Pass 1 — primary exchange (NSE if present, else BSE).
-  var p1 = fetchBatch_(targets, function (t) { return t.primary; });
+  var p1 = fetchBatch_(yahooTargets, function (t) { return t.primary; });
   for (var a = 0; a < p1.ok.length; a++) { var r = p1.ok[a]; priced[(r.isin || r.name).toUpperCase()] = r; }
   // Pass 2 — retry the failures that HAVE a fallback exchange (NSE↔BSE).
   var retry = p1.failed.filter(function (t) { return t.fallback; });
   var p2 = fetchBatch_(retry, function (t) { return t.fallback; });
   for (var b = 0; b < p2.ok.length; b++) { var r2 = p2.ok[b]; priced[(r2.isin || r2.name).toUpperCase()] = r2; }
-  // Anything still unfetched → a recorded miss.
-  var stillFailed = p1.failed.filter(function (t) { return !t.fallback; }).concat(p2.failed);
-  for (var c = 0; c < stillFailed.length; c++) {
-    var f = stillFailed[c];
-    misses.push({ isin: f.isin, name: f.name, reason: 'Yahoo had no price (' + f.primary + (f.fallback ? ' / ' + f.fallback : '') + ')' });
+  // TradingView fallback over everything Yahoo couldn't price + the no-symbol scrips. Reachable
+  // from Apps Script (screener isn't), precise, one batch POST for the code-based tickers, then
+  // a NAME lookup (symbol_search, exact-name gated) for whatever's left — that's how BSE-only
+  // scrips (keyed by a numeric code Yahoo/TradingView don't index) get resolved to their real
+  // BSE symbol. prevClose is derived from the day's absolute change.
+  var yahooFailed = p1.failed.filter(function (t) { return !t.fallback; }).concat(p2.failed);
+  var noSymbol = targets.filter(function (t) { return !t.primary; });
+  var tv = fetchTradingViewBatch_(yahooFailed.concat(noSymbol));
+  for (var d = 0; d < tv.ok.length; d++) { var r3 = tv.ok[d]; priced[(r3.isin || r3.name).toUpperCase()] = r3; }
+  // Whatever TradingView also couldn't price → a recorded miss (reason notes what we had).
+  for (var c = 0; c < tv.failed.length; c++) {
+    var f = tv.failed[c];
+    var reason = f.primary
+      ? 'Yahoo & TradingView had no price (' + f.primary + (f.fallback ? ' / ' + f.fallback : '') + ')'
+      : 'No exchange symbol; TradingView name-search found no exact match';
+    misses.push({ isin: f.isin, name: f.name, reason: reason });
   }
 
   var pricedList = [];
@@ -190,7 +216,7 @@ function symbolsFor_(master, isin, name) {
 }
 
 // Fetch last prices from Yahoo's v8 chart endpoint in batches (fetchAll), using pick(t) to
-// choose each target's symbol. Returns { ok:[{isin,name,price}], failed:[target,…] }.
+// choose each target's symbol. Returns { ok:[{isin,name,price,prevClose}], failed:[target,…] }.
 function fetchBatch_(targets, pick) {
   var ok = [], failed = [];
   for (var start = 0; start < targets.length; start += CONFIG.BATCH) {
@@ -207,27 +233,192 @@ function fetchBatch_(targets, pick) {
     try { responses = UrlFetchApp.fetchAll(requests); }
     catch (e) { Logger.log('fetchAll failed: ' + e); for (var z = 0; z < chunk.length; z++) failed.push(chunk[z]); continue; }
     for (var k = 0; k < responses.length; k++) {
-      var price = parseChartPrice_(responses[k]);
-      if (price > 0) ok.push({ isin: chunk[k].isin, name: chunk[k].name, price: price });
+      var pc = parseChart_(responses[k]);
+      if (pc.price > 0) ok.push({ isin: chunk[k].isin, name: chunk[k].name, price: pc.price, prevClose: pc.prevClose });
       else failed.push(chunk[k]);
     }
   }
   return { ok: ok, failed: failed };
 }
 
-function parseChartPrice_(resp) {
+// Extract the last price AND Yahoo's official previous-day close from the v8 chart meta.
+// previousClose is authoritative (Yahoo advances it each session), so it feeds the Prices
+// tab's "Previous Price" directly — no roll guessing. chartPreviousClose is the fallback
+// name. Returns { price, prevClose } (either 0 when absent/invalid).
+function parseChart_(resp) {
+  var none = { price: 0, prevClose: 0 };
   try {
-    if (resp.getResponseCode() !== 200) return 0;
+    if (resp.getResponseCode() !== 200) return none;
     var j = JSON.parse(resp.getContentText());
     var meta = j && j.chart && j.chart.result && j.chart.result[0] && j.chart.result[0].meta;
-    if (!meta) return 0;
+    if (!meta) return none;
     var p = meta.regularMarketPrice;
-    return (typeof p === 'number' && isFinite(p) && p > 0) ? p : 0;
-  } catch (e) { return 0; }
+    var price = (typeof p === 'number' && isFinite(p) && p > 0) ? p : 0;
+    var pc = num_(meta.previousClose);
+    if (!(pc > 0)) pc = num_(meta.chartPreviousClose);
+    return { price: price, prevClose: pc > 0 ? pc : 0 };
+  } catch (e) { return none; }
 }
 
-// Merge into the "Prices" tab — latest wins per ISIN, others preserved, daily "Previous
-// Price" roll. Byte-for-byte the same schema as the app's saveScripPrices().
+function num_(v) { return (typeof v === 'number' && isFinite(v)) ? v : 0; }
+
+// ── TradingView scanner fallback ─────────────────────────────────────────────
+// Runs over everything Yahoo can't price (+ no-symbol scrips). TradingView's scanner is a batch
+// JSON endpoint reachable from Apps Script (screener is not), precise, and returns the day's
+// absolute change so we derive a real previous close. Two stages:
+//   A. code-based tickers — "NSE:SYM" (works) / "BSE:code" (usually doesn't; harmless to try).
+//   B. NAME lookup for stage-A failures — symbol_search by company name, gated to an EXACT
+//      normalized-name match, resolves BSE-only scrips to their real symbol (e.g. numeric
+//      544458 → BSE:SHREEREF). The exact-name gate prevents pricing the WRONG company.
+
+// "SURYAROSNI.NS" → "NSE:SURYAROSNI", "500325.BO" → "BSE:500325", else ''.
+function tvTicker_(yahooSym) {
+  var s = String(yahooSym == null ? '' : yahooSym).trim();
+  if (/\.NS$/i.test(s)) return 'NSE:' + s.replace(/\.NS$/i, '');
+  if (/\.BO$/i.test(s)) return 'BSE:' + s.replace(/\.BO$/i, '');
+  return '';
+}
+
+function stripTags_(s) { return String(s == null ? '' : s).replace(/<[^>]+>/g, ''); }
+
+// Resolve a company name to a TradingView ticker ("BSE:SHREEREF") via symbol_search. Returns
+// ONLY on an exact normalized-name match (normName_) — never a fuzzy guess, so we can't stamp
+// a similarly-named company's price onto a holding. '' when nothing matches exactly.
+function tvResolveByName_(name) {
+  var want = normName_(name);
+  if (!want) return '';
+  var url = 'https://symbol-search.tradingview.com/symbol_search/v3/?text=' + encodeURIComponent(name) +
+            '&hl=1&exchange=&lang=en&search_type=stocks&domain=production&sort_by_country=IN';
+  var resp = null;
+  for (var attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) Utilities.sleep(1500);   // one backoff on 429
+    try {
+      resp = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true, followRedirects: true,
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
+                   'Origin': 'https://www.tradingview.com', 'Referer': 'https://www.tradingview.com/' },
+      });
+    } catch (e) { Logger.log('TV symbol-search failed: ' + e); return ''; }
+    var code = resp.getResponseCode();
+    if (code === 200) break;
+    if (code === 429 && attempt === 0) continue;
+    Logger.log('TV symbol-search HTTP ' + code); return '';
+  }
+  var j; try { j = JSON.parse(resp.getContentText()); } catch (e2) { return ''; }
+  var syms = j && j.symbols; if (!syms) return '';
+  for (var i = 0; i < syms.length; i++) {
+    if (normName_(stripTags_(syms[i].description)) === want) {
+      var sym = stripTags_(syms[i].symbol), exch = syms[i].exchange || syms[i].prefix || '';
+      if (sym && exch) return exch + ':' + sym;
+    }
+  }
+  return '';   // no exact-name match → safe miss
+}
+
+// Price the given targets via TradingView. Returns
+// { ok:[{isin,name,price,prevClose,source:'tradingview'}], failed:[target,…] }.
+function fetchTradingViewBatch_(targets) {
+  var ok = [], failed = [];
+  if (!targets.length) return { ok: ok, failed: failed };
+
+  // Stage A — code-based tickers (NSE:sym / BSE:code) in one batch.
+  var candsByTarget = [], allTickers = [], seen = {};
+  for (var i = 0; i < targets.length; i++) {
+    var cands = [];
+    var a = tvTicker_(targets[i].primary); if (a) cands.push(a);
+    var b = tvTicker_(targets[i].fallback); if (b) cands.push(b);
+    candsByTarget.push(cands);
+    for (var c = 0; c < cands.length; c++) { if (!seen[cands[c]]) { seen[cands[c]] = true; allTickers.push(cands[c]); } }
+  }
+  var byTicker = allTickers.length ? tvScan_(allTickers) : {};
+
+  var stageB = [];   // stage-A failures (incl. no-symbol scrips) → resolve by name
+  for (var j = 0; j < targets.length; j++) {
+    var hit = null;
+    for (var k = 0; k < candsByTarget[j].length; k++) { var h = byTicker[candsByTarget[j][k]]; if (h && h.price > 0) { hit = h; break; } }
+    if (hit) ok.push({ isin: targets[j].isin, name: targets[j].name, price: hit.price, prevClose: hit.prevClose, source: 'tradingview' });
+    else stageB.push(targets[j]);
+  }
+  if (!stageB.length) return { ok: ok, failed: failed };
+
+  // Stage B — resolve each remaining scrip to a ticker by NAME, then price them in one batch.
+  var resolved = [], rTickers = [], rSeen = {};
+  for (var m = 0; m < stageB.length; m++) {
+    var rt = tvResolveByName_(stageB[m].name);
+    resolved.push(rt);
+    if (rt && !rSeen[rt]) { rSeen[rt] = true; rTickers.push(rt); }
+  }
+  var byTicker2 = rTickers.length ? tvScan_(rTickers) : {};
+  for (var n = 0; n < stageB.length; n++) {
+    var rt2 = resolved[n], hit2 = rt2 ? byTicker2[rt2] : null;
+    if (hit2 && hit2.price > 0) ok.push({ isin: stageB[n].isin, name: stageB[n].name, price: hit2.price, prevClose: hit2.prevClose, source: 'tradingview' });
+    else failed.push(stageB[n]);
+  }
+  return { ok: ok, failed: failed };
+}
+
+// POST tickers to TradingView's scanner (columns: last close + day's absolute change).
+// Returns { ticker: {price, prevClose} } (empty map if the request(s) failed).
+function tvScan_(tickers) {
+  var out = {};
+  var CH = 200;   // keep each POST modest
+  for (var start = 0; start < tickers.length; start += CH) {
+    var chunk = tickers.slice(start, start + CH);
+    var payload = JSON.stringify({ symbols: { tickers: chunk, query: { types: [] } }, columns: ['close', 'change_abs'] });
+    var resp = tvFetch_(payload);
+    if (!resp) continue;   // transport error / rate-limited past retries → those scrips stay misses
+    var j; try { j = JSON.parse(resp.getContentText()); } catch (e2) { continue; }
+    var data = j && j.data; if (!data) continue;
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i];
+      if (!row || !row.s || !row.d) continue;
+      var close = num_(row.d[0]);
+      if (!(close > 0)) continue;
+      // Derive prevClose = close − change_abs, but ONLY when change_abs is genuinely present
+      // (a missing value must NOT be treated as 0 → that would fake a 0% day).
+      var prevClose = 0;
+      if (typeof row.d[1] === 'number' && isFinite(row.d[1])) {
+        var pc = close - row.d[1];
+        if (pc > 0) prevClose = pc;
+      }
+      out[row.s] = { price: close, prevClose: prevClose };
+    }
+  }
+  return out;
+}
+
+// POST to TradingView's scanner with browser-like headers + a short backoff on HTTP 429
+// (Apps Script shares Google IPs, so the endpoint occasionally rate-limits). Returns the
+// 200 response, or null on a hard error / after exhausting the 429 retries.
+function tvFetch_(payload) {
+  var waits = [0, 1500, 4000];   // ms before each attempt (immediate, then back off on 429)
+  for (var attempt = 0; attempt < waits.length; attempt++) {
+    if (waits[attempt] > 0) Utilities.sleep(waits[attempt]);
+    var resp;
+    try {
+      resp = UrlFetchApp.fetch('https://scanner.tradingview.com/india/scan', {
+        method: 'post', contentType: 'application/json', payload: payload,
+        muteHttpExceptions: true, followRedirects: true,
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Accept': 'application/json',
+          'Origin': 'https://www.tradingview.com',
+          'Referer': 'https://www.tradingview.com/',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      });
+    } catch (e) { Logger.log('TradingView fetch failed: ' + e); return null; }
+    var code = resp.getResponseCode();
+    if (code === 200) return resp;
+    if (code === 429) { Logger.log('TradingView HTTP 429 (attempt ' + (attempt + 1) + '/' + waits.length + ')'); continue; }
+    Logger.log('TradingView HTTP ' + code); return null;   // other errors: don't hammer
+  }
+  return null;   // still 429 after all retries → those scrips stay misses this run
+}
+
+// Merge into the "Prices" tab — latest wins per ISIN, others preserved. "Previous Price" is
+// Yahoo's official previous-day close (falls back to the daily roll if Yahoo omits it).
+// Same schema as the app's saveScripPrices().
 function writePrices_(incoming) {
   var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
   var sh = ss.getSheetByName(CONFIG.PRICES_TAB) || ss.insertSheet(CONFIG.PRICES_TAB);
@@ -253,9 +444,12 @@ function writePrices_(incoming) {
     if (!code || !(s.price > 0)) continue;
     var prev = map[code];
     var previousPrice = prev ? prev.previousPrice : 0;
-    // First refresh on a NEW calendar day rolls the last price into "Previous Price".
-    if (prev && prev.price > 0 && prev.updated && prev.updated.split(',')[0].trim() !== today) previousPrice = prev.price;
-    map[code] = { isin: code, name: s.name || (prev && prev.name) || '', price: s.price, updated: stamp, previousPrice: previousPrice, source: 'yahoo' };
+    // Prefer Yahoo's OFFICIAL previous-day close (authoritative + self-advancing → correct
+    // daily % change from day one). Only if Yahoo didn't return one do we fall back to the
+    // legacy roll: the first refresh on a NEW calendar day moves the last price into "Previous Price".
+    if (s.prevClose > 0) previousPrice = s.prevClose;
+    else if (prev && prev.price > 0 && prev.updated && prev.updated.split(',')[0].trim() !== today) previousPrice = prev.price;
+    map[code] = { isin: code, name: s.name || (prev && prev.name) || '', price: s.price, updated: stamp, previousPrice: previousPrice, source: s.source || 'yahoo' };
     updated++;
   }
   var rows = [['ISIN', 'Name', 'Current Price', 'Updated', 'Previous Price', 'Source']];
@@ -332,3 +526,32 @@ function installPriceTrigger() {
 function removePriceTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scheduledUpdate') ScriptApp.deleteTrigger(t); });
 }
+
+// ── DIAGNOSTIC: is TradingView reachable from Apps Script's IPs? ──────────────
+// Screener is blocked from Google's servers ("Address unavailable"); this checks whether
+// TradingView's scanner API is too, BEFORE we build a fallback on it. Callable two ways:
+//   • Editor: Run testTradingView_ and read the Execution log.
+//   • URL:    open  …/exec?probe=tv  (returns the same result as JSON).
+// Reads as { status: 200, sample: "{...json...}" } if reachable, or { error: "…Address
+// unavailable…" } if blocked. Remove this + the doGet probe route once TradingView is decided.
+function probeTradingView_() {
+  var body = JSON.stringify({
+    symbols: { tickers: ['NSE:SURYAROSNI', 'NSE:RELIANCE'], query: { types: [] } },
+    columns: ['close', 'change'],
+  });
+  try {
+    var resp = UrlFetchApp.fetch('https://scanner.tradingview.com/india/scan', {
+      method: 'post',
+      contentType: 'application/json',
+      payload: body,
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+    return { status: resp.getResponseCode(), sample: resp.getContentText().substring(0, 400) };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+function testTradingView_() { Logger.log(JSON.stringify(probeTradingView_())); }
