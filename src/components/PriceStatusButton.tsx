@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, X, Loader2 } from 'lucide-react';
 import { ModalShell } from './ui/overlay';
 import { loadPriceMisses, PriceMiss } from '../lib/scripPrices';
-import { SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { SCRIP_MASTER_SPREADSHEET_ID, loadScripMaster, isPriceExcepted } from '../lib/scripMaster';
 
 /**
  * Small toolbar button that surfaces the stocks the Yahoo price updater couldn't fetch a
@@ -18,8 +18,15 @@ export default function PriceStatusButton({ refreshKey = 0 }: { refreshKey?: num
 
   const load = () => {
     setLoading(true);
-    loadPriceMisses(SCRIP_MASTER_SPREADSHEET_ID)
-      .then(setMisses).catch(() => setMisses([])).finally(() => setLoading(false));
+    // Drop scrips flagged "Price Exception" in the scrip master (ETFs / liquid funds we
+    // never price) so they don't clutter this list — done app-side, no Apps Script change.
+    Promise.all([
+      loadPriceMisses(SCRIP_MASTER_SPREADSHEET_ID).catch(() => [] as PriceMiss[]),
+      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null),
+    ])
+      .then(([raw, master]) => setMisses(master ? raw.filter((m) => !isPriceExcepted(master, m.isin, m.name)) : raw))
+      .catch(() => setMisses([]))
+      .finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, [refreshKey]);
 

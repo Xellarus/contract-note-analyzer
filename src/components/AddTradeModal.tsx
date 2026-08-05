@@ -29,7 +29,7 @@ const ACTIONS: { value: ManualAction; label: string; hint: string }[] = [
   { value: 'Rights', label: 'Rights', hint: 'Rights subscription — a buy at the issue price.' },
 ];
 
-const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held'>; label: string }[] = [
+const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>; label: string }[] = [
   { key: 'brokerage', label: 'Brokerage' },
   { key: 'stt', label: 'STT' },
   { key: 'exchangeCharges', label: 'Exchange Turnover' },
@@ -59,6 +59,7 @@ interface LineDraft {
   ratioNum: string;
   ratioDen: string;
   held: string;
+  notes: string;   // optional free-text note, stored in the ledger's Notes column
 }
 
 const num = (s: string): number => { const v = parseFloat((s || '').toString().replace(/,/g, '').trim()); return isNaN(v) ? 0 : v; };
@@ -68,7 +69,7 @@ let _seq = 1;
 const blankLine = (): LineDraft => ({
   id: _seq++, company: '', isin: '', action: 'Buy', qty: '', price: '', tradeClass: 'Delivery',
   brokerage: '', stt: '', exchangeCharges: '', sebiFees: '', stampDuty: '', gst: '', ipf: '', showCharges: false,
-  ratioNum: '', ratioDen: '', held: '',
+  ratioNum: '', ratioDen: '', held: '', notes: '',
 });
 
 // Bonus/Split: turn the ratio + shares-held into a free-share quantity (written to `qty`,
@@ -148,12 +149,23 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   // Apply a patch and, for Bonus/Split, recompute the free-share qty from the ratio.
   const setLineRatio = (id: number, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.id === id ? applyRatio({ ...l, ...patch }) : l)));
-  // Current holding of a company (active portfolio) — to prefill "shares held".
+  // Current holding of a company (active portfolio) — to auto-fill "shares held".
   const heldFor = (company: string, isin: string): number | null => {
     if (!holdings?.length) return null;
     const c = company.trim().toLowerCase(), i = isin.trim().toUpperCase();
     const h = holdings.find((x) => (i && (x.isin || '').toUpperCase() === i) || (c && x.name.trim().toLowerCase() === c));
     return h && h.qty > 0 ? h.qty : null;
+  };
+  // Company/ISIN edits: for a Bonus/Split line, resync `held` to the chosen stock's current
+  // holding so the free-share count + "held → total" summary recompute automatically (no manual
+  // "shares held" entry). For any other action this is just a normal field set.
+  const setLineIdentity = (l: LineDraft, patch: Partial<LineDraft>) => {
+    if (isFreeShares(l.action)) {
+      const next = { ...l, ...patch };
+      const h = heldFor(next.company, next.isin);
+      patch = { ...patch, held: h != null ? String(h) : '' };
+    }
+    setLineRatio(l.id, patch);
   };
   const removeLine = (id: number) => setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.id !== id)));
   const addLine = () => setLines((prev) => [...prev, blankLine()]);
@@ -209,6 +221,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       stampDuty: num(l.stampDuty),
       gst: num(l.gst),
       ipf: num(l.ipf),
+      notes: l.notes.trim(),
     }));
 
     setSaving(true);
@@ -437,6 +450,14 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   const prev = linePreview(l);
                   const err = lineError(l);
                   const actionHint = ACTIONS.find((a) => a.value === l.action)?.hint;
+                  // Bonus/Split: shares held come straight from the current holding (auto); the
+                  // manual box only appears when we can't determine it (holdings not loaded / not held).
+                  const autoHeld = free ? heldFor(l.company, l.isin) : null;
+                  const heldKnown = autoHeld != null;
+                  const heldNum = heldKnown ? autoHeld! : num(l.held);
+                  const freeNum = num(l.qty);                 // computed by applyRatio from held + ratio
+                  const totalNum = heldNum + freeNum;
+                  const ratioReady = num(l.ratioNum) > 0 && num(l.ratioDen) > 0;
                   return (
                     <div key={l.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
                       <div className="flex items-center justify-between">
@@ -455,7 +476,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         <div className="sm:col-span-2 space-y-1">
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Company</label>
                           <ScripCombobox
-                            value={l.company} onChange={(v) => setLine(l.id, { company: v })}
+                            value={l.company} onChange={(v) => setLineIdentity(l, { company: v })}
                             master={activeMaster} placeholder="Start typing a company name…"
                             className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                           />
@@ -464,7 +485,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">ISIN <span className="font-normal normal-case text-slate-400">(optional)</span></label>
                           <input
                             type="text" placeholder="INE…"
-                            value={l.isin} onChange={(e) => setLine(l.id, { isin: e.target.value.toUpperCase() })}
+                            value={l.isin} onChange={(e) => setLineIdentity(l, { isin: e.target.value.toUpperCase() })}
                             className="w-full px-3 py-2 text-xs font-mono text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                           />
                         </div>
@@ -479,8 +500,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                             onChange={(e) => {
                               const action = e.target.value as ManualAction;
                               const patch: Partial<LineDraft> = { action, tradeClass: isDeliveryLocked(action) ? 'Delivery' : l.tradeClass };
-                              // Prefill shares-held from the current holding when switching to a ratio action.
-                              if (isFreeShares(action) && !l.held.trim()) { const h = heldFor(l.company, l.isin); if (h != null) patch.held = String(h); }
+                              // Switching to Bonus/Split: pull shares-held from the current holding so the
+                              // conversion computes automatically (keep any prior manual value if unknown).
+                              if (isFreeShares(action)) { const h = heldFor(l.company, l.isin); patch.held = h != null ? String(h) : l.held; }
                               setLineRatio(l.id, patch);
                             }}
                             className="w-full px-2.5 py-2 text-xs font-semibold text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white cursor-pointer"
@@ -507,21 +529,21 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                                 />
                               </div>
                             </div>
-                            <div className="space-y-1">
-                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Shares held</label>
-                              <input
-                                type="number" min="0" step="any" placeholder="0"
-                                value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
-                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
-                              />
-                            </div>
-                            <div className="space-y-1">
-                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Free shares</label>
-                              <input
-                                type="number" min="0" step="any" placeholder="0"
-                                value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })}
-                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
-                              />
+                            <div className="space-y-1 col-span-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                                Shares held {heldKnown && <span className="font-normal normal-case text-emerald-600">· auto</span>}
+                              </label>
+                              {heldKnown ? (
+                                <div className="w-full px-3 py-2 text-xs font-mono text-slate-700 rounded-lg border border-slate-200 bg-slate-100 select-none" title="Taken from your current holding">
+                                  {heldNum.toLocaleString('en-IN')}
+                                </div>
+                              ) : (
+                                <input
+                                  type="number" min="0" step="any" placeholder="shares held before this action"
+                                  value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
+                                  className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                                />
+                              )}
                             </div>
                           </>
                         ) : (
@@ -558,9 +580,22 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                       </div>
 
                       {free ? (
-                        <p className="text-[10px] text-slate-400">
-                          {actionHint}{num(l.qty) > 0 ? ` · adds ${num(l.qty).toLocaleString('en-IN')} free share${num(l.qty) === 1 ? '' : 's'} at ₹0` : ''}
-                        </p>
+                        <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2 text-[11px] text-slate-600">
+                          {heldNum > 0 && ratioReady && freeNum > 0 ? (
+                            <span>
+                              You hold <b className="font-mono text-slate-800">{heldNum.toLocaleString('en-IN')}</b> → this {l.action.toLowerCase()} of{' '}
+                              <b className="font-mono">{num(l.ratioNum)} : {num(l.ratioDen)}</b> adds{' '}
+                              <b className="font-mono text-indigo-700">+{freeNum.toLocaleString('en-IN')}</b> free share{freeNum === 1 ? '' : 's'} at ₹0 → new total{' '}
+                              <b className="font-mono text-slate-900">{totalNum.toLocaleString('en-IN')}</b>.
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">
+                              {heldKnown
+                                ? 'Enter the ratio — the free-share count and new total fill in automatically.'
+                                : 'Pick the company (must be a held stock) and enter the ratio; shares held and the new total then compute automatically.'}
+                            </span>
+                          )}
+                        </div>
                       ) : actionHint ? <p className="text-[10px] text-slate-400">{actionHint}</p> : null}
 
                       {/* Charges */}
@@ -590,6 +625,16 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                           )}
                         </div>
                       )}
+
+                      {/* Note (optional) — stored in the ledger's Notes column, shown in the Trade Book entry popup */}
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Note <span className="font-normal normal-case text-slate-400">(optional)</span></label>
+                        <input
+                          type="text" placeholder="e.g. reason, corporate-action ref, source…"
+                          value={l.notes} onChange={(e) => setLine(l.id, { notes: e.target.value })}
+                          className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                        />
+                      </div>
 
                       {/* Per-line preview */}
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] pt-1 border-t border-slate-200">

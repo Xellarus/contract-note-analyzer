@@ -62,6 +62,7 @@ export function headerKey(header: string): string {
   if (/stamp/.test(s)) return "stampDuty";
   if (/\bstt\b/.test(s)) return "stt";
   if (/trade class|trade type/.test(s)) return "tradeClass";
+  if (/note|remark/.test(s)) return "notes";
   return "";
 }
 

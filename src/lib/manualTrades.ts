@@ -2,7 +2,7 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import { loadScripMaster, lookupScrip, SCRIP_MASTER_SPREADSHEET_ID, ScripMaster } from "./scripMaster";
 import { rebuildHoldingTab, syncCapitalGains } from "./holdingsCalc";
-import { mapRecordsToHeader, toIsoDate } from "./tradeRowSchema";
+import { mapRecordsToHeader, toIsoDate, headerKey } from "./tradeRowSchema";
 import { appendCorporateActionRow, CorpAction } from "./corporateActions";
 
 /**
@@ -34,6 +34,7 @@ export interface ManualTradeLine {
   stampDuty: number;
   gst: number;              // IGST / total GST
   ipf: number;
+  notes?: string;           // free-text note (optional) — shown in the Trade Book entry popup
 }
 
 export interface AppendManualResult {
@@ -50,7 +51,7 @@ const DEFAULT_HEADER = [
   "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT",
   "Exchange Turnover Charges", "SEBI Turnover Fees", "IPF Charges", "IGST",
   "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)",
-  "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class",
+  "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class", "Notes",
 ];
 
 const r2 = (n: number): number => Math.round((Number(n) || 0) * 100) / 100;
@@ -60,7 +61,7 @@ interface RowRecord {
   turnover: number; brokeragePerShare: number; brokerage: number; stt: number;
   exchangeCharges: number; sebiFees: number; ipf: number; gst: number; stampDuty: number;
   totalExpInclSTT: number; totalExpExclSTT: number; totalWithExpInclSTT: number;
-  totalWithExpExclSTT: number; tradeClass: string;
+  totalWithExpExclSTT: number; tradeClass: string; notes: string;
 }
 
 function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMaster | null): RowRecord {
@@ -104,6 +105,7 @@ function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMast
     exchangeCharges, sebiFees, ipf, gst, stampDuty, totalExpInclSTT, totalExpExclSTT,
     totalWithExpInclSTT, totalWithExpExclSTT,
     tradeClass: forceDelivery ? "Delivery" : line.tradeClass,
+    notes: (line.notes || "").trim(),
   };
 }
 
@@ -120,6 +122,19 @@ async function appendRecordsToTab(spreadsheetId: string, tab: string, records: R
   }
   if (header.length === 0) { header = DEFAULT_HEADER; empty = true; }
 
+  // Auto-append a "Notes" column if a row carries a note and the sheet doesn't have one
+  // yet (existing sheets predate the feature). We add the header cell in place — old rows
+  // stay blank in that column — so the note lands in the right column on the appended rows.
+  if (!empty && records.some((r) => (r.notes || "").toString().trim() !== "") && !header.some((h) => headerKey(h) === "notes")) {
+    header = [...header, "Notes"];
+    await (gapi.client as any).sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${tab}!${colA1(header.length - 1)}1`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [["Notes"]] },
+    });
+  }
+
   const rows = mapRecordsToHeader(header, records);
   const payload = empty ? [header, ...rows] : rows;
 
@@ -129,6 +144,14 @@ async function appendRecordsToTab(spreadsheetId: string, tab: string, records: R
     valueInputOption: "USER_ENTERED",
     resource: { values: payload },
   });
+}
+
+// 0-based column index → A1 column letter (0→A, 25→Z, 26→AA). Used to place a newly
+// auto-appended header cell (e.g. "Notes") at the next free column of row 1.
+function colA1(i: number): string {
+  let n = i + 1, s = "";
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
 }
 
 /**

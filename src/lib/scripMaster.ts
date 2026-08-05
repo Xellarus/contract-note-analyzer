@@ -55,6 +55,7 @@ export interface ScripEntry {
   nse?: string;             // NSE symbol (from the NSE column), for display
   bse?: string;             // BSE scrip code (from the BSE column), for display
   industry?: string;        // Industry / Sector (from a screener import), for the allocation chart
+  priceExcept?: boolean;    // "Price Exception" column truthy → never fetched/priced; hidden from the "unpriced" UI (ETFs/liquid funds)
 }
 
 export interface ScripMaster {
@@ -227,11 +228,12 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
       // The FIRST name-like column wins: user-added extras like "Tally Name" must
       // not steal ci.name (a hijacked, mostly-blank name column made every entry's
       // canonical name fall back to its ISIN). Any unrecognised column is ignored.
-      const ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: 4, bsecode: -1, industry: -1 };
+      const ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: 4, bsecode: -1, industry: -1, except: -1 };
       if (hasHeader) {
         let nameSet = false;
         header.forEach((h: string, idx: number) => {
-          if (/isin/.test(h)) ci.isin = idx;
+          if (/exception|exclud/.test(h)) ci.except = idx;   // "Price Exception" — must beat the name test (no name token anyway)
+          else if (/isin/.test(h)) ci.isin = idx;
           else if (/alias/.test(h)) ci.alias = idx;
           else if (/industry|sector/.test(h)) ci.industry = idx;
           else if (/code/.test(h)) ci.bsecode = idx;
@@ -281,6 +283,12 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
         // Industry / sector (from a screener import) — for the allocation chart.
         const industry = ci.industry >= 0 ? (r[ci.industry] || "").toString().trim() : "";
         if (industry && !entry.industry) entry.industry = industry;
+        // "Price Exception" — a truthy cell (x / yes / y / true / 1 / ✓) marks a scrip we
+        // never price (ETFs / liquid funds). Folded so any row marking it wins.
+        if (ci.except >= 0) {
+          const ex = (r[ci.except] || "").toString().trim().toLowerCase();
+          if (/^(x|yes|y|true|1|✓|✔)$/.test(ex)) entry.priceExcept = true;
+        }
       }
     }
   }
@@ -359,6 +367,14 @@ export function lookupScrip(master: ScripMaster, isin: string, name: string): Sc
     if (cands.length === 1) return { entry: cands[0], foundBy: "name" };
   }
   return { entry: null, foundBy: "none" };
+}
+
+/** True if this scrip is flagged in the "Price Exception" column of the scrip master —
+ *  an ETF / liquid fund we deliberately never price. The app uses this to drop such
+ *  scrips from the "prices we couldn't fetch" UI (no Apps Script change needed). */
+export function isPriceExcepted(master: ScripMaster, isin: string, name: string): boolean {
+  const e = lookupScrip(master, isin, name).entry;
+  return !!(e && e.priceExcept);
 }
 
 /** A normalized name string that maps to MORE THAN ONE distinct master entry — so a

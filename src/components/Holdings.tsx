@@ -3,7 +3,8 @@ import {
   Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
   Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
-  ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save, Upload
+  ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save, Upload, StickyNote,
+  ArrowUp, ArrowDown
 } from 'lucide-react';
 import { PortfolioHolding, ContractNoteResult } from '../types';
 import { useGoogleLogin } from '@react-oauth/google';
@@ -112,6 +113,7 @@ interface Transaction {
   editSource?: 'trueEntry' | 'opening';
   sheetRow?: number;
   rawRow?: any[];        // the full True Entry row (preserves columns the popup doesn't edit)
+  notes?: string;        // free-text note from the ledger's Notes column, shown in the entry popup
 }
 
 interface DisplayHolding {
@@ -362,8 +364,36 @@ export default function Holdings({
 
   // original local portfolios state
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortField, setSortField] = useState<'symbol' | 'quantity' | 'avgCost' | 'currentValue' | 'profit'>('currentValue');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  // Default: Security Name ascending (0-9 → A-Z), per user request.
+  const [sortField, setSortField] = useState<'symbol' | 'quantity' | 'avgCost' | 'currentPrice' | 'currentValue' | 'profit'>('symbol');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+
+  // ── Resizable holdings-grid columns (Excel-style drag) ────────────────────────
+  // Per-column pixel widths, persisted in localStorage so a user's sizing sticks. Keys
+  // match the data columns below; the trailing "settings" column exists only for `local`.
+  const HOLDINGS_COLW_KEY = 'holdingsColWidthsV1';
+  const HOLDINGS_COL_DEFAULTS: Record<string, number> = {
+    name: 280, quantity: 110, avgCost: 120, currentPrice: 120, currentValue: 140, profit: 170, settings: 80,
+  };
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
+    try { const s = localStorage.getItem(HOLDINGS_COLW_KEY); if (s) return { ...HOLDINGS_COL_DEFAULTS, ...JSON.parse(s) }; } catch { /* ignore */ }
+    return { ...HOLDINGS_COL_DEFAULTS };
+  });
+  useEffect(() => { try { localStorage.setItem(HOLDINGS_COLW_KEY, JSON.stringify(colWidths)); } catch { /* ignore */ } }, [colWidths]);
+  // Drag a column's right edge to resize it (min 60px). Uses window listeners so the drag
+  // continues even when the pointer leaves the thin handle.
+  const startColResize = (e: React.MouseEvent, key: string) => {
+    e.preventDefault(); e.stopPropagation();
+    const startX = e.clientX;
+    const startW = colWidths[key] ?? HOLDINGS_COL_DEFAULTS[key] ?? 120;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(60, startW + (ev.clientX - startX));
+      setColWidths((prev) => ({ ...prev, [key]: w }));
+    };
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.style.cursor = ''; };
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+  };
   
   // Manual adding forms state
   const [showAddForm, setShowAddForm] = useState(false);
@@ -903,7 +933,7 @@ export default function Holdings({
 
       const response = await (gapi.client as any).sheets.spreadsheets.values.get({
         spreadsheetId: spreadsheetId,
-        range: `True Entry!A:T`,
+        range: `True Entry!A:Z`,   // wide enough to include the (auto-appended) Notes column past Import ID
       });
 
       const rows = response?.result?.values || [];
@@ -932,6 +962,7 @@ export default function Holdings({
         const priceIdx = headers.indexOf("Avg Price");
         const amountIdx = headers.indexOf("Total Amount (Turnover)");
         const brokerageIdx = headers.indexOf("Total Brokerage");
+        const notesIdx = headers.findIndex((h: string) => /note|remark/i.test(h));
 
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
@@ -959,6 +990,7 @@ export default function Holdings({
               brokerage: isNaN(brokerage) ? 0 : brokerage,
               brokeragePerShare: quantity > 0 && !isNaN(brokerage) ? brokerage / quantity : 0,
               amount: isNaN(turnover) ? 0 : turnover,
+              notes: notesIdx !== -1 ? (row[notesIdx] || "").toString().trim() : "",
               editSource: 'trueEntry',
               sheetRow: i + 1,   // rows[0] is sheet row 1
               rawRow: row,
@@ -1438,6 +1470,8 @@ export default function Holdings({
   const expenseModal = (() => {
     const t = expenseTx;
     const raw = t?.rawRow || [];
+    const noteText = (t?.notes || "").trim();
+    const hasNote = noteText !== "";
     const val = (header: string): number => {
       const i = trueEntryHeaders.indexOf(header);
       return i === -1 ? 0 : numCell(raw[i]);
@@ -1457,7 +1491,7 @@ export default function Holdings({
     const isOpening = t?.editSource === 'opening';
     return (
       <ModalShell open={!!expenseTx} onClose={() => setExpenseTx(null)} labelledBy="expense-breakdown-title">
-        <div className="relative z-10 w-full max-w-sm max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn">
+        <div className={`relative z-10 w-full ${hasNote ? 'max-w-lg' : 'max-w-sm'} max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn`}>
           <div className="flex items-start justify-between px-5 py-4 border-b border-slate-200">
             <div>
               <h3 id="expense-breakdown-title" className="text-sm font-black text-slate-800 flex items-center gap-2"><Wallet className="w-4 h-4 text-indigo-600" /> Expense breakdown</h3>
@@ -1472,24 +1506,34 @@ export default function Holdings({
             <button onClick={() => setExpenseTx(null)} className="p-1.5 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-4 h-4 text-slate-500" /></button>
           </div>
           <div className="overflow-y-auto px-5 py-4">
-            {isOpening ? (
-              <p className="text-[12px] text-slate-500 py-4 text-center">Carried-in opening lot — no charges recorded.</p>
-            ) : items.length === 0 ? (
-              <p className="text-[12px] text-slate-500 py-4 text-center">No charges recorded for this entry.</p>
-            ) : (
-              <div className="space-y-1.5">
-                {items.map(it => (
-                  <div key={it.label} className="flex items-center justify-between text-[12px]">
-                    <span className="text-slate-500">{it.label}</span>
-                    <span className="font-mono text-slate-700">{formatINR(it.value)}</span>
+            <div className={hasNote ? 'grid grid-cols-1 sm:grid-cols-2 gap-4' : ''}>
+              <div>
+                {isOpening ? (
+                  <p className="text-[12px] text-slate-500 py-4 text-center">Carried-in opening lot — no charges recorded.</p>
+                ) : items.length === 0 ? (
+                  <p className="text-[12px] text-slate-500 py-4 text-center">No charges recorded for this entry.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {items.map(it => (
+                      <div key={it.label} className="flex items-center justify-between text-[12px]">
+                        <span className="text-slate-500">{it.label}</span>
+                        <span className="font-mono text-slate-700">{formatINR(it.value)}</span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between pt-2 mt-1 border-t border-slate-200 text-[12px]">
+                      <span className="font-black uppercase tracking-wider text-slate-600">Total expenses (incl STT)</span>
+                      <span className="font-mono font-black text-slate-850">{formatINR(total)}</span>
+                    </div>
                   </div>
-                ))}
-                <div className="flex items-center justify-between pt-2 mt-1 border-t border-slate-200 text-[12px]">
-                  <span className="font-black uppercase tracking-wider text-slate-600">Total expenses (incl STT)</span>
-                  <span className="font-mono font-black text-slate-850">{formatINR(total)}</span>
-                </div>
+                )}
               </div>
-            )}
+              {hasNote && (
+                <div className="sm:border-l sm:border-slate-200 sm:pl-4">
+                  <div className="text-[10px] font-black uppercase tracking-wider text-slate-500 mb-1.5 flex items-center gap-1.5"><StickyNote className="w-3.5 h-3.5 text-indigo-600" /> Note</div>
+                  <p className="text-[12px] text-slate-700 whitespace-pre-wrap break-words">{noteText}</p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </ModalShell>
@@ -1507,13 +1551,43 @@ export default function Holdings({
     return new Intl.NumberFormat('en-IN').format(num);
   };
 
-  const requestSort = (field: 'symbol' | 'quantity' | 'avgCost' | 'currentValue' | 'profit') => {
+  const requestSort = (field: 'symbol' | 'quantity' | 'avgCost' | 'currentPrice' | 'currentValue' | 'profit') => {
     if (sortField === field) {
       setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
     } else {
       setSortField(field);
       setSortDirection('asc');
     }
+  };
+
+  // One holdings-grid header cell: click to sort (arrow reflects the active column/direction)
+  // + a right-edge drag handle to resize the column (Excel-style). `colKey` sizes the column;
+  // `sortKey` (omit for non-sortable) drives the sort.
+  type HoldSortKey = 'symbol' | 'quantity' | 'avgCost' | 'currentPrice' | 'currentValue' | 'profit';
+  const headCell = (colKey: string, label: string, align: 'left' | 'right' | 'center', sortKey?: HoldSortKey) => {
+    const active = !!sortKey && sortField === sortKey;
+    const justify = align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start';
+    return (
+      <th
+        key={colKey}
+        onClick={sortKey ? () => requestSort(sortKey) : undefined}
+        className={`relative px-3 py-2.5 select-none ${sortKey ? 'cursor-pointer hover:bg-slate-100' : ''}`}
+      >
+        <div className={`flex items-center gap-1 ${justify}`}>
+          <span className="truncate">{label}</span>
+          {sortKey && (active
+            ? (sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-indigo-600 shrink-0" /> : <ArrowDown className="w-3.5 h-3.5 text-indigo-600 shrink-0" />)
+            : <ArrowUpDown className="w-3.5 h-3.5 text-slate-300 shrink-0" />)}
+        </div>
+        {/* Resize handle — stop propagation so dragging/clicking the edge never triggers a sort. */}
+        <span
+          onMouseDown={(e) => startColResize(e, colKey)}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize hover:bg-indigo-300 active:bg-indigo-400"
+          aria-hidden="true"
+        />
+      </th>
+    );
   };
 
   // Sync Parse Contract Note trades local
@@ -1804,7 +1878,11 @@ export default function Holdings({
     let aVal: any = a[sortField as keyof DisplayHolding] || '';
     let bVal: any = b[sortField as keyof DisplayHolding] || '';
 
-    if (sortField === 'currentValue') {
+    if (sortField === 'symbol') {
+      // The Security Name column shows h.name — sort by that (fall back to the ticker).
+      aVal = (a.name || a.symbol || '').toString();
+      bVal = (b.name || b.symbol || '').toString();
+    } else if (sortField === 'currentValue') {
       aVal = a.currentValue;
       bVal = b.currentValue;
     } else if (sortField === 'profit') {
@@ -1816,10 +1894,15 @@ export default function Holdings({
     } else if (sortField === 'avgCost') {
       aVal = a.avgCost;
       bVal = b.avgCost;
+    } else if (sortField === 'currentPrice') {
+      aVal = a.currentPrice;
+      bVal = b.currentPrice;
     }
 
     if (typeof aVal === 'string') {
-      return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      return sortDirection === 'asc'
+        ? aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' })
+        : bVal.localeCompare(aVal, undefined, { numeric: true, sensitivity: 'base' });
     }
     return sortDirection === 'asc' ? (aVal - bVal) : (bVal - aVal);
   });
@@ -3387,38 +3470,23 @@ export default function Holdings({
                   </div>
                 ) : (
                   <div className="overflow-x-auto border border-slate-200 rounded-2xl">
-                    <table className="w-full text-xs text-left whitespace-nowrap">
+                    {(() => { const holdingColKeys = ['name','quantity','avgCost','currentPrice','currentValue','profit', ...(activePortfolio === 'local' ? ['settings'] : [])]; const holdingsWidth = holdingColKeys.reduce((s, k) => s + (colWidths[k] ?? HOLDINGS_COL_DEFAULTS[k] ?? 120), 0); return (
+                    <table
+                      className="border-collapse whitespace-nowrap text-xs text-left [&_td]:overflow-hidden"
+                      style={{ tableLayout: 'fixed', width: holdingsWidth }}
+                    >
+                      <colgroup>
+                        {holdingColKeys.map((k) => <col key={k} style={{ width: (colWidths[k] ?? HOLDINGS_COL_DEFAULTS[k] ?? 120) + 'px' }} />)}
+                      </colgroup>
                       <thead className="bg-[#f8fafc] border-b border-slate-200 font-extrabold text-slate-650 uppercase tracking-wider select-none">
                         <tr>
-                          <th className="px-6 py-4">
-                            Security Name
-                          </th>
-                          <th className="px-6 py-4 text-right cursor-pointer hover:bg-slate-100" onClick={() => requestSort('quantity')}>
-                            <div className="flex items-center justify-end gap-1">
-                              Shares Qty <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
-                            </div>
-                          </th>
-                          <th className="px-6 py-4 text-right cursor-pointer hover:bg-slate-100" onClick={() => requestSort('avgCost')}>
-                            <div className="flex items-center justify-end gap-1">
-                              Avg Buy Price <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
-                            </div>
-                          </th>
-                          <th className="px-6 py-4 text-right">
-                            Current Price
-                          </th>
-                          <th className="px-6 py-4 text-right cursor-pointer hover:bg-slate-100" onClick={() => requestSort('currentValue')}>
-                            <div className="flex items-center justify-end gap-1">
-                              Current Value <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
-                            </div>
-                          </th>
-                          <th className="px-6 py-4 text-right cursor-pointer hover:bg-slate-100" onClick={() => requestSort('profit')}>
-                            <div className="flex items-center justify-end gap-1">
-                              Unrealisled Profit/Gain <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
-                            </div>
-                          </th>
-                          {activePortfolio === 'local' && (
-                            <th className="px-6 py-4 text-center">Settings</th>
-                          )}
+                          {headCell('name', 'Security Name', 'left', 'symbol')}
+                          {headCell('quantity', 'Shares Qty', 'right', 'quantity')}
+                          {headCell('avgCost', 'Avg Buy Price', 'right', 'avgCost')}
+                          {headCell('currentPrice', 'Current Price', 'right', 'currentPrice')}
+                          {headCell('currentValue', 'Current Value', 'right', 'currentValue')}
+                          {headCell('profit', 'Unrealised Profit/Gain', 'right', 'profit')}
+                          {activePortfolio === 'local' && headCell('settings', 'Settings', 'center')}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
@@ -3439,9 +3507,9 @@ export default function Holdings({
                               style={{ animationDelay: `${Math.min(idx, 15) * 30}ms` }}
                               className="hover:bg-slate-50/80 cursor-pointer transition-colors animate-riseIn"
                             >
-                              <td className="px-6 py-4">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-bold text-slate-800 truncate max-w-[260px]" title={h.name}>
+                              <td className="px-3 py-2.5 overflow-hidden">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="font-bold text-slate-800 truncate" title={h.name}>
                                     {h.name}
                                   </span>
                                   {h.discrepancy ? (
@@ -3457,15 +3525,15 @@ export default function Holdings({
                                 </div>
                               </td>
 
-                              <td className={`px-6 py-4 text-right font-mono font-bold ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
                                 {formatNum(h.quantity)}
                               </td>
 
-                              <td className="px-6 py-4 text-right font-mono text-slate-505">
+                              <td className="px-3 py-2.5 text-right font-mono text-slate-505">
                                 {formatINR(h.avgCost)}
                               </td>
 
-                              <td className="px-6 py-4 text-right select-none font-mono">
+                              <td className="px-3 py-2.5 text-right select-none font-mono">
                                 {editingPriceId === h.id ? (
                                   <div className="flex items-center justify-end gap-1.5">
                                     <input
@@ -3492,11 +3560,11 @@ export default function Holdings({
                                 )}
                               </td>
 
-                              <td className="px-6 py-4 text-right font-mono font-extrabold text-slate-900">
+                              <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900">
                                 {formatINR(h.currentValue)}
                               </td>
 
-                              <td className={`px-6 py-4 text-right font-mono font-bold ${isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold ${isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
                                 <div>
                                   {isPositive ? '+' : ''}{formatINR(h.unrealizedGain)}
                                 </div>
@@ -3509,7 +3577,7 @@ export default function Holdings({
                               </td>
 
                               {activePortfolio === 'local' && (
-                                <td className="px-6 py-4 text-center">
+                                <td className="px-3 py-2.5 text-center">
                                   <button
                                     onClick={() => handleDeleteHolding(h.id, h.name)}
                                     className="p-1 px-1.5 hover:bg-rose-55 text-slate-400 hover:text-rose-600 border border-transparent rounded transition-colors cursor-pointer"
@@ -3531,6 +3599,7 @@ export default function Holdings({
                         )}
                       </tbody>
                     </table>
+                    ); })()}
                   </div>
                 )}
               </div>
