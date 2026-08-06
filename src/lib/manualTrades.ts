@@ -55,6 +55,7 @@ const DEFAULT_HEADER = [
 ];
 
 const r2 = (n: number): number => Math.round((Number(n) || 0) * 100) / 100;
+const r6 = (n: number): number => Math.round((Number(n) || 0) * 1e6) / 1e6;
 
 interface RowRecord {
   date: string; isin: string; name: string; txType: string; qty: number; price: number;
@@ -83,7 +84,9 @@ function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMast
   const forceDelivery = freeShares || line.action === "IPO" || line.action === "Rights";
 
   const qty = Number(line.quantity) || 0;
-  const price = freeShares ? 0 : r2(line.price);
+  // A RATE keeps full precision (r6) — only money sits at paise. Rounding price to 2dp used to
+  // break the amount→price round-trip (₹1000 over 3 shares → 333.33 → turnover ₹999.99).
+  const price = freeShares ? 0 : r6(line.price);
   const turnover = r2(qty * price);
 
   const brokerage = freeShares ? 0 : r2(line.brokerage);

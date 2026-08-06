@@ -17,7 +17,21 @@ const PRICE_STATUS_TAB = "Price Status";
 /** Which feed last set a scrip's price. Drives the source badge on the stock page. */
 export type PriceSource = "yahoo" | "screener" | "tradingview" | "";
 
-export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; source?: PriceSource; }
+export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; source?: PriceSource; except?: boolean; }
+
+// Optional "Price Exception" column in the Prices tab. NOTE: the Prices tab is a POOR home for
+// this flag — YahooPriceUpdate.gs `writePrices_` does clearContents() + writes 6 columns every
+// run (~30 min in market hours), so a mark here is wiped; and a never-priced scrip has no row
+// here at all. The authoritative home is the SCRIP MASTER tab (ScripEntry.priceExcept). This
+// reader stays as a courtesy for marks made between .gs runs.
+// Detected from the header on read and reused on rewrite so we never shift/clobber the column;
+// `_exceptColSeen` keeps us from inventing the column on sheets that don't have it.
+const DEFAULT_EXCEPT_COL = 7;
+let _exceptCol = DEFAULT_EXCEPT_COL;
+let _exceptColSeen = false;
+
+/** Truthy marker in an exception cell: x / yes / y / true / 1 / a check mark. */
+const isExceptCell = (v: any): boolean => /^(x|yes|y|true|1|✓|✔)$/i.test((v ?? "").toString().trim());
 
 /** A scrip the Yahoo updater could not fetch a price for (no symbol, or Yahoo had none). */
 export interface PriceMiss { isin: string; name: string; reason: string; checked: string; }
@@ -42,7 +56,14 @@ const stampDate = (s: string): string => (s || "").split(",")[0].trim();
 
 function parsePriceVals(vals: any[][]): ScripPrice[] {
   const rows: ScripPrice[] = [];
-  const start = vals.length > 0 && /isin|name|price|updated/i.test((vals[0] || []).join(",")) ? 1 : 0;
+  const header = vals[0] || [];
+  const start = vals.length > 0 && /isin|name|price|updated/i.test(header.join(",")) ? 1 : 0;
+  // Locate the "Price Exception" column from the header; fall back to its current home (H).
+  if (start === 1) {
+    const idx = header.findIndex((h: any) => /exception|exclud/i.test((h ?? "").toString()));
+    _exceptColSeen = idx >= 0;
+    _exceptCol = idx >= 0 ? idx : DEFAULT_EXCEPT_COL;
+  }
   for (let i = start; i < vals.length; i++) {
     const r = vals[i]; if (!r) continue;
     const isin = (r[0] || "").toString().trim().toUpperCase();
@@ -51,9 +72,11 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const updated = (r[3] || "").toString().trim();
     const previousPrice = toNum(r[4]);
     const source = (r[5] || "").toString().trim().toLowerCase() as PriceSource;
-    if ((!isin && !name) || isNaN(price)) continue;
+    const except = isExceptCell(r[_exceptCol]);
+    // An excepted scrip is kept even without a parseable price — the flag is the point.
+    if ((!isin && !name) || (isNaN(price) && !except)) continue;
     const src: PriceSource = source === "yahoo" || source === "screener" || source === "tradingview" ? source : "";
-    rows.push({ isin, name, price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: src });
+    rows.push({ isin, name, price: isNaN(price) ? 0 : price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: src, except });
   }
   return rows;
 }
@@ -66,7 +89,7 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
 async function fetchPriceRows(spreadsheetId: string): Promise<ScripPrice[]> {
   let res: any;
   try {
-    res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId, range: `${PRICES_TAB}!A1:F50000` });
+    res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId, range: `${PRICES_TAB}!A1:J50000` });   // wide enough for the Price Exception column (H)
   } catch (e: any) {
     const msg = e?.result?.error?.message || e?.message || "";
     if (/unable to parse range/i.test(msg)) return [];   // tab not created yet
@@ -140,13 +163,19 @@ export async function saveScripPrices(
     }
     // A manual screener import stamps source 'screener'; rows it doesn't touch (e.g. Yahoo-fed)
     // keep their existing source.
-    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice, source: "screener" });
+    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice, source: "screener", except: prev?.except });
     updated++;
   }
 
-  const rows: any[][] = [["ISIN", "Name", "Current Price", "Updated", "Previous Price", "Source"]];
+  // Preserve a "Price Exception" column ONLY if the sheet already has one (never invent it):
+  // pad each row out to its index so this full-tab rewrite doesn't clear or shift the marks.
+  const head: any[] = ["ISIN", "Name", "Current Price", "Updated", "Previous Price", "Source"];
+  if (_exceptColSeen) { while (head.length <= _exceptCol) head.push(""); head[_exceptCol] = "Price Exception"; }
+  const rows: any[][] = [head];
   for (const p of [...map.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-    rows.push([p.isin, p.name, p.price, p.updated, p.previousPrice || "", p.source || ""]);
+    const row: any[] = [p.isin, p.name, p.price, p.updated, p.previousPrice || "", p.source || ""];
+    if (_exceptColSeen) { while (row.length <= _exceptCol) row.push(""); row[_exceptCol] = p.except ? "x" : ""; }
+    rows.push(row);
   }
 
   await ensureSheetTabs(spreadsheetId, [PRICES_TAB]);
@@ -156,6 +185,27 @@ export async function saveScripPrices(
   });
   invalidatePriceCache();
   return { updated, total: map.size };
+}
+
+/**
+ * Build a (isin, name) → "is this scrip a price exception?" test from the Prices tab's
+ * user-maintained exception column. Matched by ISIN first, then normalized name, then the
+ * scrip-master canonical key, so a flag set on either identity is honoured.
+ */
+export function makeExceptionResolver(master: ScripMaster | null, prices: ScripPrice[]): (isin: string, name: string) => boolean {
+  const keys = new Set<string>();
+  for (const p of prices) {
+    if (!p.except) continue;
+    if (p.isin) keys.add('isin:' + p.isin.toUpperCase());
+    if (p.name) keys.add('name:' + normName(p.name));
+    if (master) { const e = lookupScrip(master, p.isin, p.name).entry; if (e) keys.add('key:' + e.key); }
+  }
+  return (isin: string, name: string) => {
+    if (isin && keys.has('isin:' + isin.toUpperCase())) return true;
+    if (name && keys.has('name:' + normName(name))) return true;
+    if (master) { const e = lookupScrip(master, isin, name).entry; if (e && keys.has('key:' + e.key)) return true; }
+    return false;
+  };
 }
 
 /**

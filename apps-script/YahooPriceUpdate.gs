@@ -19,9 +19,10 @@
  *      BSE-only scrips keyed by a numeric code get their real "BSE:SYM". Rows tagged source
  *      "tradingview"; a real previous close is derived from the day's absolute change.
  *   4. Merges {ISIN, Name, Current Price, Updated, Previous Price} into the "Prices" tab
- *      of the Scrip Master spreadsheet — same schema as saveScripPrices(). "Previous Price"
- *      is Yahoo's OFFICIAL previous-day close (meta.previousClose), so daily % change is exact
- *      from day one (a daily roll is kept only as a fallback when Yahoo omits it).
+ *      of the Scrip Master spreadsheet — same schema as saveScripPrices(). Both the price and
+ *      the previous close come from the CANDLE SERIES, not the meta block — see parseChart_
+ *      for why (Yahoo serves a stale meta on this endpoint; it had a quarter of all Yahoo-priced
+ *      scrips wrong, some by 10x). A daily roll is kept only as a fallback.
  *
  * TWO ENTRY POINTS:
  *   • scheduledUpdate()  — set as a time trigger (installPriceTrigger). Skips outside
@@ -232,7 +233,9 @@ function fetchBatch_(targets, pick) {
     var chunk = targets.slice(start, start + CONFIG.BATCH);
     var requests = chunk.map(function (t) {
       return {
-        url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(pick(t)) + '?interval=1d&range=1d',
+        // range=5d (not 1d): parseChart_ reads the CANDLE series because meta is stale, and it
+        // needs >= 2 daily closes (latest + previous). 5 calendar days always spans >= 2 sessions.
+        url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(pick(t)) + '?interval=1d&range=5d',
         muteHttpExceptions: true,
         followRedirects: true,
         headers: { 'User-Agent': 'Mozilla/5.0' },   // Yahoo 403s a blank UA
@@ -250,22 +253,44 @@ function fetchBatch_(targets, pick) {
   return { ok: ok, failed: failed };
 }
 
-// Extract the last price AND Yahoo's official previous-day close from the v8 chart meta.
-// previousClose is authoritative (Yahoo advances it each session), so it feeds the Prices
-// tab's "Previous Price" directly — no roll guessing. chartPreviousClose is the fallback
-// name. Returns { price, prevClose } (either 0 when absent/invalid).
+// Extract the last price AND the previous close from the v8 chart response.
+//
+// ⚠️ READ THE CANDLES, NOT THE META. On this (unauthenticated, crumb-less) endpoint Yahoo
+// serves a STALE `meta` block while the candle series stays current: every symbol comes back
+// with meta.regularMarketTime frozen at the same instant (23-Jul-2024) and a matching
+// meta.regularMarketPrice / previousClose from that date. Measured 2026-08-06 over all 348
+// priced scrips: 203 of 321 usable responses had meta.regularMarketPrice disagreeing with the
+// latest real close by >1% — Accent Microcell meta ₹286.90 vs actual ₹511.50, ASM Technologies
+// ₹1,494 vs ₹4,946, Suditi ₹13.11 vs ₹78.98. Spot-checked against an independent market
+// database: the CANDLE close matched reality in 30/30 cases, meta in none of the mismatches.
+// So price = last non-null close, prevClose = the one before it. Falls back to meta only when
+// the series is too short (better than nothing, flagged by the comment above).
+// Needs range >= 5d so there are at least two candles to work with.
+// Returns { price, prevClose } (either 0 when absent/invalid).
 function parseChart_(resp) {
   var none = { price: 0, prevClose: 0 };
   try {
     if (resp.getResponseCode() !== 200) return none;
     var j = JSON.parse(resp.getContentText());
-    var meta = j && j.chart && j.chart.result && j.chart.result[0] && j.chart.result[0].meta;
-    if (!meta) return none;
-    var p = meta.regularMarketPrice;
-    var price = (typeof p === 'number' && isFinite(p) && p > 0) ? p : 0;
-    var pc = num_(meta.previousClose);
-    if (!(pc > 0)) pc = num_(meta.chartPreviousClose);
-    return { price: price, prevClose: pc > 0 ? pc : 0 };
+    var res = j && j.chart && j.chart.result && j.chart.result[0];
+    if (!res) return none;
+
+    // Compact the close series, dropping nulls (holidays / not-yet-traded sessions).
+    var raw = (res.indicators && res.indicators.quote && res.indicators.quote[0] &&
+               res.indicators.quote[0].close) || [];
+    var closes = [];
+    for (var i = 0; i < raw.length; i++) { var v = raw[i]; if (typeof v === 'number' && isFinite(v) && v > 0) closes.push(v); }
+
+    var price = closes.length ? closes[closes.length - 1] : 0;
+    var prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
+
+    var meta = res.meta || {};
+    if (!(price > 0)) price = num_(meta.regularMarketPrice);           // last resort
+    if (!(prevClose > 0)) {                                            // last resort
+      prevClose = num_(meta.previousClose);
+      if (!(prevClose > 0)) prevClose = num_(meta.chartPreviousClose);
+    }
+    return { price: price > 0 ? price : 0, prevClose: prevClose > 0 ? prevClose : 0 };
   } catch (e) { return none; }
 }
 

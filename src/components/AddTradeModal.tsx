@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useState } from 'react';
 import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Sliders } from 'lucide-react';
 import { ModalShell } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
+import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { CorpActionType } from '../lib/corporateActions';
 import { ScripMaster, loadScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import ScripCombobox from './ScripCombobox';
@@ -29,7 +30,7 @@ const ACTIONS: { value: ManualAction; label: string; hint: string }[] = [
   { value: 'Rights', label: 'Rights', hint: 'Rights subscription — a buy at the issue price.' },
 ];
 
-const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>; label: string }[] = [
+const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'date' | 'amount' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>; label: string }[] = [
   { key: 'brokerage', label: 'Brokerage' },
   { key: 'stt', label: 'STT' },
   { key: 'exchangeCharges', label: 'Exchange Turnover' },
@@ -42,7 +43,9 @@ const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'a
 interface LineDraft {
   id: number;
   company: string;
-  isin: string;
+  isin: string;          // resolved behind the scenes (no input) — still used for scrip matching
+  date: string;          // per-line trade date; blank = use the drawer's default date
+  amount: string;        // turnover; any TWO of qty/price/amount fill in the third
   action: ManualAction;
   qty: string;
   price: string;
@@ -67,7 +70,7 @@ const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { minimumFractionDi
 
 let _seq = 1;
 const blankLine = (): LineDraft => ({
-  id: _seq++, company: '', isin: '', action: 'Buy', qty: '', price: '', tradeClass: 'Delivery',
+  id: _seq++, company: '', isin: '', date: '', amount: '', action: 'Buy', qty: '', price: '', tradeClass: 'Delivery',
   brokerage: '', stt: '', exchangeCharges: '', sebiFees: '', stampDuty: '', gst: '', ipf: '', showCharges: false,
   ratioNum: '', ratioDen: '', held: '', notes: '',
 });
@@ -146,6 +149,14 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
 
   const setLine = (id: number, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  // Quantity / Price / Amount are linked: type any TWO and the third fills itself in.
+  const setLineQPA = (id: number, field: 'qty' | 'price' | 'amount', value: string) =>
+    setLines((prev) => prev.map((l) => {
+      if (l.id !== id) return l;
+      const next = { ...l, [field]: value } as LineDraft;
+      const s = solveQtyPriceAmount(field, next.qty, next.price, next.amount);
+      return { ...next, qty: s.qty, price: s.price, amount: s.amount };
+    }));
   // Apply a patch and, for Bonus/Split, recompute the free-share qty from the ratio.
   const setLineRatio = (id: number, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.id === id ? applyRatio({ ...l, ...patch }) : l)));
@@ -174,7 +185,8 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     const free = isFreeShares(l.action);
     const qty = num(l.qty);
     const price = free ? 0 : num(l.price);
-    const turnover = qty * price;
+    // Prefer the typed Amount (it's the money actually transacted); fall back to qty × price.
+    const turnover = free ? 0 : (num(l.amount) > 0 ? num(l.amount) : qty * price);
     const charges = free ? 0 : (num(l.brokerage) + num(l.stt) + num(l.exchangeCharges) + num(l.sebiFees) + num(l.stampDuty) + num(l.gst) + num(l.ipf));
     const buySide = l.action !== 'Sell';
     const net = buySide ? turnover + charges : turnover - charges;
@@ -190,7 +202,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   };
 
   // A wholly-empty line (e.g. a trailing "Add another line") is ignored, not an error.
-  const isBlank = (l: LineDraft) => !l.company.trim() && !l.qty.trim() && !l.price.trim();
+  const isBlank = (l: LineDraft) => !l.company.trim() && !l.qty.trim() && !l.price.trim() && !l.amount.trim();
   const filledLines = lines.filter((l) => !isBlank(l));
   const validLines = filledLines.filter((l) => lineError(l) === null);
   const totals = validLines.reduce(
@@ -207,7 +219,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     const firstBad = filledLines.map((l) => lineError(l)).find((e) => e !== null);
     if (firstBad) { setError(firstBad); return; }
 
-    const payload: ManualTradeLine[] = filledLines.map((l) => ({
+    const toPayload = (l: LineDraft): ManualTradeLine => ({
       isin: l.isin.trim(),
       securityName: l.company.trim(),
       action: l.action,
@@ -222,12 +234,29 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       gst: num(l.gst),
       ipf: num(l.ipf),
       notes: l.notes.trim(),
-    }));
+    });
+
+    // Lines can each carry their own date (blank = the drawer's default), so group by the
+    // effective date — appendManualTrades stamps ONE date across the batch it's given.
+    const byDate = new Map<string, ManualTradeLine[]>();
+    for (const l of filledLines) {
+      const d = (l.date || tradeDate).trim();
+      const g = byDate.get(d);
+      if (g) g.push(toPayload(l)); else byDate.set(d, [toPayload(l)]);
+    }
 
     setSaving(true);
     try {
-      const res = await appendManualTrades(sheetIdForId(portfolio), payload, tradeDate);
-      setResult(res);
+      const sheetId = sheetIdForId(portfolio);
+      let added = 0;
+      const warnings: AppendManualResult = { added: 0 };
+      for (const [d, group] of byDate) {
+        const res = await appendManualTrades(sheetId, group, d);
+        added += res.added;
+        if (res.holdingWarning) warnings.holdingWarning = res.holdingWarning;
+        if (res.capGainsWarning) warnings.capGainsWarning = res.capGainsWarning;
+      }
+      setResult({ ...warnings, added });
       onSaved(portfolio);
     } catch (e: any) {
       setError(e?.result?.error?.message || e?.message || 'Could not save the trade(s).');
@@ -434,9 +463,10 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Trade Date <span className="text-rose-500">*</span></label>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Default Trade Date <span className="text-rose-500">*</span></label>
                   <input
                     type="date" value={tradeDate} onChange={(e) => setTradeDate(e.target.value)}
+                    title="Applies to every line that doesn't set its own date."
                     className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                   />
                 </div>
@@ -454,7 +484,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   // manual box only appears when we can't determine it (holdings not loaded / not held).
                   const autoHeld = free ? heldFor(l.company, l.isin) : null;
                   const heldKnown = autoHeld != null;
-                  const heldNum = heldKnown ? autoHeld! : num(l.held);
+                  const heldNum = num(l.held);   // the (auto-filled but editable) field is the source of truth
                   const freeNum = num(l.qty);                 // computed by applyRatio from held + ratio
                   const totalNum = heldNum + freeNum;
                   const ratioReady = num(l.ratioNum) > 0 && num(l.ratioDen) > 0;
@@ -471,7 +501,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         </button>
                       </div>
 
-                      {/* Company + ISIN */}
+                      {/* Company + this line's own date (ISIN is resolved from the scrip master — no input needed) */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div className="sm:col-span-2 space-y-1">
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Company</label>
@@ -482,17 +512,20 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                           />
                         </div>
                         <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">ISIN <span className="font-normal normal-case text-slate-400">(optional)</span></label>
+                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                            Date {!l.date && <span className="font-normal normal-case text-slate-400">(default)</span>}
+                          </label>
                           <input
-                            type="text" placeholder="INE…"
-                            value={l.isin} onChange={(e) => setLineIdentity(l, { isin: e.target.value.toUpperCase() })}
-                            className="w-full px-3 py-2 text-xs font-mono text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                            type="date" value={l.date || tradeDate}
+                            onChange={(e) => setLine(l.id, { date: e.target.value })}
+                            title="This line's trade date — defaults to the date at the top of the drawer."
+                            className={`w-full px-3 py-2 text-xs rounded-lg border outline-none focus:ring-1 focus:ring-indigo-500 ${l.date ? 'border-indigo-200 bg-white text-slate-800' : 'border-slate-200 bg-white text-slate-500'}`}
                           />
                         </div>
                       </div>
 
-                      {/* Type + (Qty · Price · Class) for trades — or (Ratio · Held · Free shares) for Bonus/Split */}
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {/* Type + (Qty · Price · Amount · Class) for trades — or (Ratio · Held) for Bonus/Split */}
+                      <div className={`grid grid-cols-2 gap-3 ${free ? 'sm:grid-cols-4' : 'sm:grid-cols-5'}`}>
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Type</label>
                           <select
@@ -533,26 +566,24 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                               <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
                                 Shares held {heldKnown && <span className="font-normal normal-case text-emerald-600">· auto</span>}
                               </label>
-                              {heldKnown ? (
-                                <div className="w-full px-3 py-2 text-xs font-mono text-slate-700 rounded-lg border border-slate-200 bg-slate-100 select-none" title="Taken from your current holding">
-                                  {heldNum.toLocaleString('en-IN')}
-                                </div>
-                              ) : (
-                                <input
-                                  type="number" min="0" step="any" placeholder="shares held before this action"
-                                  value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
-                                  className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
-                                />
-                              )}
+                              {/* Auto-filled from the current holding, but still editable: a BACK-DATED bonus/split
+                                  acted on the position as it was THEN, which can differ from today's. */}
+                              <input
+                                type="number" min="0" step="any" placeholder="shares held before this action"
+                                value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
+                                title={heldKnown ? 'Auto-filled from your current holding — edit it for a back-dated action.' : undefined}
+                                className={`w-full px-3 py-2 text-xs rounded-lg border outline-none focus:ring-1 focus:ring-indigo-500 font-mono text-slate-800 ${heldKnown ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+                              />
                             </div>
                           </>
                         ) : (
                           <>
+                            {/* Quantity · Price · Amount — enter any TWO, the third computes itself. */}
                             <div className="space-y-1">
                               <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Quantity</label>
                               <input
                                 type="number" min="0" step="any" placeholder="0"
-                                value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })}
+                                value={l.qty} onChange={(e) => setLineQPA(l.id, 'qty', e.target.value)}
                                 className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
                               />
                             </div>
@@ -560,7 +591,16 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                               <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">{l.action === 'IPO' ? 'Issue Price' : l.action === 'Rights' ? 'Rights Price' : 'Price'}</label>
                               <input
                                 type="number" min="0" step="any" placeholder="0"
-                                value={l.price} onChange={(e) => setLine(l.id, { price: e.target.value })}
+                                value={l.price} onChange={(e) => setLineQPA(l.id, 'price', e.target.value)}
+                                className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Amount</label>
+                              <input
+                                type="number" min="0" step="any" placeholder="0"
+                                value={l.amount} onChange={(e) => setLineQPA(l.id, 'amount', e.target.value)}
+                                title="Turnover. Fill any two of Quantity / Price / Amount and the third is worked out."
                                 className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white font-mono"
                               />
                             </div>

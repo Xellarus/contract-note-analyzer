@@ -18,9 +18,10 @@ import { refreshYahooPrices, hasYahooWebApp } from '../lib/yahooPrices';
 import PriceStatusButton from './PriceStatusButton';
 import SourceBadge from './SourceBadge';
 import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
+import { loadCorporateActions, CORP_ACTIONS_TAB } from '../lib/corporateActions';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
-import { ledgerSide, isSplitType } from '../lib/tradeRowSchema';
+import { ledgerSide, isSplitType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
 import StockOpeningImportModal from './StockOpeningImportModal';
@@ -114,7 +115,24 @@ interface Transaction {
   sheetRow?: number;
   rawRow?: any[];        // the full True Entry row (preserves columns the popup doesn't edit)
   notes?: string;        // free-text note from the ledger's Notes column, shown in the entry popup
+  // A row synthesised from the "Corporate Actions" tab (merger / demerger), so this view's
+  // FIFO transforms the lots exactly like the Holding-tab and capital-gains engines do.
+  // `role` is this scrip's side of the action: 'in' = it's the `to` (Acquirer / NewCo,
+  // receives shares + carried cost), 'out' = it's the `from` (Target absorbed by a merger,
+  // or Parent whose cost a demerger reduces). Never editable — corp actions are edited in
+  // their own tab, so these rows carry no `editSource`.
+  corpAction?: { kind: 'MERGER' | 'DEMERGER'; role: 'in' | 'out'; sharesIn: number; cost: number };
 }
+
+/**
+ * Same-day event order, mirroring `replayFifoHoldings` and the capital-gains engine:
+ * BUY (0) → SPLIT / MERGER / DEMERGER (1) → SELL (2). A split must rescale, and a
+ * demerger must apportion cost out, BEFORE a same-day sell consumes the lots —
+ * otherwise the sell matches a pre-action cost and the order would silently depend
+ * on which row happens to sit higher in the sheet.
+ */
+const txEvOrd = (t: Transaction): number =>
+  t.corpAction ? 1 : isSplitType(t.transactionType) ? 1 : ledgerSide(t.transactionType) === 'SELL' ? 2 : 0;
 
 interface DisplayHolding {
   id: string;
@@ -185,9 +203,27 @@ export default function Holdings({
   const [scrip, setScrip] = useState<ScripMaster | null>(null);
   // Current-price snapshot (from the screener.in import) — values holdings live-ish.
   const [priceRows, setPriceRows] = useState<ScripPrice[]>([]);
+  // Both reads need a LIVE Google token, and the saved token is restored ASYNCHRONOUSLY after
+  // mount. Firing once on mount therefore raced the auth and usually lost: loadScripPrices
+  // swallows its error and returns [], so priceRows stayed EMPTY for the whole session — every
+  // holding then fell back to avg cost, which is why values equalled "Invested" and every card
+  // read +0.00%. Retry until authorized, exactly like the portfolio-total prefetch below.
   useEffect(() => {
-    loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then(setScrip).catch(() => {});
-    loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).then(setPriceRows).catch(() => {});
+    let loaded = false;
+    const run = () => {
+      if (loaded || !hasAuthorizedGoogle()) return false;
+      loaded = true;
+      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then(setScrip).catch(() => {});
+      loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).then(setPriceRows).catch(() => {});
+      return true;
+    };
+    if (run()) return;
+    let tries = 0;
+    const id = window.setInterval(() => {
+      tries++;
+      if (run() || tries >= 30) window.clearInterval(id);
+    }, 1000);
+    return () => window.clearInterval(id);
   }, []);
 
   // On-demand market-price refresh (Yahoo, via the Apps Script web app), then re-value.
@@ -358,6 +394,10 @@ export default function Holdings({
   // so each card keeps its own last-synced value — syncing/opening one portfolio
   // never zeroes the others (which happened when all cards read one sheetTotal).
   const [portfolioTotals, setPortfolioTotals] = useState<Record<string, number>>({});
+  // Each portfolio's Holding rows (name / ISIN / qty / invested), so EVERY summary card can be
+  // valued at the live CMP — not just the one that's open. Stored RAW rather than pre-valued so
+  // the cards re-price themselves the moment the Prices tab finishes loading.
+  const [portfolioRows, setPortfolioRows] = useState<Record<string, { name: string; isin: string; qty: number; invested: number }[]>>({});
   const [isLoadingSheet, setIsLoadingSheet] = useState(false);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
@@ -380,6 +420,9 @@ export default function Holdings({
     return { ...HOLDINGS_COL_DEFAULTS };
   });
   useEffect(() => { try { localStorage.setItem(HOLDINGS_COLW_KEY, JSON.stringify(colWidths)); } catch { /* ignore */ } }, [colWidths]);
+  // A drag ends with a synthesized `click` on the <th> (mousedown on the handle, mouseup on a
+  // sibling) — this flag lets requestSort ignore that one click so resizing never re-sorts.
+  const didColResizeRef = useRef(false);
   // Drag a column's right edge to resize it (min 60px). Uses window listeners so the drag
   // continues even when the pointer leaves the thin handle.
   const startColResize = (e: React.MouseEvent, key: string) => {
@@ -387,10 +430,16 @@ export default function Holdings({
     const startX = e.clientX;
     const startW = colWidths[key] ?? HOLDINGS_COL_DEFAULTS[key] ?? 120;
     const onMove = (ev: MouseEvent) => {
+      didColResizeRef.current = true;   // set on real movement, so a click with no drag still sorts
       const w = Math.max(60, startW + (ev.clientX - startX));
       setColWidths((prev) => ({ ...prev, [key]: w }));
     };
-    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.style.cursor = ''; };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      // The trailing click fires synchronously right after mouseup; clear on the next tick.
+      setTimeout(() => { didColResizeRef.current = false; }, 0);
+    };
     window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp);
     document.body.style.cursor = 'col-resize';
   };
@@ -520,6 +569,12 @@ export default function Holdings({
       setSheetHoldings(parsed);
       setSheetTotal(totalValue);
       setPortfolioTotals(prev => ({ ...prev, [portfolio]: totalValue }));
+      // Keep this portfolio's card rows fresh too, so its summary stays priced after you
+      // navigate away (the card falls back to this list once it's no longer the active one).
+      setPortfolioRows(prev => ({
+        ...prev,
+        [portfolio]: parsed.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity, invested: h.investedValue })),
+      }));
       setLastSyncedAt(new Date());
     } catch (err: any) {
       console.error("Fetch holdings error:", err);
@@ -617,18 +672,23 @@ export default function Holdings({
       });
       const rows = res?.result?.values || [];
       let total = 0;
+      const held: { name: string; isin: string; qty: number; invested: number }[] = [];
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row || row.length === 0) continue;
         const name = (row[0] || "").toString().trim();
         if (!name || name.toLowerCase().startsWith("total")) continue;
+        const isin = (row[1] || "").toString().trim();
         const qty = parseFloat((row[2] || "").toString().replace(/,/g, "").trim());
         const avg = parseFloat((row[3] || "").toString().replace(/,/g, "").trim());
         const inv = parseFloat((row[4] || "").toString().replace(/,/g, "").trim());
         if (isNaN(qty) || isNaN(avg)) continue;
-        total += isNaN(inv) ? qty * avg : inv;
+        const invested = isNaN(inv) ? qty * avg : inv;
+        total += invested;
+        held.push({ name, isin, qty, invested });
       }
       setPortfolioTotals(prev => ({ ...prev, [pid]: total }));
+      setPortfolioRows(prev => ({ ...prev, [pid]: held }));
     } catch { /* keep any prior value on error — don't zero a good card */ }
   };
 
@@ -1027,12 +1087,72 @@ export default function Holdings({
         }
       } catch { /* no Opening Holdings tab → view stays FY26-only */ }
 
+      // Seed the scrip's corporate actions (merger / demerger). They live in their own tab —
+      // NOT in True Entry — so without this the detail view's FIFO was blind to them while the
+      // Holding tab and the capital-gains engine both applied them: a demerged Parent kept its
+      // full pre-demerger cost (DCM Shriram Industries: ₹2.08 cr of lots instead of ₹88.7 lakh),
+      // and a NewCo with no buy rows at all (Shankara Buildpro) replayed as sells-against-nothing
+      // → a negative running balance and a "sold out" card.
+      try {
+        const actions = await loadCorporateActions(spreadsheetId);
+        // Stricter than rowMatchesSel: no loose substring fallback here, because a corp action
+        // names TWO securities that usually share a prefix ("DCM Shriram Industries" vs "DCM
+        // Shriram Fine Chemicals") and matching the wrong leg would corrupt the cost basis.
+        const inr = (v: number) => v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const qtyStr = (v: number) => v.toLocaleString('en-IN');
+        const caMatches = (nm: string): boolean => {
+          const n = (nm || '').trim();
+          if (!n) return false;
+          if (scrip && selKey) { const e = lookupScrip(scrip, '', n).entry; if (e) return e.key === selKey; }
+          return normName(n) === normName(companyName || '');
+        };
+        for (const ca of actions) {
+          const kind: 'MERGER' | 'DEMERGER' = ca.type === 'Merger' ? 'MERGER' : 'DEMERGER';
+          const isTo = caMatches(ca.to), isFrom = caMatches(ca.from);
+          if (isTo === isFrom) continue;   // neither leg, or an unresolvable both-legs match → skip
+          const role: 'in' | 'out' = isTo ? 'in' : 'out';
+          const px = role === 'in' && ca.sharesIn > 0 ? ca.cost / ca.sharesIn : 0;
+          parsed.push({
+            tradeDate: ca.dateStr,
+            isin: isin || '',
+            assetName: role === 'in' ? ca.to : ca.from,
+            transactionType: `${ca.type} ${role === 'in' ? 'In' : 'Out'}`,
+            quantity: role === 'in' ? ca.sharesIn : 0,
+            price: px,
+            turnover: role === 'in' ? ca.cost : 0,
+            brokerage: 0,
+            brokeragePerShare: 0,
+            amount: ca.cost,
+            corpAction: { kind, role, sharesIn: ca.sharesIn, cost: ca.cost },
+            notes: [
+              role === 'in'
+                ? `Received ${qtyStr(ca.sharesIn)} shares from ${ca.from} carrying ₹${inr(ca.cost)} of cost.`
+                : kind === 'MERGER'
+                  ? `Absorbed into ${ca.to} — lots extinguished, no gain booked here.`
+                  : `₹${inr(ca.cost)} of cost apportioned out to ${ca.to}; share count unchanged.`,
+              ca.notes,
+            ].filter(Boolean).join(' '),
+          });
+        }
+      } catch { /* no Corporate Actions tab → nothing to apply */ }
+
       parsed.sort((a, b) => parseDateStr(b.tradeDate) - parseDateStr(a.tradeDate));
 
       // Calculate rolling balance quantities oldest-to-newest
-      const oldestFirst = [...parsed].sort((a, b) => parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate));
+      // Same-day ordering as the FIFO engines: buys (0) → splits / corporate actions (1) →
+      // sells (2), so a balance never dips through a sell that a same-day action funds.
+      const oldestFirst = [...parsed].sort((a, b) =>
+        (parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate)) || (txEvOrd(a) - txEvOrd(b)));
       let currentBal = 0;
       oldestFirst.forEach(t => {
+        if (t.corpAction) {
+          // 'in' adds the shares received; a merger 'out' extinguishes the whole position;
+          // a demerger 'out' only moves cost, so the parent's share count is untouched.
+          if (t.corpAction.role === 'in') currentBal += t.corpAction.sharesIn;
+          else if (t.corpAction.kind === 'MERGER') currentBal = 0;
+          t.balanceQuantity = currentBal;
+          return;
+        }
         const side = ledgerSide(t.transactionType);
         if (side === "BUY") currentBal += t.quantity;
         else if (side === "SELL") currentBal -= t.quantity;
@@ -1073,6 +1193,14 @@ export default function Holdings({
     setEditForm(form);
     setEditingTx(t);
   };
+
+  // Tick / untick one Trade Book row in the multi-select set.
+  const toggleRowSel = (t: Transaction) => setSelectedRows(prev => {
+    const next = new Set(prev);
+    const k = `${t.editSource}:${t.sheetRow}`;
+    next.has(k) ? next.delete(k) : next.add(k);
+    return next;
+  });
 
   // Rebuild a full True Entry row from the edited form, preserving untouched columns
   // (Trade Class, Import ID, …) and recomputing the derived expense/total columns.
@@ -1395,7 +1523,17 @@ export default function Holdings({
                         </select>
                       ) : (
                         <input type={f.kind === 'num' ? 'number' : 'text'} step="any" value={editForm[f.key] ?? ''}
-                          onChange={e => setEditForm(p => ({ ...p, [f.key]: e.target.value }))}
+                          onChange={e => setEditForm(p => {
+                            const next = { ...p, [f.key]: e.target.value };
+                            // Quantity / Avg Price / Turnover are linked — any two fill in the third.
+                            const fld = f.key === 'quantity' ? 'qty' : f.key === 'turnover' ? 'amount' : f.key === 'price' ? 'price' : '';
+                            if (fld) {
+                              const s = solveQtyPriceAmount(fld as 'qty' | 'price' | 'amount', next.quantity ?? '', next.price ?? '', next.turnover ?? '');
+                              next.quantity = s.qty; next.price = s.price; next.turnover = s.amount;
+                            }
+                            return next;
+                          })}
+                          title={['quantity', 'price', 'turnover'].includes(f.key) ? 'Fill any two of Quantity / Avg Price / Turnover — the third is worked out.' : undefined}
                           className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
                       )}
                     </label>
@@ -1489,6 +1627,7 @@ export default function Holdings({
     const storedTotal = val('Total Expenses (incl STT)');
     const total = storedTotal > 0.0001 ? storedTotal : items.reduce((a, b) => a + b.value, 0);
     const isOpening = t?.editSource === 'opening';
+    const isCorpAction = !!t?.corpAction;
     return (
       <ModalShell open={!!expenseTx} onClose={() => setExpenseTx(null)} labelledBy="expense-breakdown-title">
         <div className={`relative z-10 w-full ${hasNote ? 'max-w-lg' : 'max-w-sm'} max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn`}>
@@ -1508,7 +1647,9 @@ export default function Holdings({
           <div className="overflow-y-auto px-5 py-4">
             <div className={hasNote ? 'grid grid-cols-1 sm:grid-cols-2 gap-4' : ''}>
               <div>
-                {isOpening ? (
+                {isCorpAction ? (
+                  <p className="text-[12px] text-slate-500 py-4 text-center">Corporate action — no cash changed hands, so there are no charges. Edit it in the “{CORP_ACTIONS_TAB}” tab.</p>
+                ) : isOpening ? (
                   <p className="text-[12px] text-slate-500 py-4 text-center">Carried-in opening lot — no charges recorded.</p>
                 ) : items.length === 0 ? (
                   <p className="text-[12px] text-slate-500 py-4 text-center">No charges recorded for this entry.</p>
@@ -1552,6 +1693,7 @@ export default function Holdings({
   };
 
   const requestSort = (field: 'symbol' | 'quantity' | 'avgCost' | 'currentPrice' | 'currentValue' | 'profit') => {
+    if (didColResizeRef.current) { didColResizeRef.current = false; return; }   // ignore the click a resize-drag leaves behind
     if (sortField === field) {
       setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
     } else {
@@ -1571,7 +1713,7 @@ export default function Holdings({
       <th
         key={colKey}
         onClick={sortKey ? () => requestSort(sortKey) : undefined}
-        className={`relative px-3 py-2.5 select-none ${sortKey ? 'cursor-pointer hover:bg-slate-100' : ''}`}
+        className={`relative px-3 py-2.5 select-none border-r border-slate-200 last:border-r-0 ${sortKey ? 'cursor-pointer hover:bg-slate-100' : ''}`}
       >
         <div className={`flex items-center gap-1 ${justify}`}>
           <span className="truncate">{label}</span>
@@ -1583,7 +1725,7 @@ export default function Holdings({
         <span
           onMouseDown={(e) => startColResize(e, colKey)}
           onClick={(e) => e.stopPropagation()}
-          className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize hover:bg-indigo-300 active:bg-indigo-400"
+          className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize hover:bg-indigo-500 active:bg-indigo-600"
           aria-hidden="true"
         />
       </th>
@@ -2021,18 +2163,21 @@ export default function Holdings({
       gain: number;
     }
 
-    // Date order with a buy→split→sell tiebreak for same-day rows (matches the CG engine):
-    // a split must rescale the lots BEFORE a same-day sell consumes them, else the sell
-    // would match pre-split cost/qty. Without this, order would depend on sheet row order.
-    const evOrd = (tt: string) => isSplitType(tt) ? 1 : (ledgerSide(tt) === 'SELL' ? 2 : 0);
+    // Date order with a buy→split/action→sell tiebreak for same-day rows (see `txEvOrd`).
     const chronxs = [...transactions].sort((a, b) =>
-      (parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate)) || (evOrd(a.transactionType) - evOrd(b.transactionType)));
-    
+      (parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate)) || (txEvOrd(a) - txEvOrd(b)));
+
     const activeInventory: InventoryLot[] = [];
     const realisedTrades: RealisedTransaction[] = [];
     let totalDividend = 0;
     let totalBuyAmount = 0;
     let totalSellAmount = 0;
+    // Corporate actions move cost between two securities without any cash changing hands.
+    // On THIS scrip's page the transfer still has to enter the return calculation, or a
+    // NewCo's shares would look free (infinite return) and an absorbed Target would look
+    // like a total loss. So each action contributes a synthetic flow at its carrying value:
+    // cost carried IN is an outflow, cost carried OUT is an inflow.
+    const corpFlows: { date: Date; amount: number }[] = [];
 
     for (const t of chronxs) {
       const type = t.transactionType.toUpperCase();
@@ -2041,6 +2186,37 @@ export default function Holdings({
       if (type.includes("DIVIDEND")) {
         const divAmt = t.amount > 0 ? t.amount : (t.quantity > 0 ? t.quantity * t.price : 0);
         totalDividend += divAmt;
+        continue;
+      }
+
+      // Merger / demerger — transform the lot queue exactly like `replayFifoHoldings` (the
+      // engine behind the Holding tab) so this page's cost basis agrees with it. Full
+      // precision on the scaled cost/share: no r2 here [[no-rounding-cost-basis]].
+      if (t.corpAction) {
+        const ca = t.corpAction;
+        const when = new Date(parseDateStr(t.tradeDate));
+        if (ca.role === 'in') {
+          // Acquirer / NewCo: a fresh lot at the carried cost. Its acquisition date is the
+          // ACTION date, so the holding-period clock restarts — the documented trade-off of
+          // typing the cost manually rather than carrying each original lot's date.
+          const px = ca.sharesIn > 0 ? ca.cost / ca.sharesIn : 0;
+          totalBuyAmount += ca.cost;
+          corpFlows.push({ date: when, amount: -ca.cost });
+          activeInventory.push({ date: t.tradeDate, quantity: ca.sharesIn, remainingQty: ca.sharesIn, price: px });
+        } else if (ca.kind === 'MERGER') {
+          // Target absorbed: every lot goes, and NO gain is booked (the cost rides across
+          // into the Acquirer, where it becomes that lot's basis).
+          const carried = activeInventory.reduce((s, l) => s + l.remainingQty * l.price, 0);
+          for (const l of activeInventory) l.remainingQty = 0;
+          corpFlows.push({ date: when, amount: carried });
+        } else {
+          // Parent of a demerger: share count unchanged, remaining cost scaled down so that
+          // exactly `ca.cost` leaves for the NewCo.
+          const remCost = activeInventory.reduce((s, l) => s + l.remainingQty * l.price, 0);
+          const f = remCost > 0 ? Math.max(0, (remCost - ca.cost) / remCost) : 1;
+          for (const l of activeInventory) l.price = l.price * f;
+          corpFlows.push({ date: when, amount: remCost - remCost * f });
+        }
         continue;
       }
 
@@ -2148,8 +2324,9 @@ export default function Holdings({
     const totalGain = unrealizedGain + realisedGain + totalDividend;
 
     // XIRR calculation with terminal asset value cash flow
-    const cashFlows: { date: Date; amount: number }[] = [];
+    const cashFlows: { date: Date; amount: number }[] = [...corpFlows];
     chronxs.forEach(t => {
+      if (t.corpAction) return;   // already contributed its carrying-value flow above
       const type = t.transactionType.toUpperCase();
       const side = ledgerSide(t.transactionType);   // Bonus/Split are ₹0 → no cash-flow impact
       if (side === "BUY") {
@@ -2637,7 +2814,8 @@ export default function Holdings({
                         sortedTxs.map((t, idx) => {
                           const type = t.transactionType.toUpperCase();
                           const side = ledgerSide(t.transactionType);
-                          const isCorp = /BONUS|SPLIT|IPO|RIGHT/.test(type);   // corporate actions get their own badge
+                          // Corporate actions get their own badge. /MERGER/ catches "Demerger In/Out" too.
+                          const isCorp = /BONUS|SPLIT|IPO|RIGHT|MERGER/.test(type);
                           const isSell = side === "SELL";
                           const isBuy = side === "BUY" && !isCorp;
                           const isDiv = type.includes("DIVIDEND");
@@ -2647,13 +2825,20 @@ export default function Holdings({
                             editingTx.editSource === t.editSource && editingTx.sheetRow === t.sheetRow;
                           const justSaved = !isEditingThis && justSavedRow != null && t.sheetRow != null &&
                             justSavedRow.editSource === t.editSource && justSavedRow.sheetRow === t.sheetRow;
+                          const rowSelected = selectedRows.has(`${t.editSource}:${t.sheetRow}`);
+                          // Once anything is ticked we're in "selection mode": a row click toggles the
+                          // tick instead of opening the single-entry editor.
+                          const selecting = selectedRows.size > 0;
 
                           // Inline-edit input styling + a setter that keeps turnover = qty × price in sync.
                           const inCls = "w-full px-1.5 py-1 text-xs border border-indigo-200 rounded-md font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white";
+                          // Quantity / Price / Turnover are linked — type any two, the third follows.
                           const setF = (k: string, v: string) => setEditForm(p => {
                             const next: Record<string, string> = { ...p, [k]: v };
-                            if (k === 'quantity' || k === 'price') {
-                              next.turnover = String(Math.round(numCell(next.quantity) * numCell(next.price) * 100) / 100);
+                            const fld = k === 'quantity' ? 'qty' : k === 'turnover' ? 'amount' : k === 'price' ? 'price' : '';
+                            if (fld) {
+                              const s = solveQtyPriceAmount(fld as 'qty' | 'price' | 'amount', next.quantity ?? '', next.price ?? '', next.turnover ?? '');
+                              next.quantity = s.qty; next.price = s.price; next.turnover = s.amount;
                             }
                             return next;
                           });
@@ -2676,8 +2861,10 @@ export default function Holdings({
                                 <td className="px-3 py-2">
                                   <input type="number" step="any" value={editForm.price ?? ''} onChange={e => setF('price', e.target.value)} className={`${inCls} text-right`} />
                                 </td>
-                                <td className="px-3 py-2 text-right font-mono text-[11px] text-slate-500" title="Recomputed on save">
-                                  {formatINR(numCell(editForm.quantity) * numCell(editForm.price))}
+                                <td className="px-3 py-2">
+                                  <input type="number" step="any" value={editForm.turnover ?? ''} onChange={e => setF('turnover', e.target.value)}
+                                    title="Amount (turnover) — fill any two of Quantity / Price / Amount and the third is worked out."
+                                    className={`${inCls} text-right`} />
                                 </td>
                                 <td className="px-3 py-2 text-right text-slate-300">—</td>
                                 <td className="px-3 py-2">
@@ -2702,23 +2889,23 @@ export default function Holdings({
 
                           return (
                             <tr key={idx}
-                              onClick={editMode ? (editable ? () => openEdit(t) : undefined) : () => setExpenseTx(t)}
-                              title={editMode ? undefined : 'View expense breakdown'}
-                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${(editMode && editable) || !editMode ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
+                              onClick={editMode
+                                ? (editable ? () => { selecting ? toggleRowSel(t) : openEdit(t); } : undefined)
+                                : () => setExpenseTx(t)}
+                              title={editMode ? (selecting ? 'Click to select / deselect this row' : undefined) : 'View expense breakdown'}
+                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${rowSelected ? 'bg-indigo-50/60' : ''} ${(editMode && editable) || !editMode ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
                               {editMode && (
-                                <td className="px-3 py-3.5 text-center" onClick={e => e.stopPropagation()}>
+                                // The whole cell is the hit target — clicking just beside the box used to
+                                // fall through to the row and open the single-entry editor.
+                                <td className={`px-3 py-3.5 text-center ${editable ? 'cursor-pointer' : ''}`}
+                                  onClick={e => { e.stopPropagation(); if (editable) toggleRowSel(t); }}>
                                   {editable ? (
                                     <input
                                       type="checkbox"
                                       aria-label="Select row for deletion"
-                                      className="cursor-pointer accent-indigo-600 align-middle"
-                                      checked={selectedRows.has(`${t.editSource}:${t.sheetRow}`)}
-                                      onChange={() => setSelectedRows(prev => {
-                                        const next = new Set(prev);
-                                        const k = `${t.editSource}:${t.sheetRow}`;
-                                        next.has(k) ? next.delete(k) : next.add(k);
-                                        return next;
-                                      })}
+                                      className="pointer-events-none accent-indigo-600 align-middle"
+                                      checked={rowSelected}
+                                      readOnly
                                     />
                                   ) : null}
                                 </td>
@@ -2736,10 +2923,11 @@ export default function Holdings({
                                 </span>
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">
-                                {isDiv ? '0' : formatNum(t.quantity)}
+                                {/* A demerger leaves the parent's share count alone — it only moves cost. */}
+                                {isDiv || (t.corpAction && t.corpAction.role === 'out') ? (t.corpAction ? '—' : '0') : formatNum(t.quantity)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">
-                                {isDiv ? '—' : formatINR(t.price)}
+                                {isDiv || (t.corpAction && t.corpAction.role === 'out') ? '—' : formatINR(t.price)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-850">
                                 {formatINR(t.amount)}
@@ -2955,8 +3143,30 @@ export default function Holdings({
         return { name, subtext, currentValue, investedValue, unrealisedGain, unrealisedGainPct, todaysGain, todaysGainPct };
       }
 
-      // Any other portfolio (e.g. the account-list cards): only its cost-basis
-      // total is loaded, so show that. Shows 0 until synced.
+      // Any other portfolio (the account-list cards): value its prefetched Holding rows at the
+      // live CMP, exactly like the open portfolio. Previously these returned current = invested
+      // with a hard-coded 0 gain, so every card read "+0.00%" no matter how prices moved.
+      const rows = portfolioRows[id];
+      if (rows && rows.length > 0) {
+        let currentValue = 0, investedValue = 0, todaysGain = 0;
+        for (const r of rows) {
+          if (!(r.qty > 0)) continue;                 // negative qty = a ledger error; never valued (matches the holdings list)
+          investedValue += r.invested;
+          const cmp = getRealCmp(r.isin, r.name);
+          const avg = r.qty > 0 ? r.invested / r.qty : 0;
+          const px = (cmp !== undefined && cmp > 0) ? cmp : avg;   // no price yet → hold at cost
+          currentValue += r.qty * px;
+          const prev = getRealPrevCmp(r.isin, r.name);
+          if (cmp !== undefined && cmp > 0 && prev !== undefined && prev > 0) todaysGain += r.qty * (cmp - prev);
+        }
+        const unrealisedGain = currentValue - investedValue;
+        const unrealisedGainPct = investedValue > 0 ? (unrealisedGain / investedValue) * 100 : 0;
+        const prevValue = currentValue - todaysGain;
+        const todaysGainPct = prevValue > 0 ? (todaysGain / prevValue) * 100 : 0;
+        return { name, subtext, currentValue, investedValue, unrealisedGain, unrealisedGainPct, todaysGain, todaysGainPct };
+      }
+
+      // Not prefetched yet (no token / still loading) → show the cost basis, no invented gain.
       const invested = portfolioTotals[id] ?? 0;
       return {
         name, subtext,
@@ -3507,7 +3717,7 @@ export default function Holdings({
                               style={{ animationDelay: `${Math.min(idx, 15) * 30}ms` }}
                               className="hover:bg-slate-50/80 cursor-pointer transition-colors animate-riseIn"
                             >
-                              <td className="px-3 py-2.5 overflow-hidden">
+                              <td className="px-3 py-2.5 overflow-hidden border-r border-slate-100 last:border-r-0">
                                 <div className="flex items-center gap-2 min-w-0">
                                   <span className="font-bold text-slate-800 truncate" title={h.name}>
                                     {h.name}
@@ -3525,15 +3735,15 @@ export default function Holdings({
                                 </div>
                               </td>
 
-                              <td className={`px-3 py-2.5 text-right font-mono font-bold ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-r border-slate-100 last:border-r-0 ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
                                 {formatNum(h.quantity)}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right font-mono text-slate-505">
+                              <td className="px-3 py-2.5 text-right font-mono text-slate-505 border-r border-slate-100 last:border-r-0">
                                 {formatINR(h.avgCost)}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right select-none font-mono">
+                              <td className="px-3 py-2.5 text-right select-none font-mono border-r border-slate-100 last:border-r-0">
                                 {editingPriceId === h.id ? (
                                   <div className="flex items-center justify-end gap-1.5">
                                     <input
@@ -3560,11 +3770,11 @@ export default function Holdings({
                                 )}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900">
+                              <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900 border-r border-slate-100 last:border-r-0">
                                 {formatINR(h.currentValue)}
                               </td>
 
-                              <td className={`px-3 py-2.5 text-right font-mono font-bold ${isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-r border-slate-100 last:border-r-0 ${isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
                                 <div>
                                   {isPositive ? '+' : ''}{formatINR(h.unrealizedGain)}
                                 </div>

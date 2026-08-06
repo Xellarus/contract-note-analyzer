@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, X, Loader2 } from 'lucide-react';
 import { ModalShell } from './ui/overlay';
-import { loadPriceMisses, PriceMiss } from '../lib/scripPrices';
+import { loadPriceMisses, loadScripPrices, makeExceptionResolver, PriceMiss, ScripPrice } from '../lib/scripPrices';
 import { SCRIP_MASTER_SPREADSHEET_ID, loadScripMaster, isPriceExcepted } from '../lib/scripMaster';
 
 /**
@@ -18,13 +18,19 @@ export default function PriceStatusButton({ refreshKey = 0 }: { refreshKey?: num
 
   const load = () => {
     setLoading(true);
-    // Drop scrips flagged "Price Exception" in the scrip master (ETFs / liquid funds we
-    // never price) so they don't clutter this list — done app-side, no Apps Script change.
+    // Drop scrips flagged as a "Price Exception" (ETFs / liquid funds we never price) so they
+    // don't clutter this list — done app-side, no Apps Script change. The flag is read from the
+    // Prices tab's exception column, or the scrip master's, whichever carries it.
     Promise.all([
       loadPriceMisses(SCRIP_MASTER_SPREADSHEET_ID).catch(() => [] as PriceMiss[]),
-      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null),
+      // force: the flag is edited in the sheet, so a 90s-stale cache would hide a fresh mark
+      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).catch(() => null),
+      loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).catch(() => [] as ScripPrice[]),
     ])
-      .then(([raw, master]) => setMisses(master ? raw.filter((m) => !isPriceExcepted(master, m.isin, m.name)) : raw))
+      .then(([raw, master, prices]) => {
+        const excepted = makeExceptionResolver(master, prices);
+        setMisses(raw.filter((m) => !excepted(m.isin, m.name) && !(master && isPriceExcepted(master, m.isin, m.name))));
+      })
       .catch(() => setMisses([]))
       .finally(() => setLoading(false));
   };

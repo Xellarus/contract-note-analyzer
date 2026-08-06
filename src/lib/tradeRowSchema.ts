@@ -66,6 +66,35 @@ export function headerKey(header: string): string {
   return "";
 }
 
+/**
+ * Quantity / Price / Amount are three views of two facts — given any TWO, the third is
+ * determined. `edited` is the field the user just typed; we keep the other populated field
+ * and recompute the remaining one. Values are strings (straight from inputs) so this can be
+ * wired directly to an onChange; untouched fields are returned unchanged.
+ *
+ * Precision follows the house rule: a RATE (price) keeps 6dp, MONEY (amount) sits at paise.
+ */
+export function solveQtyPriceAmount(
+  edited: "qty" | "price" | "amount",
+  qtyStr: string, priceStr: string, amountStr: string,
+): { qty: string; price: string; amount: string } {
+  const n = (s: string): number => { const v = parseFloat((s ?? "").toString().replace(/,/g, "").trim()); return isNaN(v) ? 0 : v; };
+  const r = (v: number, d: number): string => String(Math.round(v * Math.pow(10, d)) / Math.pow(10, d));
+  const q = n(qtyStr), p = n(priceStr), a = n(amountStr);
+  const out = { qty: qtyStr, price: priceStr, amount: amountStr };
+  if (edited === "qty" && q > 0) {
+    if (p > 0) out.amount = r(q * p, 2);          // qty × price → amount
+    else if (a > 0) out.price = r(a / q, 6);      // amount ÷ qty → price
+  } else if (edited === "price" && p > 0) {
+    if (q > 0) out.amount = r(q * p, 2);
+    else if (a > 0) out.qty = r(a / p, 6);
+  } else if (edited === "amount" && a > 0) {
+    if (q > 0) out.price = r(a / q, 6);           // the user's case: amount + shares → price
+    else if (p > 0) out.qty = r(a / p, 6);
+  }
+  return out;
+}
+
 /** Lay each record out as a row in the given header's column order. */
 export function mapRecordsToHeader(header: string[], records: Record<string, any>[]): any[][] {
   return records.map((rec) => header.map((h) => { const k = headerKey(h); return k ? (rec[k] ?? "") : ""; }));

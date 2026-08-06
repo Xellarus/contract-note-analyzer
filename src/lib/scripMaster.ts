@@ -204,7 +204,7 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
     const tab = await firstSheetTitle(spreadsheetId);
     const res: any = await sheetsBackoff(() => (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${quoteTab(tab)}!A1:J50000`,  // wide enough for BSE Code / Tally Name / Industry extras
+      range: `${quoteTab(tab)}!A1:Z50000`,  // wide enough for BSE Code / Tally Name / Industry / Price Exception extras
     }));
     rows = res?.result?.values || [];
   } catch (e: any) {
