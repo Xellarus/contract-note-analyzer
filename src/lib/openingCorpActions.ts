@@ -74,6 +74,29 @@ export async function loadOpeningCorpActionRows(spreadsheetId: string): Promise<
   return out;
 }
 
+/** Drop specific resolved actions (by key) from the tab, keeping every other row.
+ *  Read-modify-write, because the only writer here clears and rewrites the whole tab.
+ *  Returns how many rows actually went (0 if none of the keys were present). */
+export async function deleteOpeningCorpActions(spreadsheetId: string, keys: string[]): Promise<number> {
+  if (!keys.length) return 0;
+  const drop = new Set(keys);
+  const rows = await loadOpeningCorpActionRows(spreadsheetId);
+  const keep = rows.filter((r) => !drop.has(r.key));
+  const removed = rows.length - keep.length;
+  if (removed > 0) await saveOpeningCorpActions(spreadsheetId, keep);
+  return removed;
+}
+
+/** Put previously-dropped actions back (used by the delete-undo path). Merges by key,
+ *  so a concurrent import that re-added one of them isn't duplicated. */
+export async function restoreOpeningCorpActions(spreadsheetId: string, actions: SavedCorpAction[]): Promise<void> {
+  if (!actions.length) return;
+  const rows = await loadOpeningCorpActionRows(spreadsheetId);
+  const byKey = new Map(rows.map((r) => [r.key, r]));
+  for (const a of actions) byKey.set(a.key, a);
+  await saveOpeningCorpActions(spreadsheetId, [...byKey.values()]);
+}
+
 /** Read the Opening Corp Actions tab → a resolutions map keyed by PendingAction.key
  *  ({} if the tab doesn't exist yet). */
 export async function loadOpeningCorpActions(spreadsheetId: string): Promise<Record<string, ActionResolution>> {
