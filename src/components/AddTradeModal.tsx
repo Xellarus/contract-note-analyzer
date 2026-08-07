@@ -4,7 +4,8 @@ import { ModalShell } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { CorpActionType } from '../lib/corporateActions';
-import { ScripMaster, loadScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { ScripMaster, loadScripMaster, lookupScrip, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { gapi } from 'gapi-script';
 import ScripCombobox from './ScripCombobox';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS, portfolioById, sheetIdForId } from '../lib/portfolios';
@@ -15,7 +16,10 @@ interface AddTradeModalProps {
   defaultPortfolio: string;
   master: ScripMaster | null;
   onSaved: (pid: string) => void;
-  holdings?: { name: string; isin: string; qty: number }[];   // active-portfolio holdings, to prefill "shares held" for Bonus/Split
+  // Holdings of the portfolio the PARENT page has open, used to prefill "shares held" for
+  // Bonus/Split. The drawer's own portfolio dropdown can point somewhere else, in which case
+  // it fetches that portfolio's Holding tab itself — see `heldRows` below.
+  holdings?: { name: string; isin: string; qty: number }[];
   prefill?: { company: string; isin: string };                // pre-select a security (opened from a stock's detail page)
 }
 
@@ -141,6 +145,56 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     setCaSaving(false); setCaError(null); setCaResult(null);
   }, [open, defaultPortfolio, prefill?.company, prefill?.isin]);
 
+  // ── "Shares held" source ─────────────────────────────────────────────────────
+  // The `holdings` prop is whatever portfolio the Holdings page has OPEN — but this drawer
+  // has its own portfolio dropdown, so the two drift apart the moment the user switches it
+  // (open on Taparia, switch the drawer to Saket → we were searching Taparia's holdings for
+  // a Saket stock and finding nothing, so Bonus/Split never auto-filled). When the drawer's
+  // portfolio isn't the parent's, read that portfolio's Holding tab directly.
+  const [heldRows, setHeldRows] = useState<{ name: string; isin: string; qty: number }[]>([]);
+  const holdingsLen = holdings?.length || 0;
+  const usePropHoldings = portfolio === defaultPortfolio && holdingsLen > 0;
+  useEffect(() => {
+    if (!open || usePropHoldings) { setHeldRows([]); return; }
+    const sid = sheetIdForId(portfolio);
+    if (!sid || !hasValidGoogleToken()) { setHeldRows([]); return; }
+    let cancelled = false;
+    (gapi.client as any).sheets.spreadsheets.values
+      .get({ spreadsheetId: sid, range: 'Holding!A:E' })   // A name | B isin | C qty | D avg | E invested
+      .then((res: any) => {
+        if (cancelled) return;
+        const rows: any[][] = res?.result?.values || [];
+        setHeldRows(rows.slice(1).map((r) => ({
+          name: (r?.[0] ?? '').toString().trim(),
+          isin: (r?.[1] ?? '').toString().trim(),
+          qty: parseFloat((r?.[2] ?? '0').toString().replace(/,/g, '')) || 0,
+        })).filter((h) => h.name || h.isin));
+      })
+      .catch(() => { if (!cancelled) setHeldRows([]); });
+    return () => { cancelled = true; };
+  }, [open, portfolio, usePropHoldings]);
+  const activeHoldings = usePropHoldings ? holdings! : heldRows;
+
+  // Re-sync "shares held" on any line already carrying a company when the holdings behind it
+  // change — the drawer's portfolio was switched, or the parent's holdings finished loading
+  // after the drawer opened. Without this, `held` only ever filled at the moment the company
+  // was picked, so a company chosen before the data arrived stayed blank forever.
+  // Fill-only: never blanks a figure the user typed for a back-dated action.
+  useEffect(() => {
+    if (!open) return;
+    setLines((prev) => {
+      let changed = false;
+      const next = prev.map((l) => {
+        if (!isFreeShares(l.action) || !l.company.trim()) return l;
+        const h = heldFor(l.company, l.isin);
+        if (h == null || String(h) === l.held) return l;
+        changed = true;
+        return applyRatio({ ...l, held: String(h) });
+      });
+      return changed ? next : prev;
+    });
+  }, [open, portfolio, heldRows, holdingsLen]);
+
   // Company autocomplete is handled by <ScripCombobox> (a filtered typeahead), not a
   // native <datalist> — the latter silently stops rendering suggestions once the master
   // reaches ~5,000 entries, which broke the dropdown for every scrip.
@@ -160,11 +214,21 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   // Apply a patch and, for Bonus/Split, recompute the free-share qty from the ratio.
   const setLineRatio = (id: number, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.id === id ? applyRatio({ ...l, ...patch }) : l)));
-  // Current holding of a company (active portfolio) — to auto-fill "shares held".
+  // Current holding of a company (in the portfolio SELECTED IN THIS DRAWER) — auto-fills
+  // "shares held" for Bonus/Split.
   const heldFor = (company: string, isin: string): number | null => {
-    if (!holdings?.length) return null;
+    const rows = activeHoldings;
+    if (!rows.length) return null;
     const c = company.trim().toLowerCase(), i = isin.trim().toUpperCase();
-    const h = holdings.find((x) => (i && (x.isin || '').toUpperCase() === i) || (c && x.name.trim().toLowerCase() === c));
+    let h = rows.find((x) => (i && (x.isin || '').toUpperCase() === i) || (c && x.name.trim().toLowerCase() === c));
+    // The company box is a NAME-only typeahead (ScripCombobox reports no ISIN), so `i` is
+    // normally blank and this came down to exact string equality against whatever spelling
+    // the Holding tab happens to carry. Fall back to the shared scrip-master key — the same
+    // identity every replay engine groups by — so an alias or short code still resolves.
+    if (!h && activeMaster && (c || i)) {
+      const e = lookupScrip(activeMaster, isin.trim(), company.trim()).entry;
+      if (e) h = rows.find((x) => lookupScrip(activeMaster, x.isin, x.name).entry?.key === e.key);
+    }
     return h && h.qty > 0 ? h.qty : null;
   };
   // Company/ISIN edits: for a Bonus/Split line, resync `held` to the chosen stock's current
