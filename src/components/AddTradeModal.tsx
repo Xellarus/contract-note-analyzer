@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useState } from 'react';
-import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Sliders } from 'lucide-react';
+import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Sliders, Lock } from 'lucide-react';
 import { ModalShell } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
@@ -175,6 +175,11 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   }, [open, portfolio, usePropHoldings]);
   const activeHoldings = usePropHoldings ? holdings! : heldRows;
 
+  // Opened from a stock's detail page → the whole drawer is about THAT security. Show it once
+  // at the top and drop the per-line company picker: re-choosing it on every added line was
+  // just a chance to book a trade against the wrong stock.
+  const lockedScrip = prefill?.company ? { company: prefill.company, isin: prefill.isin || '' } : null;
+
   // Re-sync "shares held" on any line already carrying a company when the holdings behind it
   // change — the drawer's portfolio was switched, or the parent's holdings finished loading
   // after the drawer opened. Without this, `held` only ever filled at the moment the company
@@ -243,7 +248,24 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     setLineRatio(l.id, patch);
   };
   const removeLine = (id: number) => setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.id !== id)));
-  const addLine = () => setLines((prev) => [...prev, blankLine()]);
+  // A new line starts from the previous one rather than from scratch: same security when the
+  // drawer is locked to one (opened from a stock's detail page), and the same Type/Class,
+  // since a second line is nearly always more of the same trade. Everything stays editable.
+  const addLine = () => setLines((prev) => {
+    const last = prev[prev.length - 1];
+    const next = blankLine();
+    if (lockedScrip) { next.company = lockedScrip.company; next.isin = lockedScrip.isin; }
+    if (last) {
+      next.action = last.action;
+      next.tradeClass = isDeliveryLocked(last.action) ? 'Delivery' : last.tradeClass;
+      // Carried a Bonus/Split forward → re-derive shares held for the (known) security.
+      if (isFreeShares(next.action) && next.company) {
+        const h = heldFor(next.company, next.isin);
+        if (h != null) next.held = String(h);
+      }
+    }
+    return [...prev, next];
+  });
 
   const linePreview = (l: LineDraft) => {
     const free = isFreeShares(l.action);
@@ -507,7 +529,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
               </div>
             )}
             <div className="flex gap-3 mt-6">
-              <button onClick={() => { setResult(null); setLines([blankLine()]); }} className="btn-press px-4 py-2 text-xs font-bold text-indigo-600 border border-indigo-200 hover:bg-indigo-50 rounded-xl cursor-pointer">Add more</button>
+              {/* Keep the locked security across "Add more" — otherwise the fresh line would have
+                  no company and no picker to set one. */}
+              <button onClick={() => { setResult(null); setLines([lockedScrip ? { ...blankLine(), company: lockedScrip.company, isin: lockedScrip.isin } : blankLine()]); }} className="btn-press px-4 py-2 text-xs font-bold text-indigo-600 border border-indigo-200 hover:bg-indigo-50 rounded-xl cursor-pointer">Add more</button>
               <button onClick={onClose} className="btn-press px-5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer">Done</button>
             </div>
           </div>
@@ -535,6 +559,18 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   />
                 </div>
               </div>
+
+              {/* Locked to one security (opened from its detail page) — stated once, so no line
+                  needs its own company picker. */}
+              {lockedScrip && (
+                <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-indigo-50 border border-indigo-200">
+                  <Lock className="w-3.5 h-3.5 text-indigo-600 mt-0.5 shrink-0" />
+                  <p className="text-[11px] text-indigo-800 leading-relaxed">
+                    Every line books against <b className="font-bold">{lockedScrip.company}</b>.
+                    {' '}To record a different company, use <b className="font-bold">Add Trade</b> from the holdings list.
+                  </p>
+                </div>
+              )}
 
               {/* Line items */}
               <div className="space-y-3">
@@ -565,16 +601,19 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         </button>
                       </div>
 
-                      {/* Company + this line's own date (ISIN is resolved from the scrip master — no input needed) */}
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <div className="sm:col-span-2 space-y-1">
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Company</label>
-                          <ScripCombobox
-                            value={l.company} onChange={(v) => setLineIdentity(l, { company: v })}
-                            master={activeMaster} placeholder="Start typing a company name…"
-                            className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-                          />
-                        </div>
+                      {/* Company + this line's own date (ISIN is resolved from the scrip master — no input needed).
+                          Locked to one security → the picker is gone and Date takes the row. */}
+                      <div className={`grid grid-cols-1 gap-3 ${lockedScrip ? '' : 'sm:grid-cols-3'}`}>
+                        {!lockedScrip && (
+                          <div className="sm:col-span-2 space-y-1">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Company</label>
+                            <ScripCombobox
+                              value={l.company} onChange={(v) => setLineIdentity(l, { company: v })}
+                              master={activeMaster} placeholder="Start typing a company name…"
+                              className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                            />
+                          </div>
+                        )}
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
                             Date {!l.date && <span className="font-normal normal-case text-slate-400">(default)</span>}

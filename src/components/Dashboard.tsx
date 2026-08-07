@@ -1,20 +1,23 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Wallet, RefreshCw, AlertCircle, TrendingUp, TrendingDown, ArrowRight, LineChart, SlidersHorizontal } from 'lucide-react';
+import { Wallet, RefreshCw, AlertCircle, TrendingUp, TrendingDown, LineChart, SlidersHorizontal } from 'lucide-react';
 import { PortfolioHolding } from '../types';
 import { computeAum, AumResult } from '../lib/holdingsCalc';
 import { computeInvestedTimeline, AumTimelinePoint } from '../lib/aumTimeline';
 import { logAumSnapshot, loadAumHistory, AumSnapshot } from '../lib/aumHistory';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
+import { computeCrossHoldings, CrossHolding } from '../lib/crossHoldings';
 import CubeLoader from './ui/CubeLoader';
 import PriceStatusButton from './PriceStatusButton';
+import AllHoldingsTable from './AllHoldingsTable';
 
 interface DashboardProps {
   holdings: PortfolioHolding[];
   cashBalance: number;
   setCashBalance: (val: number | ((prev: number) => number)) => void;
   onNavigate: (view: 'dashboard' | 'holdings' | 'imports') => void;
-  onOpenPortfolio: (id: string) => void;
+  /** Jump straight to one security's detail page in one account (from the holdings table). */
+  onOpenStock: (focus: { portfolioId: string; scripName: string; isin: string }) => void;
 }
 
 const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -314,10 +317,12 @@ function AumTimelineChart({ points, market, aumToday }: { points: AumTimelinePoi
   );
 }
 
-export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
+export default function Dashboard({ onOpenStock }: DashboardProps) {
   const [aum, setAum] = useState<AumResult | null>(null);
   const [timeline, setTimeline] = useState<AumTimelinePoint[] | null>(null);
   const [marketHist, setMarketHist] = useState<AumSnapshot[]>([]);
+  const [holdingRows, setHoldingRows] = useState<CrossHolding[]>([]);
+  const [holdingsFailed, setHoldingsFailed] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -329,12 +334,17 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
     setLoading(true);
     setError(null);
     const list = PORTFOLIOS.map(p => ({ id: p.id, label: p.label, sheetId: p.sheetId }));
+    const full = PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label, sheetId: p.sheetId }));
     try {
-      // Run AUM + the invested-capital timeline together; a failure in one doesn't block the other.
-      const [aumRes, tlRes] = await Promise.allSettled([computeAum(list), computeInvestedTimeline(list)]);
+      // AUM, the invested-capital timeline and the consolidated holdings run together; a
+      // failure in one never blocks the others, so one bad sheet can't blank the page.
+      const [aumRes, tlRes, chRes] = await Promise.allSettled([
+        computeAum(list), computeInvestedTimeline(list), computeCrossHoldings(full),
+      ]);
       if (aumRes.status === 'fulfilled') setAum(aumRes.value);
       else setError(aumRes.reason?.result?.error?.message || aumRes.reason?.message || 'Could not compute AUM.');
       if (tlRes.status === 'fulfilled') setTimeline(tlRes.value);
+      if (chRes.status === 'fulfilled') { setHoldingRows(chRes.value.rows); setHoldingsFailed(chRes.value.failed); }
       // Log today's AUM snapshot (once per IST day; same-day reloads refresh
       // the row) and pull the accumulated market-value history for the chart.
       // Best-effort: a failure here never blocks the dashboard.
@@ -428,36 +438,15 @@ export default function Dashboard({ onOpenPortfolio }: DashboardProps) {
         <AumTimelineChart points={timeline} market={marketHist} aumToday={aum ? aum.totalCurrent : null} />
       )}
 
-      {/* Per-portfolio breakdown */}
-      {aum && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {aum.perPortfolio.map((p) => {
-            const pg = p.currentValue - p.investedValue;
-            const pgPct = p.investedValue > 0 ? (pg / p.investedValue) * 100 : 0;
-            const pUp = pg >= 0;
-            const meta = PORTFOLIOS.find(x => x.id === p.id);
-            return (
-              <button
-                key={p.id}
-                onClick={() => onOpenPortfolio(p.id)}
-                className="text-left rounded-2xl border border-slate-200 bg-white shadow-sm hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer p-5 group"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="px-2 py-0.5 bg-indigo-50 border border-indigo-100 text-indigo-700 text-[9px] font-black uppercase tracking-wider rounded-md">Portfolio {meta?.code}</span>
-                  <ArrowRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600 transition-colors" />
-                </div>
-                <h3 className="text-sm font-black text-slate-800 mt-2">{p.label}</h3>
-                <p className="text-2xl font-black text-slate-900 font-mono mt-2 tabular-nums">{inr(p.currentValue)}</p>
-                <div className="mt-1.5 flex items-center gap-3 text-[12px]">
-                  <span className="text-slate-500">Inv <span className="font-mono">{inr(p.investedValue)}</span></span>
-                  <span className={`font-bold ${pUp ? 'text-emerald-700' : 'text-rose-600'}`}>{pUp ? '+' : ''}{pgPct.toFixed(2)}%</span>
-                </div>
-                <p className="text-[10px] text-slate-400 mt-1.5">{p.positions} position{p.positions === 1 ? '' : 's'} · {p.priced}/{p.positions} priced</p>
-              </button>
-            );
-          })}
+      {/* Consolidated holdings across every portfolio (replaced the per-portfolio shortcut
+          cards). Expanding a row shows which accounts hold it and jumps into one. */}
+      {holdingsFailed.length > 0 && (
+        <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>Couldn't read the Holding tab for {holdingsFailed.join(', ')} — those positions are missing from the table below.</span>
         </div>
       )}
+      <AllHoldingsTable rows={holdingRows} loading={loading} onOpenStock={onOpenStock} />
     </div>
   );
 }

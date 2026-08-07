@@ -49,6 +49,20 @@ const parsePriceStamp = (s: string): number => {
   return new Date(parseInt(m[3]), STAMP_MONTHS[m[2].toLowerCase()] ?? 0, parseInt(m[1]), hh, parseInt(m[5])).getTime();
 };
 
+// NSE/BSE close at 15:30 IST. A price stamped at or after that is a SETTLED close for its
+// own session; anything earlier is a live intraday tick that will still move. Shown in the
+// UI by colouring the CMP (see `.cmp-settled`), so the closing print is identifiable at a
+// glance. Deliberately a property of the stamp alone — no trading-holiday calendar needed,
+// so Friday's 15:45 capture stays "settled" over the weekend. A pre-bell refresh the next
+// morning reads as unsettled, which is correct: that session's close isn't in yet.
+const MARKET_CLOSE_MIN = 15 * 60 + 30;
+const isSettledClose = (stamp: string): boolean => {
+  const ts = parsePriceStamp(stamp || '');
+  if (!ts) return false;
+  const d = new Date(ts);
+  return d.getHours() * 60 + d.getMinutes() >= MARKET_CLOSE_MIN;
+};
+
 const csvEscape = (v: any) => { const s = (v ?? '').toString(); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 
 // "Edit Entry" popup field specs. `header` is the True Entry sheet column; a field is
@@ -353,6 +367,24 @@ export default function Holdings({
     if (scrip) { const e = lookupScrip(scrip, isin, name).entry; if (e) { const v = priceSourceMap.get('key:' + e.key); if (v) return v; } }
     if (isin) { const v = priceSourceMap.get('isin:' + isin.toUpperCase()); if (v) return v; }
     return priceSourceMap.get('name:' + normName(name));
+  };
+
+  // When each scrip's shown price was captured (Prices tab "Updated") — drives the settled-
+  // close colouring on the CMP. Indexed exactly like priceMap.
+  const priceUpdatedMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of priceRows) {
+      if (!(p.price > 0) || !p.updated) continue;
+      if (p.isin) m.set('isin:' + p.isin.toUpperCase(), p.updated);
+      if (p.name) m.set('name:' + normName(p.name), p.updated);
+      if (scrip) { const e = lookupScrip(scrip, p.isin, p.name).entry; if (e) m.set('key:' + e.key, p.updated); }
+    }
+    return m;
+  }, [priceRows, scrip]);
+  const getCmpUpdated = (isin: string, name: string): string | undefined => {
+    if (scrip) { const e = lookupScrip(scrip, isin, name).entry; if (e) { const v = priceUpdatedMap.get('key:' + e.key); if (v) return v; } }
+    if (isin) { const v = priceUpdatedMap.get('isin:' + isin.toUpperCase()); if (v) return v; }
+    return priceUpdatedMap.get('name:' + normName(name));
   };
 
   // Previous-day price baseline (Prices tab "Previous Price" column, rolled once per
@@ -2263,6 +2295,11 @@ export default function Holdings({
     // "Previous Price"). Undefined — so the corner shows NO % rather than a misleading one —
     // when there's no previous close, or the shown price is just the avg-cost fallback.
     const usingAvgCostFallback = realDetailCmp === undefined && customCmp === null;
+    // Is the price on screen the session's settled close? Only meaningful for a real fetched
+    // CMP — a typed override or the avg-cost fallback has no capture time behind it.
+    const showingRealCmp = customCmp === null && realDetailCmp !== undefined;
+    const detailCmpUpdated = showingRealCmp ? getCmpUpdated(isin, name) : undefined;
+    const cmpIsSettled = !!detailCmpUpdated && isSettledClose(detailCmpUpdated);
     const detailPrevClose = getRealPrevCmp(isin, name);
     const dayChangePct = !usingAvgCostFallback && detailPrevClose && detailPrevClose > 0
       ? ((cmpPrice - detailPrevClose) / detailPrevClose) * 100
@@ -2649,7 +2686,18 @@ export default function Holdings({
                 </div>
               ) : (
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-black font-mono text-slate-850" id="cmp-display-price">
+                  {/* Gold once the shown price is the session's SETTLED close (captured at/after
+                      the 15:30 bell) — brass on paper, gold on the terminal. Only ever for a real
+                      fetched CMP: a manual override or an avg-cost fallback stays default ink. */}
+                  <span
+                    className={`text-sm font-black font-mono ${cmpIsSettled ? 'cmp-settled' : 'text-slate-850'}`}
+                    id="cmp-display-price"
+                    title={cmpIsSettled
+                      ? `Closing price — captured ${formatDMYTime(detailCmpUpdated)} IST, after the 15:30 bell.`
+                      : detailCmpUpdated
+                        ? `Live price — captured ${formatDMYTime(detailCmpUpdated)} IST, before the 15:30 close.`
+                        : undefined}
+                  >
                     {formatINR(cmpPrice)}
                   </span>
                   {/* Day's move vs yesterday's close — hidden when there's no previous close to
@@ -2904,7 +2952,7 @@ export default function Holdings({
           <div className="overflow-x-auto">
             {isLoadingTransactions ? (
               <div className="py-24 flex flex-col items-center justify-center gap-3" id="transactions-loading-spinner">
-                <CubeLoader className="w-16 text-indigo-600" />
+                <CubeLoader className="w-16" />
                 <span className="text-xs text-slate-500 font-bold uppercase tracking-wider select-none animate-pulse">Syncing ledger records live...</span>
               </div>
             ) : (
@@ -3787,7 +3835,7 @@ export default function Holdings({
                 {/* Live spreadsheet synchronization loaders */}
                 {isLoadingSheet ? (
                   <div className="py-20 text-center space-y-3">
-                    <CubeLoader className="w-24 mx-auto text-indigo-600" />
+                    <CubeLoader className="w-24 mx-auto" />
                     <p className="text-xs font-black text-slate-500 animate-pulse">Loading holdings ledger values...</p>
                   </div>
                 ) : sheetError ? (

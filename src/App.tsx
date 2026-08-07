@@ -2255,8 +2255,16 @@ export default function App() {
             cashBalance={cashBalance}
             setCashBalance={setCashBalance}
             onNavigate={setCurrentView}
-            onOpenPortfolio={(id) => {
-              setActivePortfolio(id);
+            // Dashboard holdings table → that security's detail page in that account. Same
+            // handshake the Back-from-Reports step uses: hand Holdings a one-shot `reopenStock`
+            // and switch account + view; Holdings re-selects the stock once ITS holdings have
+            // loaded, then calls onReopenHandled. `setIsDetailView(true)` is ours to set —
+            // unlike the Reports path we may be arriving from the portfolio picker, and if the
+            // scrip can't be matched this at least lands on that account's holdings list
+            // rather than dumping the user back on the picker.
+            onOpenStock={(f) => {
+              setReopenStock(f);
+              setActivePortfolio(f.portfolioId);
               setIsDetailView(true);
               setCurrentView('holdings');
             }}
@@ -2431,7 +2439,7 @@ export default function App() {
 
             {isLoading && (
               <div className="text-center py-20 max-w-md mx-auto">
-                <CubeLoader className="w-16 mx-auto mb-4 text-indigo-600" />
+                <CubeLoader className="w-16 mx-auto mb-4" />
                 <p className="text-slate-800 font-bold text-md">Parsing Contract Notes</p>
                 <p className="text-slate-400 text-xs mt-1">Processing {fileCount.processed}/{fileCount.total} files inside sandboxed container...</p>
               </div>
@@ -3157,7 +3165,7 @@ export default function App() {
               
               {testResults.length === 0 ? (
                 <div className="bg-white border rounded-2xl p-10 text-center text-slate-500 text-sm italic shadow-sm hover:border-slate-300 transition-all">
-                  <CubeLoader className="w-14 text-slate-400 mx-auto mb-3" />
+                  <CubeLoader className="w-14 mx-auto mb-3" />
                   Evaluating test suite libraries in browser loop...
                 </div>
               ) : (

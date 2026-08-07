@@ -123,7 +123,7 @@ export default function ImportHistory() {
         {/* Body */}
         {loading ? (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-slate-500 text-sm">
-            <CubeLoader className="w-12 text-indigo-600" />
+            <CubeLoader className="w-12" />
             <span className="animate-pulse">Fetching import history…</span>
           </div>
         ) : error ? (

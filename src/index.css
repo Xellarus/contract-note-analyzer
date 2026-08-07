@@ -22,12 +22,9 @@ html, body, #root, * {
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .animate-fadeIn { animation: fadeIn 0.15s ease-out; }
 
-/* Cube loader — an isometric 2×2 cube (flat line-art) whose tiles light up in a
-   sweep around it, so it reads as "solving itself". Each tile's animation-delay
-   is set inline (CubeLoader) to cascade the highlight around the cube. */
-@keyframes cubePulse { 0% { opacity: 0; } 6% { opacity: 0.9; } 24% { opacity: 0; } 100% { opacity: 0; } }
-.cube-tile { animation: cubePulse 2.4s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .cube-tile { animation: none; opacity: 0; } }   /* static line-art cube */
+/* The cube loader is now an animated WebP (see CubeLoader.tsx), so the old hand-drawn
+   SVG's keyframes are gone. Its motion lives in the file itself; browsers already pause
+   animated images under prefers-reduced-motion, so there's nothing to gate here. */
 
 /* Success flash — a just-saved table row glows emerald once, then fades to
    nothing. Beats a CSS animation over any static/hover background of the row. */
@@ -105,6 +102,14 @@ html, body, #root, * {
    layered utilities in the cascade, so no !important is needed. This is purely
    presentational — it changes colors only, never any component logic.
    ────────────────────────────────────────────────────────────────────────── */
+/* SEMANTIC ACCENT — a settled (post-15:30-bell) closing price. Its own class rather than
+   a Tailwind utility, because no amber/yellow shade reads as brass in light AND gold in
+   dark, and remapping one would repaint every other amber on the page. Both themes are
+   declared here, so it needs no entry in the remap blocks below.
+   Used by the CMP readout in Holdings' stock detail view. */
+.cmp-settled       { color: #8a6a1e; }   /* antique brass on paper */
+.dark .cmp-settled { color: #f0c65a; }   /* gold on the terminal */
+
 /* BRASS TERMINAL dark (adopted 2026-07-20): warm graphite ground, warm ivory
    text, ONE gold signal accent (#d9a441) replacing indigo, money green/red.
    Pairs with the warm-paper Mono light theme. */
