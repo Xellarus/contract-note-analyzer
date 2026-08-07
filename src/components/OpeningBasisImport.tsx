@@ -14,6 +14,7 @@ import { rebuildHoldingTab, syncCapitalGains } from '../lib/holdingsCalc';
 import { PORTFOLIOS, portfolioById } from '../lib/portfolios';
 import { loadScripMaster, lookupScrip, invalidateScripCache, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { hasValidGoogleToken } from '../lib/googleAuth';
+import { formatDMY } from '../lib/dates';
 import { toast, ModalShell } from './ui/overlay';
 import OpeningScripMapModal from './OpeningScripMapModal';
 
@@ -366,7 +367,7 @@ export default function OpeningBasisImport() {
                       <span className="inline-flex items-center gap-1.5 font-bold"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading running position…</span>
                     ) : (obState.batches > 0 || prevLots.length > 0) ? (
                       <>
-                        <p className="font-bold">Continuing {port?.code}: {prevLots.length.toLocaleString('en-IN')} lots across {prevScrips.toLocaleString('en-IN')} scrips ({Math.round(prevQty).toLocaleString('en-IN')} sh){obState.batches > 0 ? ` · ${obState.batches} slice(s)` : ''}{obState.processedThrough ? ` · txns through ${obState.processedThrough}` : ''}.</p>
+                        <p className="font-bold">Continuing {port?.code}: {prevLots.length.toLocaleString('en-IN')} lots across {prevScrips.toLocaleString('en-IN')} scrips ({Math.round(prevQty).toLocaleString('en-IN')} sh){obState.batches > 0 ? ` · ${obState.batches} slice(s)` : ''}{obState.processedThrough ? ` · txns through ${formatDMY(obState.processedThrough)}` : ''}.</p>
                         <p className="mt-0.5">Upload the next <strong>Holding Period Report</strong> slice (lots — appended & de-duplicated, any order) plus its <strong>Transaction Statement</strong> slice. The transactions build the <strong>running position below</strong> — check it against your dated broker holding report and fix any Bonus / Split / Rights (it pops up) before the next slice. Feed transaction slices <strong>oldest → newest</strong>.</p>
                       </>
                     ) : (
@@ -416,7 +417,7 @@ export default function OpeningBasisImport() {
           {mode === 'accumulate' && overlapsProcessed && (
             <div className="flex items-start gap-2 -mt-1 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>This slice starts <strong>{sliceDates.min}</strong>, on/before what's already processed (<strong>{obState.processedThrough}</strong>). Feed slices oldest→newest and non-overlapping, or the running position may double-count.</span>
+              <span>This slice starts <strong>{formatDMY(sliceDates.min)}</strong>, on/before what's already processed (<strong>{formatDMY(obState.processedThrough)}</strong>). Feed slices oldest→newest and non-overlapping, or the running position may double-count.</span>
             </div>
           )}
 
@@ -527,7 +528,7 @@ export default function OpeningBasisImport() {
                     {resolvedLots.slice(0, 500).map((l, i) => (
                       <tr key={i} className="hover:bg-slate-50">
                         <td className="px-5 py-2 font-medium text-slate-800">{l.name}{!l.isin && master && <span className="ml-1 text-[9px] font-bold text-rose-500 uppercase">unmatched</span>}</td>
-                        <td className="px-5 py-2 text-slate-600 font-mono text-[12px]">{l.acqDate}</td>
+                        <td className="px-5 py-2 text-slate-600 font-mono text-[12px]">{formatDMY(l.acqDate)}</td>
                         <td className="px-5 py-2 text-right font-mono text-slate-700">{l.qty.toLocaleString('en-IN')}</td>
                         <td className="px-5 py-2 text-right font-mono text-slate-700">{l.costPerShare > 0 ? inr(l.costPerShare) : '₹0'}</td>
                         <td className="px-5 py-2 text-right font-mono text-slate-700">{inr(l.invested)}</td>
@@ -647,7 +648,7 @@ export default function OpeningBasisImport() {
                     <div className="flex items-center gap-2 min-w-0">
                       <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${badge}`}>{label}</span>
                       <span className="text-[13px] font-bold text-slate-800 truncate">{a.name}</span>
-                      <span className="text-[11px] text-slate-400 font-mono">{a.dateStr}</span>
+                      <span className="text-[11px] text-slate-400 font-mono">{formatDMY(a.dateStr)}</span>
                     </div>
                     <span className="text-[10px] text-slate-500 font-mono">held {a.heldBefore.toLocaleString('en-IN')}{a.balAfter ? ` → ${a.balAfter.toLocaleString('en-IN')}` : ''}</span>
                   </div>

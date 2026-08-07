@@ -4,6 +4,7 @@ import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
 import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { formatDMY, isDateHeader } from '../lib/dates';
 import { loadOpeningHoldings } from '../lib/openingHoldings';
 import { useVirtualRows } from './ui/useVirtualRows';
 
@@ -496,8 +497,8 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                   Portfolio {portfolio.code}
                   {focus && <> · <strong className="text-indigo-700">{focus.scripName}</strong></>}
                   {reportType === 'holding'
-                    ? ` · as of ${asOf} · ${positions.length} position${positions.length === 1 ? '' : 's'} · ${tradeRows} trades replayed`
-                    : ` · ${fromDate || 'inception'} → ${toDate || 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
+                    ? ` · as of ${formatDMY(asOf)} · ${positions.length} position${positions.length === 1 ? '' : 's'} · ${tradeRows} trades replayed`
+                    : ` · ${fromDate ? formatDMY(fromDate) : 'inception'} → ${toDate ? formatDMY(toDate) : 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
                 </p>
               </div>
               {hasResult && (
@@ -510,7 +511,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             {/* Holding report — structured table */}
             {reportType === 'holding' && (
               positions.length === 0 ? (
-                <p className="text-center text-sm text-slate-500 italic py-16">No open positions as of {asOf}.</p>
+                <p className="text-center text-sm text-slate-500 italic py-16">No open positions as of {formatDMY(asOf)}.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm border-collapse">
@@ -567,10 +568,13 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                         const ri = genVirtual ? genVR.start + li : li;
                         return (
                           <tr key={ri} ref={genVirtual && li === 0 ? genVR.measureRow : undefined} className="hover:bg-slate-50 transition-colors">
-                            {genHeader.map((_, ci) => {
-                              const v = r[ci] ?? '';
+                            {genHeader.map((h, ci) => {
+                              const raw = r[ci] ?? '';
+                              // Cells are untyped sheet strings here, so date columns are
+                              // identified by their HEADER ("Trade Date", "Sale Date", …).
+                              const v = isDateHeader(h) ? formatDMY(raw) : raw;
                               return (
-                                <td key={ci} className={`px-4 py-2 ${looksNumeric(v) ? 'text-right font-mono text-slate-700' : 'text-slate-700'}`}>{v}</td>
+                                <td key={ci} className={`px-4 py-2 ${looksNumeric(raw) && !isDateHeader(h) ? 'text-right font-mono text-slate-700' : 'text-slate-700'}`}>{v}</td>
                               );
                             })}
                           </tr>

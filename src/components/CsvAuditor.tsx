@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Upload, AlertCircle, CheckCircle2, ShieldAlert, Sparkles, FileText, ArrowRightLeft, Info, Download, Check } from 'lucide-react';
 import { ContractNoteResult } from '../types';
 import { runAudit, AuditReport } from '../lib/auditor';
+import { formatDMY } from '../lib/dates';
 import { processFile } from '../lib/parsers';
 
 interface CsvAuditorProps {
@@ -127,7 +128,7 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                     <div>
                       <p className="font-bold text-sm text-slate-800">Zerodha Contract Note</p>
                       <p className="text-xs text-slate-500 font-mono mt-1">
-                        {localCN.trades.length} Trades processed • Trade Date: {localCN.trades[0]?.tradeDate || 'N/A'}
+                        {localCN.trades.length} Trades processed • Trade Date: {formatDMY(localCN.trades[0]?.tradeDate) || 'N/A'}
                       </p>
                     </div>
                   </div>
@@ -267,11 +268,11 @@ export default function CsvAuditor({ parsedContractNote, onImportContractNote }:
                   </div>
                   <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
                     <p className="text-[10px] font-bold text-slate-400 uppercase">Trade Date</p>
-                    <p className="text-sm font-bold text-slate-800 mt-1">{report.tradeDate}</p>
+                    <p className="text-sm font-bold text-slate-800 mt-1">{formatDMY(report.tradeDate)}</p>
                   </div>
                   <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
                     <p className="text-[10px] font-bold text-slate-400 uppercase">Settlement Date (T+1)</p>
-                    <p className="text-sm font-bold text-slate-800 mt-1">{report.settlementDate}</p>
+                    <p className="text-sm font-bold text-slate-800 mt-1">{formatDMY(report.settlementDate)}</p>
                   </div>
                 </div>
                 <div className="mt-4 p-4 bg-indigo-50/55 border border-indigo-100 rounded-xl text-xs text-indigo-950 font-medium">

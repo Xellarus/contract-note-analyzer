@@ -22,6 +22,7 @@ import { mapRecordsToHeader, headerKey, toIsoDate } from './lib/tradeRowSchema';
 import { PORTFOLIOS, portfolioByUcc, portfolioById, sheetIdForId, DEFAULT_PORTFOLIO_ID } from './lib/portfolios';
 import SecurityConfirmModal, { ConfirmSecurity } from './components/SecurityConfirmModal';
 import { toast, confirmDialog } from './components/ui/overlay';
+import { formatDMY } from './lib/dates';
 import { useVirtualRows } from './components/ui/useVirtualRows';
 import CubeLoader from './components/ui/CubeLoader';
 import ThemeToggle from './components/ui/ThemeToggle';
@@ -2997,7 +2998,7 @@ export default function App() {
 
                         return (
                            <tr key={t.id} ref={tradesVirtual && _vi === 0 ? tradeVR.measureRow : undefined} className="hover:bg-slate-50 transition-colors">
-                            <td className="px-6 py-4 text-slate-400 bg-slate-50/10">{t.tradeDate}</td>
+                            <td className="px-6 py-4 text-slate-400 bg-slate-50/10">{formatDMY(t.tradeDate)}</td>
                             <td className="px-6 py-4 font-bold text-slate-800 uppercase not-italic bg-slate-50/10">{t.securityName}</td>
                             <td className="px-6 py-4 text-center bg-slate-50/10">
                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.transactionType === 'Buy' ? 'bg-emerald-100 text-emerald-700 animate-pulse' : 'bg-rose-100 text-rose-700'}`}>{t.transactionType}</span>

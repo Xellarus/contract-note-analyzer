@@ -8,6 +8,7 @@ import { appendManualTrades, ManualTradeLine, ManualAction } from '../lib/manual
 import { loadScripMaster, lookupScrip, normName, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { PORTFOLIOS, sheetIdForId } from '../lib/portfolios';
 import { hasValidGoogleToken } from '../lib/googleAuth';
+import { formatDMY } from '../lib/dates';
 import { toast } from './ui/overlay';
 
 // A Sheets serial (or ISO string) → yyyy-mm-dd, for reading back existing True Entry dates.
@@ -212,7 +213,7 @@ export default function CorpActionsImport() {
                 <div key={p.key} className="grid grid-cols-12 gap-2 items-center rounded-xl border border-slate-150 bg-slate-50/50 px-3 py-2">
                   <div className="col-span-4 min-w-0">
                     <p className="text-[12px] font-bold text-slate-800 truncate" title={p.name}>{p.name}</p>
-                    <p className="text-[10px] text-slate-400">{kindLabel(p.type)} · {p.dateStr}</p>
+                    <p className="text-[10px] text-slate-400">{kindLabel(p.type)} · {formatDMY(p.dateStr)}</p>
                   </div>
                   <div className="col-span-2">
                     <label className="text-[9px] font-bold uppercase text-slate-400 block">{p.type === 'SPLIT' ? 'New : Old' : 'Ratio N : M'}</label>

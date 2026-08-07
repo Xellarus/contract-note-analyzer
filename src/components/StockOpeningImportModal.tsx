@@ -1,6 +1,7 @@
 import { useState, type ChangeEvent } from 'react';
 import { Upload, Loader2, AlertTriangle, X, FileText } from 'lucide-react';
 import { ModalShell, toast } from './ui/overlay';
+import { formatDMY } from '../lib/dates';
 import {
   parseSingleStockTxnCsv, reconstructStockOpening, previewStockOpeningRemoval, applyStockOpeningImport,
   OPENING_CUTOFF_ISO, ParsedStockCsv, OpeningReconstruction, RemovalPreview,
@@ -142,7 +143,7 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
                     <div key={i} className="px-3 py-2 flex items-center justify-between text-[12px]">
                       <div className="flex items-center gap-2">
                         <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded ${l.longTerm ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>{l.longTerm ? 'Long' : 'Short'}</span>
-                        <span className="font-mono text-slate-700">{l.acqDate}</span>
+                        <span className="font-mono text-slate-700">{formatDMY(l.acqDate)}</span>
                       </div>
                       <div className="font-mono text-slate-800">{fmtNum(l.qty)} × {fmtINR(l.costPerShare)} = {fmtINR(l.invested)}</div>
                     </div>
