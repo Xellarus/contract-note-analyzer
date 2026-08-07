@@ -19,9 +19,14 @@ import PriceStatusButton from './PriceStatusButton';
 import SourceBadge from './SourceBadge';
 import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
 import { loadCorporateActions, CORP_ACTIONS_TAB } from '../lib/corporateActions';
+import {
+  loadOpeningCorpActionRows, deleteOpeningCorpActions, restoreOpeningCorpActions,
+  OPENING_CORP_ACTIONS_TAB, SavedCorpAction,
+} from '../lib/openingCorpActions';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
 import { ledgerSide, isSplitType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
+import { formatDMY, formatDMYTime } from '../lib/dates';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
 import StockOpeningImportModal from './StockOpeningImportModal';
@@ -122,6 +127,13 @@ interface Transaction {
   // or Parent whose cost a demerger reduces). Never editable — corp actions are edited in
   // their own tab, so these rows carry no `editSource`.
   corpAction?: { kind: 'MERGER' | 'DEMERGER'; role: 'in' | 'out'; sharesIn: number; cost: number };
+  // A pre-FY26 Bonus / Split / Rights recorded in the "Opening Corp Actions" tab.
+  // DISPLAY ONLY — it is deliberately NOT replayed here. That tab is a memo of the ratios
+  // typed during an opening-basis import; the 31-Mar-2025 Opening Holdings snapshot ALREADY
+  // reflects the action, so applying it again would double-count. It's shown because it was
+  // otherwise invisible in the app: you could delete a scrip's opening lot and never know
+  // these were left behind. `key` is the tab's row key, for the cascade-delete offer.
+  openingAction?: { key: string; type: string; num: number; den: number; price: number };
 }
 
 /**
@@ -131,6 +143,57 @@ interface Transaction {
  * otherwise the sell matches a pre-action cost and the order would silently depend
  * on which row happens to sit higher in the sheet.
  */
+/**
+ * Date of an Opening Corp Actions row, as ISO `yyyy-mm-dd` (what `parseDateStr` handles).
+ *
+ * Read the KEY, not the date cell. `corpActionKey()` builds `scrip#KIND#yyyy-mm-dd`, which is
+ * unambiguous — whereas the Date COLUMN is corrupt for a subset of rows. `saveOpeningCorpActions`
+ * writes it as `dd-mm-yyyy` with `valueInputOption:"USER_ENTERED"`, so Sheets re-reads any date
+ * whose day is ≤ 12 as US `mm-dd` and stores a SWAPPED serial:
+ *   Reliance bonus 07-09-2017 (7 Sep) → serial 42925 = 9 Jul 2017
+ *   Infosys  bonus 04-09-2018 (4 Sep) → serial 43199 = 9 Apr 2018
+ * Rows with a day > 12 ("22-02-2024") can't parse as US, so they survive as plain text — which
+ * is why the column is a mix of correct strings and wrong serials [[date-serials]]. Harmless to
+ * the replay (it matches on `key`), but it would render nonsense dates here.
+ */
+const openingActionDate = (key: string, dateCell: any): string => {
+  const fromKey = (key || '').match(/#(\d{4}-\d{2}-\d{2})$/);
+  if (fromKey) return fromKey[1];
+  const s = (dateCell ?? '').toString().trim();
+  if (!s) return '';
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const n = parseFloat(s);
+    if (n > 20000 && n < 80000) {          // plausible serial (1954-2119), not a stray number
+      return new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000).toISOString().slice(0, 10);
+    }
+    return s;
+  }
+  const m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);   // dd-mm-yyyy → yyyy-mm-dd
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return s;
+};
+
+/**
+ * Checkbox rendered INSIDE the delete-confirm dialog when removing a scrip's last opening
+ * lot while pre-FY26 action memos remain. `confirmDialog` only resolves a boolean, so the
+ * choice is reported through a caller-owned ref; this keeps its own state so it re-renders.
+ */
+const CascadeDeleteToggle = ({ count, onChange }: { count: number; onChange: (v: boolean) => void }) => {
+  const [on, setOn] = useState(true);
+  return (
+    <label className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-violet-50 border border-violet-200 cursor-pointer">
+      <input type="checkbox" checked={on} className="mt-0.5 accent-violet-600"
+        onChange={(e) => { setOn(e.target.checked); onChange(e.target.checked); }} />
+      {/* violet-800, not -900: only 800 has a dark-theme remap [[mono-light-theme]] */}
+      <span className="text-[11px] text-violet-800 leading-relaxed">
+        Also remove the <b>{count}</b> pre-FY26 corporate action{count === 1 ? '' : 's'} recorded for this stock
+        in “{OPENING_CORP_ACTIONS_TAB}”. They only describe how to rebuild this lot, so with the lot gone
+        they are orphaned — and they would re-apply if you ever re-import this stock's statement.
+      </span>
+    </label>
+  );
+};
+
 const txEvOrd = (t: Transaction): number =>
   t.corpAction ? 1 : isSplitType(t.transactionType) ? 1 : ledgerSide(t.transactionType) === 'SELL' ? 2 : 0;
 
@@ -1136,6 +1199,29 @@ export default function Holdings({
         }
       } catch { /* no Corporate Actions tab → nothing to apply */ }
 
+      // Surface the scrip's PRE-FY26 Bonus / Split / Rights from the "Opening Corp Actions"
+      // tab. Display only — see `Transaction.openingAction`. Until now these were invisible
+      // everywhere in the app, so deleting an opening lot silently orphaned them.
+      try {
+        const oca = await loadOpeningCorpActionRows(spreadsheetId);
+        for (const a of oca) {
+          if (!rowMatchesSel('', a.name)) continue;
+          const kind = (a.type || '').toUpperCase();
+          const label = kind === 'SPLIT' ? 'Split' : kind === 'RIGHT' ? 'Rights' : 'Bonus';
+          parsed.push({
+            tradeDate: openingActionDate(a.key, a.date),
+            isin: isin || '',
+            assetName: a.name,
+            transactionType: `${label} ${a.num}:${a.den} (opening)`,
+            quantity: 0,
+            price: a.price || 0,
+            turnover: 0, brokerage: 0, brokeragePerShare: 0, amount: 0,
+            openingAction: { key: a.key, type: kind, num: a.num, den: a.den, price: a.price || 0 },
+            notes: `Pre-FY26 ${label.toLowerCase()} of ${a.num}:${a.den}${a.price ? ` @ ₹${a.price}` : ''}, recorded while building the opening basis. Already reflected in the 31-Mar-2025 opening lots, so it is NOT replayed again here.`,
+          });
+        }
+      } catch { /* no Opening Corp Actions tab → nothing to show */ }
+
       parsed.sort((a, b) => parseDateStr(b.tradeDate) - parseDateStr(a.tradeDate));
 
       // Calculate rolling balance quantities oldest-to-newest
@@ -1145,6 +1231,7 @@ export default function Holdings({
         (parseDateStr(a.tradeDate) - parseDateStr(b.tradeDate)) || (txEvOrd(a) - txEvOrd(b)));
       let currentBal = 0;
       oldestFirst.forEach(t => {
+        if (t.openingAction) { t.balanceQuantity = currentBal; return; }   // display only
         if (t.corpAction) {
           // 'in' adds the shares received; a merger 'out' extinguishes the whole position;
           // a demerger 'out' only moves cost, so the parent's share count is untouched.
@@ -1325,9 +1412,13 @@ export default function Holdings({
   };
 
   // Re-insert a just-deleted row at its original position, then recompute.
-  const undoDelete = async (spreadsheetId: string, tab: string, rowIndex: number, values: any[]) => {
+  const undoDelete = async (
+    spreadsheetId: string, tab: string, rowIndex: number, values: any[],
+    restoreActions: SavedCorpAction[] = [],   // pre-FY26 memos the delete cascaded away
+  ) => {
     try {
       await insertSheetRow(spreadsheetId, tab, rowIndex, values);
+      if (restoreActions.length) await restoreOpeningCorpActions(spreadsheetId, restoreActions);
       toast.success('Delete undone — rebuilding Holdings & capital gains…');
       await rebuildAndRefresh(spreadsheetId);
     } catch (e: any) {
@@ -1347,13 +1438,24 @@ export default function Holdings({
     if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
     const isOpening = t.editSource === 'opening';
     const tab = isOpening ? OPENING_HOLDINGS_TAB : 'True Entry';
+    // Removing a scrip's LAST opening lot orphans its pre-FY26 action memos — invisible
+    // until now, and the reason a deleted-then-re-added lot could pick the actions back up.
+    // Offer to take them along (default on); the choice comes back via a ref, since
+    // confirmDialog only resolves a boolean.
+    const lastOpeningLot = isOpening &&
+      transactions.filter(x => x.editSource === 'opening').length <= 1;
+    const orphanActions = lastOpeningLot ? transactions.filter(x => x.openingAction) : [];
+    const alsoRemove = { current: orphanActions.length > 0 };
     const ok = await confirmDialog({
       title: 'Delete this entry?',
       body: (
         <span>
           Remove this {isOpening ? 'opening lot' : 'ledger row'} for <b>{t.assetName}</b>
-          {' '}({(t.transactionType || 'lot')} · {formatNum(t.quantity)} @ {formatINR(t.price)}, {t.tradeDate}).
+          {' '}({(t.transactionType || 'lot')} · {formatNum(t.quantity)} @ {formatINR(t.price)}, {formatDMY(t.tradeDate)}).
           {' '}Holdings and capital gains will be recomputed — you'll have a moment to undo.
+          {orphanActions.length > 0 && (
+            <CascadeDeleteToggle count={orphanActions.length} onChange={(v) => { alsoRemove.current = v; }} />
+          )}
         </span>
       ),
       danger: true,
@@ -1375,10 +1477,29 @@ export default function Holdings({
       } catch { /* undo simply won't be offered */ }
 
       await deleteSheetRow(spreadsheetId, tab, restoreRow);
+
+      // Cascade the orphaned pre-FY26 action memos, capturing them so Undo restores both.
+      let removedActions: SavedCorpAction[] = [];
+      if (alsoRemove.current && orphanActions.length) {
+        try {
+          const all = await loadOpeningCorpActionRows(spreadsheetId);
+          const wanted = new Set<string>(orphanActions.map(x => x.openingAction!.key));
+          removedActions = all.filter(a => wanted.has(a.key));
+          await deleteOpeningCorpActions(spreadsheetId, [...wanted]);
+        } catch (e: any) {
+          // The lot is already gone; surface this rather than failing the whole delete.
+          toast.error('Lot deleted, but its pre-FY26 actions could not be removed: ' +
+            (e?.result?.error?.message || e?.message || 'error'));
+        }
+      }
+
       setEditingTx(null);
       await rebuildAndRefresh(spreadsheetId);
-      toast.success('Entry deleted.', captured
-        ? { action: { label: 'Undo', onClick: () => { void undoDelete(spreadsheetId, tab, restoreRow, captured!); } }, duration: 8000 }
+      const msg = removedActions.length
+        ? `Entry deleted, along with ${removedActions.length} pre-FY26 corporate action${removedActions.length === 1 ? '' : 's'}.`
+        : 'Entry deleted.';
+      toast.success(msg, captured
+        ? { action: { label: 'Undo', onClick: () => { void undoDelete(spreadsheetId, tab, restoreRow, captured!, removedActions); } }, duration: 8000 }
         : undefined);
     } catch (e: any) {
       toast.error('Delete failed: ' + (e?.result?.error?.message || e?.message || 'error'));
@@ -1628,6 +1749,7 @@ export default function Holdings({
     const total = storedTotal > 0.0001 ? storedTotal : items.reduce((a, b) => a + b.value, 0);
     const isOpening = t?.editSource === 'opening';
     const isCorpAction = !!t?.corpAction;
+    const isOpeningAction = !!t?.openingAction;
     return (
       <ModalShell open={!!expenseTx} onClose={() => setExpenseTx(null)} labelledBy="expense-breakdown-title">
         <div className={`relative z-10 w-full ${hasNote ? 'max-w-lg' : 'max-w-sm'} max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn`}>
@@ -1638,7 +1760,7 @@ export default function Holdings({
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {t.assetName}<span className="mx-1.5 text-slate-300">·</span>
                   <span className="font-semibold text-slate-600">{t.transactionType}</span><span className="mx-1.5 text-slate-300">·</span>
-                  <span className="font-mono">{t.tradeDate}</span>
+                  <span className="font-mono">{formatDMY(t.tradeDate)}</span>
                 </p>
               )}
             </div>
@@ -1647,7 +1769,9 @@ export default function Holdings({
           <div className="overflow-y-auto px-5 py-4">
             <div className={hasNote ? 'grid grid-cols-1 sm:grid-cols-2 gap-4' : ''}>
               <div>
-                {isCorpAction ? (
+                {isOpeningAction ? (
+                  <p className="text-[12px] text-slate-500 py-4 text-center">Pre-FY26 corporate action, recorded in the “{OPENING_CORP_ACTIONS_TAB}” tab. Shown for visibility only — it is already baked into the opening lots, so it is not replayed.</p>
+                ) : isCorpAction ? (
                   <p className="text-[12px] text-slate-500 py-4 text-center">Corporate action — no cash changed hands, so there are no charges. Edit it in the “{CORP_ACTIONS_TAB}” tab.</p>
                 ) : isOpening ? (
                   <p className="text-[12px] text-slate-500 py-4 text-center">Carried-in opening lot — no charges recorded.</p>
@@ -2180,6 +2304,10 @@ export default function Holdings({
     const corpFlows: { date: Date; amount: number }[] = [];
 
     for (const t of chronxs) {
+      // Pre-FY26 bonus/split/rights memo — shown in the Trade Book, never replayed: the
+      // opening lots it produced already carry its effect.
+      if (t.openingAction) continue;
+
       const type = t.transactionType.toUpperCase();
       const actionAmt = t.quantity * t.price;
 
@@ -2282,7 +2410,10 @@ export default function Holdings({
     const filteredInventory = activeInventory.filter(l => l.remainingQty > 0);
     const realisedGain = realisedTrades.reduce((sum, r) => sum + r.gain, 0);
 
-    const hasTransactions = transactions.length > 0;
+    // Display-only rows don't count: a scrip whose ONLY rows are pre-FY26 action memos has
+    // nothing to replay, so it must still fall back to the sheet's quantity rather than
+    // replaying to zero and reading as sold out.
+    const hasTransactions = transactions.some(t => !t.openingAction);
     const holdingQty = hasTransactions ? filteredInventory.reduce((sum, l) => sum + l.remainingQty, 0) : quantity;
     // Trust the ledger's FIFO when we have the transactions — including a legitimate 0
     // (fully sold). Only fall back to the sheet quantity when there is nothing to replay.
@@ -2326,7 +2457,7 @@ export default function Holdings({
     // XIRR calculation with terminal asset value cash flow
     const cashFlows: { date: Date; amount: number }[] = [...corpFlows];
     chronxs.forEach(t => {
-      if (t.corpAction) return;   // already contributed its carrying-value flow above
+      if (t.corpAction || t.openingAction) return;   // no cash: handled above / display only
       const type = t.transactionType.toUpperCase();
       const side = ledgerSide(t.transactionType);   // Bonus/Split are ₹0 → no cash-flow impact
       if (side === "BUY") {
@@ -2358,6 +2489,7 @@ export default function Holdings({
     const filteredTxs = transactions.filter(t =>
       !q ||
       t.tradeDate.toLowerCase().includes(q) ||
+      formatDMY(t.tradeDate).includes(q) ||   // search what's DISPLAYED (dd/mm/yyyy), not just the stored form
       t.transactionType.toLowerCase().includes(q) ||
       t.price.toString().includes(q) ||
       t.quantity.toString().includes(q) ||
@@ -2910,7 +3042,7 @@ export default function Holdings({
                                   ) : null}
                                 </td>
                               )}
-                              <td className="px-6 py-3.5 font-medium text-slate-600">{t.tradeDate}</td>
+                              <td className="px-6 py-3.5 font-medium text-slate-600">{formatDMY(t.tradeDate)}</td>
                               <td className="px-6 py-3.5">
                                 <span className={`inline-block px-2.5 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none ${
                                   isBuy ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
@@ -2923,14 +3055,18 @@ export default function Holdings({
                                 </span>
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">
-                                {/* A demerger leaves the parent's share count alone — it only moves cost. */}
-                                {isDiv || (t.corpAction && t.corpAction.role === 'out') ? (t.corpAction ? '—' : '0') : formatNum(t.quantity)}
+                                {/* A demerger leaves the parent's share count alone — it only moves cost;
+                                    an opening memo carries a ratio, not a quantity. */}
+                                {t.openingAction || (t.corpAction && t.corpAction.role === 'out') ? '—'
+                                  : isDiv ? '0' : formatNum(t.quantity)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">
-                                {isDiv || (t.corpAction && t.corpAction.role === 'out') ? '—' : formatINR(t.price)}
+                                {isDiv || (t.corpAction && t.corpAction.role === 'out') ? '—'
+                                  : t.openingAction ? (t.price > 0 ? formatINR(t.price) : '—')
+                                  : formatINR(t.price)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-850">
-                                {formatINR(t.amount)}
+                                {t.openingAction ? '—' : formatINR(t.amount)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-450">
                                 {t.balanceQuantity !== undefined ? formatNum(t.balanceQuantity) : '—'}
@@ -2995,7 +3131,7 @@ export default function Holdings({
                           return (
                             <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
                               <td className="px-6 py-3.5 font-medium text-slate-600">
-                                {lot.date}
+                                {formatDMY(lot.date)}
                                 {lot.isOpening && (
                                   <span className="ml-2 inline-block px-2 py-0.5 rounded-[6px] text-[9px] font-black tracking-wider select-none bg-indigo-50 text-indigo-700 border border-indigo-200 align-middle">
                                     OPENING
@@ -3059,8 +3195,8 @@ export default function Holdings({
                           const isPos = r.gain >= 0;
                           return (
                             <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
-                              <td className="px-6 py-3.5 font-medium text-slate-650">{r.sellDate}</td>
-                              <td className="px-6 py-3.5 text-slate-500 font-medium">{r.buyDate}</td>
+                              <td className="px-6 py-3.5 font-medium text-slate-650">{formatDMY(r.sellDate)}</td>
+                              <td className="px-6 py-3.5 text-slate-500 font-medium">{formatDMY(r.buyDate)}</td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">{formatNum(r.qtySold)}</td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">{formatINR(r.buyPrice)}</td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">{formatINR(r.sellPrice)}</td>
@@ -3235,7 +3371,7 @@ export default function Holdings({
       {lastPriceUpdate && (
         <div className="flex justify-end">
           <span className="text-[11px] text-slate-400">
-            CMP last updated: <span className="font-semibold text-slate-500">{lastPriceUpdate}</span> IST
+            CMP last updated: <span className="font-semibold text-slate-500">{formatDMYTime(lastPriceUpdate)}</span> IST
           </span>
         </div>
       )}
