@@ -429,6 +429,35 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     throw new Error("Nothing to report — this portfolio has no opening basis and no True Entry trades yet.");
   }
 
+  // Corporate actions (merger / demerger) — the same source the live Holding tab and the
+  // capital-gains engine read, so all three agree. Without them this report is blind to them: a
+  // demerged NewCo never gets a lot at all (so it's simply absent from the output), and the parent
+  // keeps its full pre-demerger cost (so its invested value is overstated).
+  //
+  // Applied AFTER the "nothing to report" guard on purpose — registering the two company names
+  // populates byKey, which would otherwise mask a genuinely empty portfolio.
+  //
+  // Only actions dated ON OR BEFORE the as-of date apply, unlike rebuildHoldingTab, which
+  // computes "now" and so applies every action unconditionally. Event order doesn't matter here:
+  // replayFifoHoldings sorts by (ts, kind) so an action lands between the trades it belongs among.
+  if (useFifo) {
+    const corpActions = (await loadCorporateActions(spreadsheetId).catch(() => [] as CorpAction[]))
+      .filter(ca => (parseDateTs(ca.dateStr) || 0) <= asOfTs);
+    for (const ca of corpActions) {
+      // BOTH sides must be REGISTERED, not just pushed as an event: the aggregation below does
+      // `byKey.get(key)` and skips anything missing, so an unregistered NewCo would get its lot
+      // built correctly and then be silently dropped from the report.
+      resolve("", ca.from); resolve("", ca.to);
+      fifoEvents.push({
+        kind: ca.type === "Merger" ? "MERGER" : "DEMERGER",
+        ts: parseDateTs(ca.dateStr) || 0,
+        fromKey: keyFor("", ca.from),
+        toKey: keyFor("", ca.to),
+        sharesIn: ca.sharesIn, cost: ca.cost,
+      });
+    }
+  }
+
   let totalInvested = 0;
   let positions: HistoricalHolding[];
   if (useFifo) {

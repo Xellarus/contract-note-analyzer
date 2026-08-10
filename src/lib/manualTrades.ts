@@ -3,7 +3,7 @@ import { ensureSheetTabs } from "./sheetTabs";
 import { loadScripMaster, lookupScrip, SCRIP_MASTER_SPREADSHEET_ID, ScripMaster } from "./scripMaster";
 import { rebuildHoldingTab, syncCapitalGains } from "./holdingsCalc";
 import { mapRecordsToHeader, toIsoDate, headerKey } from "./tradeRowSchema";
-import { appendCorporateActionRow, CorpAction } from "./corporateActions";
+import { appendCorporateActionRow, updateCorporateActionRow, CorpAction } from "./corporateActions";
 
 /**
  * Manual trade entry → the same `True Entry` / `Raw Entry` ledger an imported
@@ -201,6 +201,26 @@ export async function appendManualTrades(
  * recompute the Holding tab + capital gains so the action is reflected. Rebuild /
  * capital-gains failures are returned as warnings, not thrown.
  */
+export async function updateCorporateAction(
+  spreadsheetId: string,
+  rowIndex: number,
+  action: CorpAction,
+): Promise<{ holdingWarning?: string; capGainsWarning?: string }> {
+  await updateCorporateActionRow(spreadsheetId, rowIndex, action);
+  // The amount feeds the FIFO cost basis, so BOTH sides move: the parent's remaining lots are
+  // rescaled and the NewCo's lot is repriced. Realised gains on parent shares sold after the
+  // action date change too — hence the capital-gains resync, not just the holding rebuild.
+  let holdingWarning: string | undefined;
+  try { await rebuildHoldingTab(spreadsheetId); } catch (e: any) {
+    holdingWarning = e?.result?.error?.message || e?.message || "Unknown error";
+  }
+  let capGainsWarning: string | undefined;
+  try { await syncCapitalGains(spreadsheetId); } catch (e: any) {
+    capGainsWarning = e?.result?.error?.message || e?.message || "Unknown error";
+  }
+  return { holdingWarning, capGainsWarning };
+}
+
 export async function appendCorporateAction(
   spreadsheetId: string,
   action: CorpAction,

@@ -4,7 +4,7 @@ import {
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
   Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
   ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save, Upload, StickyNote,
-  ArrowUp, ArrowDown
+  ArrowUp, ArrowDown, Lock
 } from 'lucide-react';
 import { PortfolioHolding, ContractNoteResult } from '../types';
 import { useGoogleLogin } from '@react-oauth/google';
@@ -18,7 +18,8 @@ import { refreshYahooPrices, hasYahooWebApp } from '../lib/yahooPrices';
 import PriceStatusButton from './PriceStatusButton';
 import SourceBadge from './SourceBadge';
 import { loadOpeningHoldings, updateOpeningHoldingRow, OPENING_HOLDINGS_TAB } from '../lib/openingHoldings';
-import { loadCorporateActions, CORP_ACTIONS_TAB } from '../lib/corporateActions';
+import { loadCorporateActions, CORP_ACTIONS_TAB, CorpActionType, CorpAction } from '../lib/corporateActions';
+import { updateCorporateAction } from '../lib/manualTrades';
 import {
   loadOpeningCorpActionRows, deleteOpeningCorpActions, restoreOpeningCorpActions,
   OPENING_CORP_ACTIONS_TAB, SavedCorpAction,
@@ -140,7 +141,16 @@ interface Transaction {
   // receives shares + carried cost), 'out' = it's the `from` (Target absorbed by a merger,
   // or Parent whose cost a demerger reduces). Never editable — corp actions are edited in
   // their own tab, so these rows carry no `editSource`.
-  corpAction?: { kind: 'MERGER' | 'DEMERGER'; role: 'in' | 'out'; sharesIn: number; cost: number };
+  /**
+   * Synthetic row derived from the "Corporate Actions" tab. ONE tab row produces TWO of these
+   * — an 'out' leg on the parent's detail page and an 'in' leg on the NewCo's — both reading
+   * the same `cost`, so editing either edits the same `rowIndex`. That shared identity is the
+   * point: a demerger must move exactly as much cost out as it puts in.
+   */
+  corpAction?: {
+    kind: 'MERGER' | 'DEMERGER'; role: 'in' | 'out'; sharesIn: number; cost: number;
+    rowIndex?: number; type?: CorpActionType; from?: string; to?: string; notes?: string;
+  };
   // A pre-FY26 Bonus / Split / Rights recorded in the "Opening Corp Actions" tab.
   // DISPLAY ONLY — it is deliberately NOT replayed here. That tab is a memo of the ratios
   // typed during an opening-basis import; the 31-Mar-2025 Opening Holdings snapshot ALREADY
@@ -446,6 +456,11 @@ export default function Holdings({
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingEdit, setDeletingEdit] = useState(false);
+  // Corporate-action row being edited (its own popup — the inline row editor is built for
+  // qty/price/charges, none of which a merger/demerger has).
+  const [caEditTx, setCaEditTx] = useState<Transaction | null>(null);
+  const [caEditForm, setCaEditForm] = useState({ dateISO: '', sharesIn: '', cost: '', notes: '' });
+  const [caEditSaving, setCaEditSaving] = useState(false);
   // Row that just saved successfully — flashes emerald once, then clears.
   const [justSavedRow, setJustSavedRow] = useState<{ editSource: string; sheetRow: number } | null>(null);
   // Args of the current drill-down, so an edit can re-fetch the same scrip after saving.
@@ -1237,7 +1252,7 @@ export default function Holdings({
             brokerage: 0,
             brokeragePerShare: 0,
             amount: ca.cost,
-            corpAction: { kind, role, sharesIn: ca.sharesIn, cost: ca.cost },
+            corpAction: { kind, role, sharesIn: ca.sharesIn, cost: ca.cost, rowIndex: ca.rowIndex, type: ca.type, from: ca.from, to: ca.to, notes: ca.notes },
             notes: [
               role === 'in'
                 ? `Received ${qtyStr(ca.sharesIn)} shares from ${ca.from} carrying ₹${inr(ca.cost)} of cost.`
@@ -1396,6 +1411,64 @@ export default function Holdings({
     await (gapi.client as any).sheets.spreadsheets.values.update({
       spreadsheetId, range: `True Entry!A${t.sheetRow}`, valueInputOption: 'USER_ENTERED', resource: { values: [row] },
     });
+  };
+
+  /**
+   * dd/mm/yyyy (formatDMY's tested output) → yyyy-mm-dd for <input type="date">. Reusing the
+   * formatter means we don't re-implement its format sniffing; '' when it can't be read, which
+   * the save gate rejects rather than guessing.
+   */
+  const toISODate = (v: any): string => {
+    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(formatDMY(v));
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
+  };
+
+  const openCorpActionEdit = (t: Transaction) => {
+    const ca = t.corpAction;
+    if (!ca || ca.rowIndex == null) return;
+    setCaEditTx(t);
+    setCaEditForm({
+      dateISO: toISODate(t.tradeDate),
+      sharesIn: ca.sharesIn ? String(ca.sharesIn) : '',
+      cost: ca.cost ? String(ca.cost) : '',
+      notes: ca.notes || '',
+    });
+  };
+
+  const saveCorpActionEdit = async () => {
+    const t = caEditTx, ca = t?.corpAction;
+    if (!t || !ca || ca.rowIndex == null) return;
+    const spreadsheetId = sheetIdForId(activePortfolio);
+    if (!spreadsheetId) { toast.error('No spreadsheet for this portfolio.'); return; }
+    const cost = numCell(caEditForm.cost);
+    const sharesIn = numCell(caEditForm.sharesIn);
+    if (!caEditForm.dateISO) { toast.error("Couldn't read this action's date — fix it in the “" + CORP_ACTIONS_TAB + "” tab first."); return; }
+    if (!(cost > 0)) { toast.error('Amount must be greater than zero.'); return; }
+    if (ca.kind === 'DEMERGER' && !(sharesIn > 0)) { toast.error('Shares In must be greater than zero for a demerger.'); return; }
+
+    setCaEditSaving(true);
+    try {
+      // Write the date back as ISO. The tab's readers all accept it, and it removes the
+      // dd-mm/mm-dd ambiguity that makes Sheets re-parse a day <= 12 as a US month under
+      // USER_ENTERED — the bug that corrupted dates in the Opening Corp Actions tab.
+      const next: CorpAction = {
+        dateStr: caEditForm.dateISO,
+        type: (ca.type || (ca.kind === 'MERGER' ? 'Merger' : 'Demerger')) as CorpActionType,
+        from: ca.from || '', to: ca.to || '',
+        sharesIn, cost, notes: caEditForm.notes.trim(),
+      };
+      const res = await updateCorporateAction(spreadsheetId, ca.rowIndex, next);
+      setCaEditTx(null);
+      toast.success('Corporate action updated — rebuilding Holdings & capital gains…');
+      if (res.holdingWarning) toast.error('Holding rebuild failed: ' + res.holdingWarning);
+      if (res.capGainsWarning) toast.error('Capital-gains sync failed: ' + res.capGainsWarning);
+      await fetchSheetHoldings(activePortfolio, true);
+      if (lastTxFetch) await fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+    } catch (e: any) {
+      toast.error('Update failed: ' + (e?.result?.error?.message || e?.message || 'error'));
+    } finally {
+      setCaEditSaving(false);
+    }
   };
 
   const saveEdit = async () => {
@@ -1773,6 +1846,100 @@ export default function Holdings({
     }).format(num);
   };
 
+  /**
+   * Corporate-action edit popup. A merger/demerger has no qty/price/charges, so it gets its own
+   * form rather than the inline row editor: Date, Shares In, Amount, Notes.
+   *
+   * The banner is the important part of the UI. One "Corporate Actions" row drives BOTH legs, so
+   * this same popup opens from the parent's "Demerger Out" row and the NewCo's "Demerger In" row,
+   * and editing either changes both. That's deliberate — a demerger must take exactly as much
+   * cost out of the parent as it puts into the NewCo, so there is one amount, not two.
+   * Rendered alongside editEntryModal in both top-level return branches.
+   */
+  const corpActionEditModal = (() => {
+    const t = caEditTx, ca = t?.corpAction;
+    if (!t || !ca) return null;
+    const isDemerger = ca.kind === 'DEMERGER';
+    const sharesIn = numCell(caEditForm.sharesIn);
+    const cost = numCell(caEditForm.cost);
+    const perShare = sharesIn > 0 ? cost / sharesIn : 0;
+    const fld = 'w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white text-slate-800 outline-none focus:ring-1 focus:ring-indigo-500';
+    const lbl = 'text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1';
+    return (
+      <ModalShell open={!!caEditTx} onClose={() => setCaEditTx(null)} labelledBy="ca-edit-title">
+        <div className="relative z-10 w-full max-w-md max-h-[88vh] flex flex-col bg-white rounded-2xl shadow-2xl animate-fadeIn">
+          <div className="flex items-start justify-between px-5 py-4 border-b border-slate-200">
+            <div>
+              <h3 id="ca-edit-title" className="text-sm font-black text-slate-800 flex items-center gap-2">
+                <Edit2 className="w-4 h-4 text-indigo-600" /> Edit {ca.type || (isDemerger ? 'Demerger' : 'Merger')}
+              </h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                <span className="font-semibold text-slate-600">{ca.from || '—'}</span>
+                <span className="mx-1.5 text-slate-300">→</span>
+                <span className="font-semibold text-slate-600">{ca.to || '—'}</span>
+                <span className="mx-1.5 text-slate-300">·</span>
+                <span className="font-mono">row {ca.rowIndex}</span>
+              </p>
+            </div>
+            <button onClick={() => setCaEditTx(null)} className="p-1.5 hover:bg-slate-100 rounded-lg cursor-pointer"><X className="w-4 h-4 text-slate-500" /></button>
+          </div>
+
+          <div className="overflow-y-auto px-5 py-4 space-y-3">
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200">
+              <Lock className="w-3.5 h-3.5 text-amber-700 mt-0.5 shrink-0" />
+              <p className="text-[11px] text-amber-800 leading-relaxed">
+                This is <strong>one</strong> amount shared by both legs — {isDemerger ? 'cost moved out of' : 'cost carried from'}{' '}
+                <strong>{ca.from || '—'}</strong> and into <strong>{ca.to || '—'}</strong>. Editing it here updates both sides,
+                and re-syncs capital gains for anything sold after this date.
+              </p>
+            </div>
+
+            <div>
+              <label className={lbl}>Action Date</label>
+              <input type="date" className={fld} value={caEditForm.dateISO}
+                onChange={(e) => setCaEditForm(f => ({ ...f, dateISO: e.target.value }))} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={lbl}>Shares In ({ca.to || 'new'})</label>
+                <input type="number" step="any" className={fld} value={caEditForm.sharesIn}
+                  onChange={(e) => setCaEditForm(f => ({ ...f, sharesIn: e.target.value }))} />
+              </div>
+              <div>
+                <label className={lbl}>Amount (₹)</label>
+                <input type="number" step="any" className={fld} value={caEditForm.cost}
+                  onChange={(e) => setCaEditForm(f => ({ ...f, cost: e.target.value }))} />
+              </div>
+            </div>
+
+            <p className="text-[11px] text-slate-500">
+              Cost per share in <span className="font-semibold text-slate-600">{ca.to || 'the new company'}</span>:{' '}
+              <span className="font-mono font-bold text-slate-700">{perShare > 0 ? `₹${perShare.toFixed(4)}` : '—'}</span>
+              {isDemerger && <> · <span className="font-semibold text-slate-600">{ca.from || 'parent'}</span>&apos;s total cost drops by <span className="font-mono font-bold text-slate-700">₹{cost.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></>}
+            </p>
+
+            <div>
+              <label className={lbl}>Notes <span className="font-normal normal-case text-slate-400">(optional)</span></label>
+              <input type="text" className={fld} value={caEditForm.notes}
+                placeholder="e.g. scheme of arrangement ref"
+                onChange={(e) => setCaEditForm(f => ({ ...f, notes: e.target.value }))} />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200">
+            <button onClick={() => setCaEditTx(null)} disabled={caEditSaving}
+              className="px-3 py-1.5 text-[11px] font-bold text-slate-600 hover:text-slate-800 cursor-pointer disabled:opacity-50">Cancel</button>
+            <button onClick={saveCorpActionEdit} disabled={caEditSaving}
+              className="btn-press inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-black uppercase tracking-wider rounded-md bg-indigo-600 text-white hover:bg-indigo-500 cursor-pointer disabled:opacity-50">
+              {caEditSaving ? <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</> : <>Save &amp; Recompute</>}
+            </button>
+          </div>
+        </div>
+      </ModalShell>
+    );
+  })();
+
   // Bifurcated-expenses popup (Trade Book) — clicking a row in view mode shows the
   // individual charges booked against that entry, read straight from its True Entry
   // charge columns (the same source the Edit popup edits). Opening lots carry none.
@@ -1823,7 +1990,19 @@ export default function Holdings({
                 {isOpeningAction ? (
                   <p className="text-[12px] text-slate-500 py-4 text-center">Pre-FY26 corporate action, recorded in the “{OPENING_CORP_ACTIONS_TAB}” tab. Shown for visibility only — it is already baked into the opening lots, so it is not replayed.</p>
                 ) : isCorpAction ? (
-                  <p className="text-[12px] text-slate-500 py-4 text-center">Corporate action — no cash changed hands, so there are no charges. Edit it in the “{CORP_ACTIONS_TAB}” tab.</p>
+                  <div className="py-4 text-center space-y-3">
+                    <p className="text-[12px] text-slate-500">Corporate action — no cash changed hands, so there are no charges.</p>
+                    {t?.corpAction?.rowIndex != null ? (
+                      <button
+                        onClick={() => { const row = t; setExpenseTx(null); openCorpActionEdit(row); }}
+                        className="btn-press inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md text-amber-700 hover:text-white hover:bg-amber-600 border border-amber-300 hover:border-amber-600 transition-colors cursor-pointer"
+                      >
+                        <Edit2 className="w-3 h-3" /> Edit amount &amp; shares
+                      </button>
+                    ) : (
+                      <p className="text-[11px] text-slate-400">Edit it in the “{CORP_ACTIONS_TAB}” tab.</p>
+                    )}
+                  </div>
                 ) : isOpening ? (
                   <p className="text-[12px] text-slate-500 py-4 text-center">Carried-in opening lot — no charges recorded.</p>
                 ) : items.length === 0 ? (
@@ -3157,7 +3336,18 @@ export default function Holdings({
                               </td>
                               {editMode && (
                                 <td className="px-6 py-3.5 text-center">
-                                  {editable ? (
+                                  {t.corpAction?.rowIndex != null ? (
+                                    // Corp actions aren't True Entry rows, so they have no
+                                    // editSource/sheetRow and never satisfied `editable` — they
+                                    // get their own popup, keyed on the Corporate Actions row.
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); openCorpActionEdit(t); }}
+                                      title={`Edit this ${t.corpAction.type || 'corporate action'} — amount, shares and date`}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-amber-700 hover:text-white hover:bg-amber-600 border border-amber-300 hover:border-amber-600 rounded-md transition-colors cursor-pointer"
+                                    >
+                                      <Edit2 className="w-3 h-3" /> Edit
+                                    </button>
+                                  ) : editable ? (
                                     <button
                                       onClick={(e) => { e.stopPropagation(); openEdit(t); }}
                                       title="Edit this entry inline"
@@ -3300,6 +3490,7 @@ export default function Holdings({
         </div>
         {editEntryModal}
         {expenseModal}
+        {corpActionEditModal}
         {/* Add Trade drawer, pre-filled with THIS security. Mounted here too because the
             detail view early-returns before the main return's copy would render. */}
         <AddTradeModal
@@ -3452,6 +3643,7 @@ export default function Holdings({
 
       {editEntryModal}
       {expenseModal}
+      {corpActionEditModal}
       {lastPriceUpdate && (
         <div className="flex justify-end">
           <span className="text-[11px] text-slate-400">

@@ -25,10 +25,39 @@ export interface CorpAction {
   sharesIn: number;    // shares received in `to`
   cost: number;        // see header note
   notes: string;
+  /**
+   * 1-based sheet row this action was read from — the edit target for
+   * updateCorporateActionRow. Absent on actions built in memory (e.g. a new one being
+   * composed in the Add Trade drawer). Identity has to be the ROW, not date+from+to:
+   * two demergers of the same pair on one date are legal and would collide on any
+   * value-derived key.
+   */
+  rowIndex?: number;
 }
 
 const HEADER = ["Date", "Type", "From", "To", "Shares In", "Cost", "Notes"];
 const num = (s: any): number => { const v = parseFloat((s ?? "").toString().replace(/,/g, "").trim()); return isNaN(v) ? 0 : v; };
+
+/**
+ * Resolve the tab's column positions. Shared by the reader and the writer so an edit
+ * always lands in the same cells the reader will read back — the tab tolerates a
+ * reordered header, and hardcoding HEADER order in the writer would corrupt such a sheet.
+ */
+interface CorpCols { date: number; type: number; from: number; to: number; sharesIn: number; cost: number; notes: number; }
+function corpCols(headerRow: any[]): CorpCols {
+  const h = (headerRow || []).map((c: any) => (c ?? "").toString().trim().toLowerCase());
+  const ci = (re: RegExp, fb: number) => { const i = h.findIndex((x: string) => re.test(x)); return i >= 0 ? i : fb; };
+  return {
+    date: ci(/date/, 0), type: ci(/type/, 1), from: ci(/from/, 2), to: ci(/to/, 3),
+    sharesIn: ci(/shares in|qty in|^in$/, 4), cost: ci(/cost/, 5), notes: ci(/note/, 6),
+  };
+}
+
+const colLetter = (i: number): string => {
+  let s = "", n = i;
+  do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+  return s;
+};
 
 /** Read the Corporate Actions tab ([] if absent/empty). Tolerant of column order. */
 export async function loadCorporateActions(spreadsheetId: string): Promise<CorpAction[]> {
@@ -39,10 +68,8 @@ export async function loadCorporateActions(spreadsheetId: string): Promise<CorpA
   const rows: any[][] = res?.result?.values || [];
   if (rows.length < 2) return [];
 
-  const h = rows[0].map((c: any) => (c ?? "").toString().trim().toLowerCase());
-  const ci = (re: RegExp, fb: number) => { const i = h.findIndex((x: string) => re.test(x)); return i >= 0 ? i : fb; };
-  const di = ci(/date/, 0), ti = ci(/type/, 1), fi = ci(/from/, 2), toi = ci(/to/, 3),
-    sii = ci(/shares in|qty in|^in$/, 4), costi = ci(/cost/, 5), ni = ci(/note/, 6);
+  const c = corpCols(rows[0]);
+  const di = c.date, ti = c.type, fi = c.from, toi = c.to, sii = c.sharesIn, costi = c.cost, ni = c.notes;
 
   const out: CorpAction[] = [];
   for (let i = 1; i < rows.length; i++) {
@@ -57,6 +84,7 @@ export async function loadCorporateActions(spreadsheetId: string): Promise<CorpA
       type, from, to,
       sharesIn: num(r[sii]), cost: num(r[costi]),
       notes: (r[ni] || "").toString().trim(),
+      rowIndex: i + 1,   // rows[0] is the header = sheet row 1, so rows[i] is row i+1
     });
   }
   return out;
@@ -74,5 +102,54 @@ export async function appendCorporateActionRow(spreadsheetId: string, a: CorpAct
   const values = empty ? [HEADER, row] : [row];
   await (gapi.client as any).sheets.spreadsheets.values.append({
     spreadsheetId, range: `${CORP_ACTIONS_TAB}!A:Z`, valueInputOption: "USER_ENTERED", resource: { values },
+  });
+}
+
+/**
+ * Overwrite ONE existing corporate-action row in place, targeted by its 1-based sheet row
+ * (`CorpAction.rowIndex` from loadCorporateActions).
+ *
+ * Reads the row first and mutates only the seven mapped cells, so anything the reader
+ * doesn't model — a user's own extra column, a formula off to the right — survives the
+ * edit instead of being blanked.
+ *
+ * Callers must recompute afterwards (rebuildHoldingTab + syncCapitalGains): the amount
+ * feeds the FIFO cost basis, so both the Holding tab and the capital-gains register move.
+ */
+export async function updateCorporateActionRow(
+  spreadsheetId: string,
+  rowIndex: number,
+  a: CorpAction,
+): Promise<void> {
+  if (!(rowIndex >= 2)) throw new Error(`Refusing to write row ${rowIndex} — row 1 is the header.`);
+
+  const hdrRes = await (gapi.client as any).sheets.spreadsheets.values.get({
+    spreadsheetId, range: `${CORP_ACTIONS_TAB}!A1:Z1`,
+  });
+  const headerRow: any[] = hdrRes?.result?.values?.[0] || [];
+  if (!headerRow.length) throw new Error(`"${CORP_ACTIONS_TAB}" tab has no header row to align the edit to.`);
+  const c = corpCols(headerRow);
+
+  const curRes = await (gapi.client as any).sheets.spreadsheets.values.get({
+    spreadsheetId, range: `${CORP_ACTIONS_TAB}!A${rowIndex}:Z${rowIndex}`,
+  });
+  const existing: any[] = curRes?.result?.values?.[0] || [];
+  if (!existing.length) throw new Error(`Row ${rowIndex} of "${CORP_ACTIONS_TAB}" is empty — it may have been deleted or reordered. Reload and try again.`);
+
+  const width = Math.max(existing.length, headerRow.length, c.notes + 1);
+  const out: any[] = Array.from({ length: width }, (_, i) => (existing[i] ?? ""));
+  out[c.date] = a.dateStr;
+  out[c.type] = a.type;
+  out[c.from] = a.from;
+  out[c.to] = a.to;
+  out[c.sharesIn] = a.sharesIn || "";
+  out[c.cost] = a.cost || "";
+  out[c.notes] = a.notes || "";
+
+  await (gapi.client as any).sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${CORP_ACTIONS_TAB}!A${rowIndex}:${colLetter(width - 1)}${rowIndex}`,
+    valueInputOption: "USER_ENTERED",
+    resource: { values: [out] },
   });
 }
