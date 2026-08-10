@@ -45,6 +45,10 @@ var CONFIG = {
   BATCH: 40,                 // symbols per UrlFetchApp.fetchAll call
   MARKET_OPEN_MIN: 9 * 60,   // 09:00 IST
   MARKET_CLOSE_MIN: 16 * 60, // 16:00 IST (a little past close, to catch the settle)
+  // Trigger cadence. Apps Script accepts ONLY 1, 5, 10, 15 or 30 here — anything else throws
+  // when installPriceTrigger() calls everyMinutes(). Changing this does nothing until you re-run
+  // installPriceTrigger(); the interval is baked into the trigger, not read at fire time.
+  TRIGGER_MINUTES: 10,
 };
 
 // Portfolio sheets to read holdings from (mirrors src/lib/portfolios.ts / the auto-import .gs).
@@ -69,6 +73,29 @@ var IGNORE = [
   'Nippon India ETF Nifty 1D Rate Liquid BeES - DAILY - IDCW - Payout',
 ];
 
+// Scrips whose scrip-master symbol resolves on NEITHER feed. Two causes, same cure:
+//   • BSE-only listings the master keys by numeric code — Yahoo maps "<code>.BO" to an
+//     unrelated mutual fund, and TradingView has no "BSE:<code>" ticker at all.
+//   • Companies renamed since the master was written — the feeds list the new name, so
+//     tvResolveByName_'s exact-match guard (correctly) refuses to match the old one.
+// `match` lists the ISIN and every name spelling the scrip is known by — each compared to the
+// held scrip's ISIN or its normalized name (same rule as IGNORE). A hit on ANY of them applies
+// the override, so an ISIN re-issue or a "(India)"/"& Allied"/apostrophe difference between the
+// sheet and the exchange can't silently disable it. These beat the scrip master in symbolsFor_;
+// the master is left alone so the app's screener.in links (which need the numeric BSE code) keep
+// working. Anything still unresolved shows up by name in the Price Status miss list — add that
+// exact spelling here.
+var SYMBOL_OVERRIDES = [
+  { bse: 'MANBRO',   nse: '', match: ['INE348N01042', 'Manbro Industries', 'KD Green Industries'] },
+  { bse: 'JOSTS',    nse: '', match: ['INE636D01041', 'Josts Engineering', "Jost's Engineering",
+                                      'Josts Engineering Company', "Jost's Engineering Company"] },
+  { bse: 'SHRIGANG', nse: '', match: ['INE241V01018', 'Shri Gang Industries',
+                                      'Shri Gang Industries and Allied Products',
+                                      'Shri Gang Industries & Allied Products'] },
+  { bse: 'HIGHENE',  nse: '', match: ['INE783E01023', 'High Energy Batteries',
+                                      'High Energy Batteries (India)'] },
+];
+
 // ════════════════════════════════════════════════════════════════════════════
 // ENTRY POINTS
 // ════════════════════════════════════════════════════════════════════════════
@@ -77,7 +104,9 @@ var IGNORE = [
 function scheduledUpdate() {
   if (!isMarketHours_()) { Logger.log('Outside NSE hours — skipped.'); return; }
   var r = updatePrices();
-  Logger.log('Scheduled price update: ' + r.updated + '/' + r.total + ' priced.');
+  if (r.busy) { Logger.log('Scheduled price update: skipped, previous run still going.'); return; }
+  Logger.log('Scheduled price update: ' + r.updated + '/' + r.total + ' priced' +
+             (r.deferred ? ', ' + r.deferred + ' deferred' : '') + '.');
 }
 
 // Web-app entry — the app's "Refresh Prices" button GETs this. Always fetches (manual intent).
@@ -88,7 +117,18 @@ function doGet(e) {
     return ContentService.createTextOutput(JSON.stringify(probeTradingView_())).setMimeType(ContentService.MimeType.JSON);
   }
   var out;
-  try { var r = updatePrices(); out = { ok: true, updated: r.updated, total: r.total, missed: r.missed, at: r.at }; }
+  // `session` + `staleYahoo` are the staleness gate's diagnostics: which trading session these
+  // prices belong to, and how many scrips Yahoo served a PREVIOUS session for (those get
+  // rerouted to TradingView). Both are the quickest way to confirm a deploy took effect.
+  // `deferred`/`truncated` distinguish "asked, no price" from "never asked" so a budgeted or
+  // rate-limited run doesn't read as a regression. `busy` means another run holds the lock.
+  try {
+    var r = updatePrices();
+    out = r.busy
+      ? { ok: true, busy: true, at: r.at }
+      : { ok: true, updated: r.updated, total: r.total, missed: r.missed, deferred: r.deferred,
+          truncated: r.truncated, session: r.session, staleYahoo: r.staleYahoo, at: r.at };
+  }
   catch (err) { out = { ok: false, error: (err && err.message) ? err.message : String(err) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -97,7 +137,27 @@ function doGet(e) {
 // CORE
 // ════════════════════════════════════════════════════════════════════════════
 
+// Wall-clock budget for one run. Apps Script kills at 6 min (consumer) / 30 min (Workspace);
+// stopping at 4.5 guarantees we always reach writePrices_ and persist what we have, because a
+// limit kill discards the ENTIRE run — every price fetched, gone.
+var RUN_BUDGET_MS = 4.5 * 60 * 1000;
+
+// Serialised entry point. writePrices_ is a read-modify-write over the whole Prices tab, so two
+// overlapping runs make the later writer clobber the earlier one wholesale. That is not
+// hypothetical: the 30-minute trigger can fire mid-run, and a user whose browser appears stuck
+// is very likely to hit "Refresh Prices" again while the first run is still executing.
 function updatePrices() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) {
+    Logger.log('Another run holds the lock — skipped.');
+    return { busy: true, updated: 0, total: 0, missed: 0, deferred: 0, session: '', staleYahoo: 0, at: nowStamp_() };
+  }
+  try { return updatePricesLocked_(); }
+  finally { lock.releaseLock(); }
+}
+
+function updatePricesLocked_() {
+  var deadline = Date.now() + RUN_BUDGET_MS;
   var master = loadMasterSymbols_();
   var held = collectHeldScrips_();          // [{ isin, name }] union across portfolios
   var targets = [];                          // [{ isin, name, primary, fallback }] — primary may be ''
@@ -117,11 +177,13 @@ function updatePrices() {
   // Yahoo runs only over scrips that HAVE an exchange symbol.
   var yahooTargets = targets.filter(function (t) { return t.primary; });
   // Pass 1 — primary exchange (NSE if present, else BSE).
-  var p1 = fetchBatch_(yahooTargets, function (t) { return t.primary; });
+  var p1 = fetchBatch_(yahooTargets, function (t) { return t.primary; }, '');
   for (var a = 0; a < p1.ok.length; a++) { var r = p1.ok[a]; priced[(r.isin || r.name).toUpperCase()] = r; }
-  // Pass 2 — retry the failures that HAVE a fallback exchange (NSE↔BSE).
+  // Pass 2 — retry the failures that HAVE a fallback exchange (NSE↔BSE). Pass 1's session date
+  // carries over: this batch is small and could be entirely stale, which would otherwise let it
+  // calibrate "current" to a previous session and wave everything through.
   var retry = p1.failed.filter(function (t) { return t.fallback; });
-  var p2 = fetchBatch_(retry, function (t) { return t.fallback; });
+  var p2 = fetchBatch_(retry, function (t) { return t.fallback; }, p1.session);
   for (var b = 0; b < p2.ok.length; b++) { var r2 = p2.ok[b]; priced[(r2.isin || r2.name).toUpperCase()] = r2; }
   // TradingView fallback over everything Yahoo couldn't price + the no-symbol scrips. Reachable
   // from Apps Script (screener isn't), precise, one batch POST for the code-based tickers, then
@@ -130,7 +192,7 @@ function updatePrices() {
   // BSE symbol. prevClose is derived from the day's absolute change.
   var yahooFailed = p1.failed.filter(function (t) { return !t.fallback; }).concat(p2.failed);
   var noSymbol = targets.filter(function (t) { return !t.primary; });
-  var tv = fetchTradingViewBatch_(yahooFailed.concat(noSymbol));
+  var tv = fetchTradingViewBatch_(yahooFailed.concat(noSymbol), deadline);
   for (var d = 0; d < tv.ok.length; d++) { var r3 = tv.ok[d]; priced[(r3.isin || r3.name).toUpperCase()] = r3; }
   // Whatever TradingView also couldn't price → a recorded miss (reason notes what we had).
   for (var c = 0; c < tv.failed.length; c++) {
@@ -140,12 +202,30 @@ function updatePrices() {
       : 'No exchange symbol; TradingView name-search found no exact match';
     misses.push({ isin: f.isin, name: f.name, reason: reason });
   }
+  // Not-asked is NOT the same as no-price. These keep their last published price and retry next
+  // run; the reason must say so, because the two reasons above are instructions to a human to go
+  // add a SYMBOL_OVERRIDES entry — and doing that for a scrip nobody looked up is worse than
+  // leaving it alone.
+  var deferredList = tv.deferred || [];
+  for (var g = 0; g < deferredList.length; g++) {
+    var q = deferredList[g];
+    misses.push({ isin: q.isin, name: q.name, reason: 'Not attempted — TradingView refused the request or the run budget ran out; retrying next run' });
+  }
 
   var pricedList = [];
   for (var k in priced) pricedList.push(priced[k]);
-  var wr = writePrices_(pricedList);
+  var wr = writePrices_(pricedList, p1.session);
   writeMisses_(misses);
-  return { updated: wr.updated, total: wr.total, missed: misses.length, at: nowStamp_() };
+  return {
+    updated: wr.updated, total: wr.total, missed: misses.length,
+    // Split out so a budgeted run doesn't read as a regression: `missed` counts both, `deferred`
+    // is the part that is expected to resolve itself on the next run.
+    deferred: deferredList.length,
+    truncated: deferredList.length > 0,
+    session: p1.session,                       // the trading session these prices belong to
+    staleYahoo: (p1.stale || 0) + (p2.stale || 0),   // Yahoo served a previous session → sent to TradingView
+    at: nowStamp_(),
+  };
 }
 
 // Union of currently-held scrips (qty > 0) across every portfolio's "Holding" tab.
@@ -216,7 +296,8 @@ function loadMasterSymbols_() {
 // Held scrip → Yahoo tickers. NSE preferred ("<SYM>.NS"); BSE ("<CODE>.BO") is the fallback
 // exchange (or the primary if there's no NSE symbol). { primary, fallback } — either may be ''.
 function symbolsFor_(master, isin, name) {
-  var e = (isin && master.byIsin[isin]) || master.byName[normName_(name)] || null;
+  var e = symbolOverrideFor_(isin, name) ||
+          (isin && master.byIsin[isin]) || master.byName[normName_(name)] || null;
   if (!e) return { primary: '', fallback: '' };
   var nse = e.nse ? e.nse.toUpperCase().replace(/\s+/g, '') + '.NS' : '';
   var bse = e.bse ? String(e.bse).replace(/\s+/g, '') + '.BO' : '';
@@ -227,8 +308,10 @@ function symbolsFor_(master, isin, name) {
 
 // Fetch last prices from Yahoo's v8 chart endpoint in batches (fetchAll), using pick(t) to
 // choose each target's symbol. Returns { ok:[{isin,name,price,prevClose}], failed:[target,…] }.
-function fetchBatch_(targets, pick) {
-  var ok = [], failed = [];
+// `refSession` (optional) seeds the "newest session" reference so a later, smaller pass can't
+// mistake its own all-stale batch for current. Returns { ok, failed, session, stale }.
+function fetchBatch_(targets, pick, refSession) {
+  var parsed = [], failed = [];
   for (var start = 0; start < targets.length; start += CONFIG.BATCH) {
     var chunk = targets.slice(start, start + CONFIG.BATCH);
     var requests = chunk.map(function (t) {
@@ -246,11 +329,34 @@ function fetchBatch_(targets, pick) {
     catch (e) { Logger.log('fetchAll failed: ' + e); for (var z = 0; z < chunk.length; z++) failed.push(chunk[z]); continue; }
     for (var k = 0; k < responses.length; k++) {
       var pc = parseChart_(responses[k]);
-      if (pc.price > 0) ok.push({ isin: chunk[k].isin, name: chunk[k].name, price: pc.price, prevClose: pc.prevClose });
+      if (pc.price > 0) parsed.push({ t: chunk[k], pc: pc });
       else failed.push(chunk[k]);
     }
   }
-  return { ok: ok, failed: failed };
+
+  // ── Staleness gate ────────────────────────────────────────────────────────
+  // The newest session date seen anywhere in this run IS the current session: liquid names
+  // always carry today's bar, so the batch calibrates itself. No trading-holiday calendar and
+  // no "is it past 15:30 yet" guesswork — on a holiday every symbol shares the same last
+  // session and nothing is rejected. A response with NO date (meta-only fallback) is left
+  // alone: we can't judge it, and dropping it would lose a price we do have.
+  var session = refSession || '';
+  for (var s1 = 0; s1 < parsed.length; s1++) {
+    if (parsed[s1].pc.priceDate > session) session = parsed[s1].pc.priceDate;
+  }
+  var ok = [], stale = 0;
+  for (var s2 = 0; s2 < parsed.length; s2++) {
+    var p = parsed[s2];
+    if (session && p.pc.priceDate && p.pc.priceDate < session) {
+      // Yahoo has no bar for this scrip this session — hand it to TradingView instead of
+      // publishing the previous close as if it were current.
+      failed.push(p.t); stale++;
+      continue;
+    }
+    ok.push({ isin: p.t.isin, name: p.t.name, price: p.pc.price, prevClose: p.pc.prevClose, priceDate: p.pc.priceDate });
+  }
+  if (stale) Logger.log('Yahoo returned a stale session for ' + stale + ' scrip(s); routed to TradingView.');
+  return { ok: ok, failed: failed, session: session, stale: stale };
 }
 
 // Extract the last price AND the previous close from the v8 chart response.
@@ -266,23 +372,36 @@ function fetchBatch_(targets, pick) {
 // So price = last non-null close, prevClose = the one before it. Falls back to meta only when
 // the series is too short (better than nothing, flagged by the comment above).
 // Needs range >= 5d so there are at least two candles to work with.
-// Returns { price, prevClose } (either 0 when absent/invalid).
+// ⚠️ ALSO RETURNS THE CANDLE'S OWN SESSION DATE. Dropping nulls and taking the last surviving
+// close silently yields a PREVIOUS session's price whenever Yahoo has no bar for today — and
+// because that price is > 0, fetchBatch_ counted it as a success, so the TradingView fallback
+// (which has the right number) never ran. Measured 2026-08-07 over the 180 Yahoo-priced held
+// scrips: 22 were wrong by >2% and 19 of those were EXACTLY the previous close — Accent
+// Microcell ₹514.45 (6-Aug close) while it actually traded to ₹543.90, +5.7%, that day.
+// `priceDate` lets fetchBatch_ reject those so they fall through to TradingView.
+// Returns { price, prevClose, priceDate } (0 / '' when absent or invalid).
 function parseChart_(resp) {
-  var none = { price: 0, prevClose: 0 };
+  var none = { price: 0, prevClose: 0, priceDate: '' };
   try {
     if (resp.getResponseCode() !== 200) return none;
     var j = JSON.parse(resp.getContentText());
     var res = j && j.chart && j.chart.result && j.chart.result[0];
     if (!res) return none;
 
-    // Compact the close series, dropping nulls (holidays / not-yet-traded sessions).
+    // Compact the close series, dropping nulls (holidays / not-yet-traded sessions), keeping
+    // each surviving close's timestamp alongside it.
     var raw = (res.indicators && res.indicators.quote && res.indicators.quote[0] &&
                res.indicators.quote[0].close) || [];
-    var closes = [];
-    for (var i = 0; i < raw.length; i++) { var v = raw[i]; if (typeof v === 'number' && isFinite(v) && v > 0) closes.push(v); }
+    var ts = res.timestamp || [];
+    var closes = [], stamps = [];
+    for (var i = 0; i < raw.length; i++) {
+      var v = raw[i];
+      if (typeof v === 'number' && isFinite(v) && v > 0) { closes.push(v); stamps.push(ts[i] || 0); }
+    }
 
     var price = closes.length ? closes[closes.length - 1] : 0;
     var prevClose = closes.length > 1 ? closes[closes.length - 2] : 0;
+    var priceDate = closes.length ? ymdIST_(stamps[stamps.length - 1]) : '';
 
     var meta = res.meta || {};
     if (!(price > 0)) price = num_(meta.regularMarketPrice);           // last resort
@@ -290,8 +409,15 @@ function parseChart_(resp) {
       prevClose = num_(meta.previousClose);
       if (!(prevClose > 0)) prevClose = num_(meta.chartPreviousClose);
     }
-    return { price: price > 0 ? price : 0, prevClose: prevClose > 0 ? prevClose : 0 };
+    return { price: price > 0 ? price : 0, prevClose: prevClose > 0 ? prevClose : 0, priceDate: priceDate };
   } catch (e) { return none; }
+}
+
+// Epoch seconds → "yyyy-MM-dd" of the IST trading session. Yahoo stamps a daily bar at the
+// session open (03:45 UTC = 09:15 IST), so the IST date IS the session date.
+function ymdIST_(epochSec) {
+  if (!(epochSec > 0)) return '';
+  return Utilities.formatDate(new Date(epochSec * 1000), 'Asia/Kolkata', 'yyyy-MM-dd');
 }
 
 function num_(v) { return (typeof v === 'number' && isFinite(v)) ? v : 0; }
@@ -315,12 +441,18 @@ function tvTicker_(yahooSym) {
 
 function stripTags_(s) { return String(s == null ? '' : s).replace(/<[^>]+>/g, ''); }
 
-// Resolve a company name to a TradingView ticker ("BSE:SHREEREF") via symbol_search. Returns
-// ONLY on an exact normalized-name match (normName_) — never a fuzzy guess, so we can't stamp
-// a similarly-named company's price onto a holding. '' when nothing matches exactly.
+// Resolve a company name to a TradingView ticker ("BSE:SHREEREF") via symbol_search. Matches
+// ONLY on an exact normalized name (normName_) — never a fuzzy guess, so we can't stamp a
+// similarly-named company's price onto a holding.
+//
+// Returns { ticker, blocked }. `blocked` means the LOOKUP itself failed (429 past retries,
+// transport error, unparseable body) as opposed to "searched fine, no exact match". The caller
+// needs that distinction: a blocked lookup means every subsequent one this run will very likely
+// be blocked too, so it should stop rather than pay 1.5s of backoff per remaining scrip.
 function tvResolveByName_(name) {
+  var none = { ticker: '', blocked: false };
   var want = normName_(name);
-  if (!want) return '';
+  if (!want) return none;
   var url = 'https://symbol-search.tradingview.com/symbol_search/v3/?text=' + encodeURIComponent(name) +
             '&hl=1&exchange=&lang=en&search_type=stocks&domain=production&sort_by_country=IN';
   var resp = null;
@@ -332,28 +464,38 @@ function tvResolveByName_(name) {
         headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
                    'Origin': 'https://www.tradingview.com', 'Referer': 'https://www.tradingview.com/' },
       });
-    } catch (e) { Logger.log('TV symbol-search failed: ' + e); return ''; }
+    } catch (e) { Logger.log('TV symbol-search failed: ' + e); return { ticker: '', blocked: true }; }
     var code = resp.getResponseCode();
     if (code === 200) break;
     if (code === 429 && attempt === 0) continue;
-    Logger.log('TV symbol-search HTTP ' + code); return '';
+    Logger.log('TV symbol-search HTTP ' + code); return { ticker: '', blocked: true };
   }
-  var j; try { j = JSON.parse(resp.getContentText()); } catch (e2) { return ''; }
-  var syms = j && j.symbols; if (!syms) return '';
+  if (resp.getResponseCode() !== 200) return { ticker: '', blocked: true };   // 429 on both attempts
+  var j; try { j = JSON.parse(resp.getContentText()); } catch (e2) { return { ticker: '', blocked: true }; }
+  var syms = j && j.symbols; if (!syms) return { ticker: '', blocked: true };
   for (var i = 0; i < syms.length; i++) {
     if (normName_(stripTags_(syms[i].description)) === want) {
       var sym = stripTags_(syms[i].symbol), exch = syms[i].exchange || syms[i].prefix || '';
-      if (sym && exch) return exch + ':' + sym;
+      if (sym && exch) return { ticker: exch + ':' + sym, blocked: false };
     }
   }
-  return '';   // no exact-name match → safe miss
+  return none;   // searched fine, no exact-name match → a genuine, permanent miss
 }
 
 // Price the given targets via TradingView. Returns
-// { ok:[{isin,name,price,prevClose,source:'tradingview'}], failed:[target,…] }.
-function fetchTradingViewBatch_(targets) {
-  var ok = [], failed = [];
-  if (!targets.length) return { ok: ok, failed: failed };
+// { ok:[{isin,name,price,prevClose,source:'tradingview'}], failed:[target,…], deferred:[target,…] }.
+//
+// `failed` means asked and answered: TradingView has nothing for this scrip, so it's a real miss
+// worth acting on. `deferred` means NOT ASKED — the request was refused, or the run ran out of
+// budget. The two must stay apart: the Price Status tab tells a human to hand-add a
+// SYMBOL_OVERRIDES entry, and doing that for a scrip nobody actually looked up manufactures
+// overrides for symbols that resolve perfectly well.
+//
+// `deadline` is an epoch-ms wall-clock budget (0/undefined = unlimited). Stage B is the only
+// place in this file whose cost scales 1:1 with scrip count, so it's where the budget bites.
+function fetchTradingViewBatch_(targets, deadline) {
+  var ok = [], failed = [], deferred = [];
+  if (!targets.length) return { ok: ok, failed: failed, deferred: deferred };
 
   // Stage A — code-based tickers (NSE:sym / BSE:code) in one batch.
   var candsByTarget = [], allTickers = [], seen = {};
@@ -364,45 +506,79 @@ function fetchTradingViewBatch_(targets) {
     candsByTarget.push(cands);
     for (var c = 0; c < cands.length; c++) { if (!seen[cands[c]]) { seen[cands[c]] = true; allTickers.push(cands[c]); } }
   }
-  var byTicker = allTickers.length ? tvScan_(allTickers) : {};
+  var scanA = allTickers.length ? tvScan_(allTickers) : { map: {}, hardFail: {} };
 
   var stageB = [];   // stage-A failures (incl. no-symbol scrips) → resolve by name
   for (var j = 0; j < targets.length; j++) {
-    var hit = null;
-    for (var k = 0; k < candsByTarget[j].length; k++) { var h = byTicker[candsByTarget[j][k]]; if (h && h.price > 0) { hit = h; break; } }
-    if (hit) ok.push({ isin: targets[j].isin, name: targets[j].name, price: hit.price, prevClose: hit.prevClose, source: 'tradingview' });
+    var hit = null, unknown = false;
+    for (var k = 0; k < candsByTarget[j].length; k++) {
+      var cd = candsByTarget[j][k], h = scanA.map[cd];
+      if (h && h.price > 0) { hit = h; break; }
+      if (scanA.hardFail[cd]) unknown = true;
+    }
+    if (hit) { ok.push({ isin: targets[j].isin, name: targets[j].name, price: hit.price, prevClose: hit.prevClose, source: 'tradingview' }); continue; }
+    // The scan never answered for this ticker — defer rather than spend a serial name lookup to
+    // rediscover that TradingView is rate-limiting us. THIS is the line that keeps a single
+    // refused POST from turning the whole held set into one-blocking-fetch-per-scrip.
+    if (unknown) deferred.push(targets[j]);
     else stageB.push(targets[j]);
   }
-  if (!stageB.length) return { ok: ok, failed: failed };
+  if (!stageB.length) return { ok: ok, failed: failed, deferred: deferred };
 
   // Stage B — resolve each remaining scrip to a ticker by NAME, then price them in one batch.
-  var resolved = [], rTickers = [], rSeen = {};
+  var CAP = 50;              // new name resolutions per run; the rest roll to the next run
+  var attempted = [];        // [{ t, ticker }] — actually looked up
+  var rTickers = [], rSeen = {}, blocked = 0, stopped = -1;
   for (var m = 0; m < stageB.length; m++) {
-    var rt = tvResolveByName_(stageB[m].name);
-    resolved.push(rt);
-    if (rt && !rSeen[rt]) { rSeen[rt] = true; rTickers.push(rt); }
+    if (blocked >= 2 || attempted.length >= CAP || (deadline && Date.now() > deadline)) { stopped = m; break; }
+    var r = tvResolveByName_(stageB[m].name);
+    // Two consecutive refusals mean the rate limit won't clear inside this run; continuing costs
+    // 1.5s of backoff per remaining scrip and resolves nothing.
+    if (r.blocked) { blocked++; deferred.push(stageB[m]); continue; }
+    blocked = 0;
+    attempted.push({ t: stageB[m], ticker: r.ticker });
+    if (r.ticker && !rSeen[r.ticker]) { rSeen[r.ticker] = true; rTickers.push(r.ticker); }
   }
-  var byTicker2 = rTickers.length ? tvScan_(rTickers) : {};
-  for (var n = 0; n < stageB.length; n++) {
-    var rt2 = resolved[n], hit2 = rt2 ? byTicker2[rt2] : null;
-    if (hit2 && hit2.price > 0) ok.push({ isin: stageB[n].isin, name: stageB[n].name, price: hit2.price, prevClose: hit2.prevClose, source: 'tradingview' });
-    else failed.push(stageB[n]);
+  if (stopped >= 0) {
+    Logger.log('Stage B stopped at ' + stopped + '/' + stageB.length + ' (cap/deadline/rate-limit)');
+    for (var d = stopped; d < stageB.length; d++) deferred.push(stageB[d]);
   }
-  return { ok: ok, failed: failed };
+
+  var scanB = rTickers.length ? tvScan_(rTickers) : { map: {}, hardFail: {} };
+  for (var n = 0; n < attempted.length; n++) {
+    var tk = attempted[n].ticker, hit2 = tk ? scanB.map[tk] : null;
+    if (hit2 && hit2.price > 0) ok.push({ isin: attempted[n].t.isin, name: attempted[n].t.name, price: hit2.price, prevClose: hit2.prevClose, source: 'tradingview' });
+    else if (tk && scanB.hardFail[tk]) deferred.push(attempted[n].t);   // resolved, but pricing it was refused
+    else failed.push(attempted[n].t);
+  }
+  return { ok: ok, failed: failed, deferred: deferred };
 }
 
 // POST tickers to TradingView's scanner (columns: last close + day's absolute change).
-// Returns { ticker: {price, prevClose} } (empty map if the request(s) failed).
+// Returns { map: {ticker: {price, prevClose}}, hardFail: {ticker: true} }.
+//
+// The hardFail set is the important half. A chunk whose REQUEST died (transport error, or
+// rate-limited past tvFetch_'s retries) tells us nothing about its tickers — but an absent
+// entry in `map` is indistinguishable from "TradingView has no data for this symbol". Callers
+// that conflate the two promote the whole chunk into the serial name-resolution path, which is
+// how one rate-limited POST turns a 40-second run into a 10-minute one. Keeping them separate
+// lets the caller say "we don't know" and defer, instead of paying N blocking fetches to
+// re-learn that TradingView is currently refusing us.
 function tvScan_(tickers) {
-  var out = {};
+  var out = {}, hardFail = {};
   var CH = 200;   // keep each POST modest
   for (var start = 0; start < tickers.length; start += CH) {
     var chunk = tickers.slice(start, start + CH);
     var payload = JSON.stringify({ symbols: { tickers: chunk, query: { types: [] } }, columns: ['close', 'change_abs'] });
     var resp = tvFetch_(payload);
-    if (!resp) continue;   // transport error / rate-limited past retries → those scrips stay misses
-    var j; try { j = JSON.parse(resp.getContentText()); } catch (e2) { continue; }
-    var data = j && j.data; if (!data) continue;
+    var j = null, bad = !resp;
+    if (!bad) { try { j = JSON.parse(resp.getContentText()); } catch (e2) { bad = true; } }
+    if (!bad && !(j && j.data)) bad = true;
+    if (bad) {
+      for (var b = 0; b < chunk.length; b++) hardFail[chunk[b]] = true;
+      continue;
+    }
+    var data = j.data;
     for (var i = 0; i < data.length; i++) {
       var row = data[i];
       if (!row || !row.s || !row.d) continue;
@@ -418,7 +594,7 @@ function tvScan_(tickers) {
       out[row.s] = { price: close, prevClose: prevClose };
     }
   }
-  return out;
+  return { map: out, hardFail: hardFail };
 }
 
 // POST to TradingView's scanner with browser-like headers + a short backoff on HTTP 429
@@ -453,11 +629,13 @@ function tvFetch_(payload) {
 // Merge into the "Prices" tab — latest wins per ISIN, others preserved. "Previous Price" is
 // Yahoo's official previous-day close (falls back to the daily roll if Yahoo omits it).
 // Same schema as the app's saveScripPrices().
-function writePrices_(incoming) {
+// `session` = the trading session this run's prices belong to ("yyyy-MM-dd"); used for any
+// source that doesn't carry its own date (TradingView is live, so its close IS this session).
+function writePrices_(incoming, session) {
   var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
   var sh = ss.getSheetByName(CONFIG.PRICES_TAB) || ss.insertSheet(CONFIG.PRICES_TAB);
   var existing = sh.getDataRange().getValues();
-  var map = {};   // ISIN → {isin,name,price,updated,previousPrice}
+  var map = {};   // ISIN → {isin,name,price,updated,previousPrice,source,priceDate}
   var startRow = (existing.length > 0 && /isin|name|price|updated/i.test(existing[0].join(','))) ? 1 : 0;
   for (var i = startRow; i < existing.length; i++) {
     var r = existing[i]; if (!r) continue;
@@ -467,6 +645,7 @@ function writePrices_(incoming) {
       isin: isin, name: String(r[1] == null ? '' : r[1]).trim(),
       price: toNum_(r[2]), updated: String(r[3] == null ? '' : r[3]).trim(), previousPrice: toNum_(r[4]),
       source: String(r[5] == null ? '' : r[5]).trim().toLowerCase(),
+      priceDate: String(r[6] == null ? '' : r[6]).trim(),
     };
   }
   var stamp = nowStamp_();
@@ -483,17 +662,27 @@ function writePrices_(incoming) {
     // legacy roll: the first refresh on a NEW calendar day moves the last price into "Previous Price".
     if (s.prevClose > 0) previousPrice = s.prevClose;
     else if (prev && prev.price > 0 && prev.updated && prev.updated.split(',')[0].trim() !== today) previousPrice = prev.price;
-    map[code] = { isin: code, name: s.name || (prev && prev.name) || '', price: s.price, updated: stamp, previousPrice: previousPrice, source: s.source || 'yahoo' };
+    // The session the PRICE belongs to, which is not the same thing as when we fetched it —
+    // that distinction is the whole point of this column. Yahoo carries its candle's own date;
+    // TradingView is a live quote, so it belongs to this run's session.
+    var priceDate = s.priceDate || session || '';
+    map[code] = { isin: code, name: s.name || (prev && prev.name) || '', price: s.price, updated: stamp, previousPrice: previousPrice, source: s.source || 'yahoo', priceDate: priceDate };
     updated++;
   }
-  var rows = [['ISIN', 'Name', 'Current Price', 'Updated', 'Previous Price', 'Source']];
+  var rows = [['ISIN', 'Name', 'Current Price', 'Updated', 'Previous Price', 'Source', 'Price Date']];
   var keys = Object.keys(map).sort(function (a, b) { return (map[a].name || '').localeCompare(map[b].name || ''); });
   for (var q = 0; q < keys.length; q++) {
     var p = map[keys[q]];
-    rows.push([p.isin, p.name, p.price, p.updated, p.previousPrice || '', p.source || '']);
+    rows.push([p.isin, p.name, p.price, p.updated, p.previousPrice || '', p.source || '', p.priceDate || '']);
   }
-  sh.clearContents();
-  sh.getRange(1, 1, rows.length, 6).setValues(rows);
+  // Write the new block FIRST, then clear only the surplus rows beneath it. clearContents()
+  // before setValues leaves a window in which the tab is EMPTY — a throw or an execution-limit
+  // kill landing there destroys all ~350 rows, including scrips this run never touched. flush()
+  // pushes the values out before we start deleting anything.
+  sh.getRange(1, 1, rows.length, 7).setValues(rows);
+  SpreadsheetApp.flush();
+  var lastRow = sh.getLastRow(), lastCol = Math.max(7, sh.getLastColumn());
+  if (lastRow > rows.length) sh.getRange(rows.length + 1, 1, lastRow - rows.length, lastCol).clearContent();
   return { updated: updated, total: keys.length };
 }
 
@@ -506,8 +695,10 @@ function writeMisses_(misses) {
   var list = (misses || []).slice().sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
   var rows = [['ISIN', 'Name', 'Reason', 'Checked']];
   for (var i = 0; i < list.length; i++) rows.push([list[i].isin || '', list[i].name || '', list[i].reason || '', stamp]);
-  sh.clearContents();
-  sh.getRange(1, 1, rows.length, 4).setValues(rows);
+  sh.getRange(1, 1, rows.length, 4).setValues(rows);   // write-then-trim, as in writePrices_
+  SpreadsheetApp.flush();
+  var lastRow = sh.getLastRow(), lastCol = Math.max(4, sh.getLastColumn());
+  if (lastRow > rows.length) sh.getRange(rows.length + 1, 1, lastRow - rows.length, lastCol).clearContent();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -557,6 +748,28 @@ function isIgnored_(isin, name) {
   return false;
 }
 
+// SYMBOL_OVERRIDES entry for a held scrip — any one of the entry's `match` values hitting the
+// scrip's ISIN or its normalized name wins (same rule as isIgnored_). Returns a scrip-master-
+// shaped { nse, bse } so symbolsFor_ can use it interchangeably with a real master entry.
+// null when nothing is overridden.
+function symbolOverrideFor_(isin, name) {
+  var wantIsin = String(isin == null ? '' : isin).trim().toUpperCase();
+  var wantName = normName_(name);
+  for (var i = 0; i < SYMBOL_OVERRIDES.length; i++) {
+    var o = SYMBOL_OVERRIDES[i];
+    var keys = (o && o.match) || [];
+    if (typeof keys === 'string') keys = [keys];
+    for (var k = 0; k < keys.length; k++) {
+      var g = String(keys[k] == null ? '' : keys[k]).trim();
+      if (!g) continue;
+      if ((wantIsin && g.toUpperCase() === wantIsin) || (wantName && normName_(g) === wantName)) {
+        return { nse: o.nse || '', bse: o.bse || '', name: name };
+      }
+    }
+  }
+  return null;
+}
+
 function indexOfAny_(hdr, names) {
   for (var n = 0; n < names.length; n++) { var i = hdr.indexOf(names[n]); if (i >= 0) return i; }
   return -1;
@@ -567,9 +780,21 @@ function toNum_(v) { var n = parseFloat(String(v == null ? '' : v).replace(/,/g,
 // ════════════════════════════════════════════════════════════════════════════
 // SETUP — run once from the editor.
 // ════════════════════════════════════════════════════════════════════════════
+// Re-run this after changing CONFIG.TRIGGER_MINUTES — it deletes the existing trigger and
+// recreates it, which is the only way the new interval takes effect.
+//
+// Quota arithmetic at 10-minute cadence: the trigger fires 144×/day, but isMarketHours_ returns
+// immediately outside 09:00–16:00 IST and at weekends, so only ~42 runs do real work. Each does
+// roughly 180–190 UrlFetch calls (fetchAll bills every request in the batch individually), so
+// ~7,800/day against a 20,000 consumer / 100,000 Workspace daily limit — comfortable.
+// The binding constraint is TOTAL TRIGGER RUNTIME, not fetches: 42 runs × ~40s ≈ 28 min/day,
+// against 90 min/day on a consumer account (6 h on Workspace). That headroom depends on runs
+// staying fast — if they degraded to the full RUN_BUDGET_MS, 42 × 4.5 min would blow a consumer
+// quota. Overlapping runs can't pile up: updatePrices takes a script lock and a late run that
+// finds one held returns busy without doing any work.
 function installPriceTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scheduledUpdate') ScriptApp.deleteTrigger(t); });
-  ScriptApp.newTrigger('scheduledUpdate').timeBased().everyMinutes(30).create();
+  ScriptApp.newTrigger('scheduledUpdate').timeBased().everyMinutes(CONFIG.TRIGGER_MINUTES).create();
 }
 function removePriceTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scheduledUpdate') ScriptApp.deleteTrigger(t); });

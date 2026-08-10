@@ -13,7 +13,16 @@
  */
 export const YAHOO_PRICE_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbzbujUJK9i8zo4wT6M83gLeixFl3GTDcVRncjse3orIPqSAuOgJs1HceHkliOyHzNGN/exec";
 
-export interface YahooRefreshResult { ok: boolean; updated?: number; total?: number; missed?: number; error?: string; }
+/**
+ * `missed` counts every scrip without a fresh price; `deferred` is the subset that was never
+ * actually looked up (the price feed refused the request, or the run's time budget ran out) and
+ * is expected to resolve itself on the next run — so it must NOT be reported as "unpriced".
+ * `busy` means another run already holds the script lock and this call did nothing.
+ */
+export interface YahooRefreshResult {
+  ok: boolean; updated?: number; total?: number; missed?: number;
+  deferred?: number; truncated?: boolean; busy?: boolean; error?: string;
+}
 
 /** True when a web-app URL has been configured (so the button can offer a LIVE refresh). */
 export const hasYahooWebApp = (): boolean => YAHOO_PRICE_WEBAPP_URL.trim().length > 0;

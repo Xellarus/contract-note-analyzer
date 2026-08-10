@@ -315,7 +315,18 @@ export default function Holdings({
       if (hasYahooWebApp()) {
         try {
           const r = await refreshYahooPrices();
-          toast.success(`Prices updated — ${r.updated ?? 0} of ${r.total ?? 0} scrips` + (r.missed ? ` · ${r.missed} unpriced` : ''));
+          if (r.busy) {
+            toast.info('A price update is already running — give it a moment and try again.');
+          } else {
+            // `missed` includes the deferred ones; report them apart so a rate-limited run doesn't
+            // look like a pile of genuinely unpriceable scrips.
+            const unpriced = Math.max(0, (r.missed ?? 0) - (r.deferred ?? 0));
+            toast.success(
+              `Prices updated — ${r.updated ?? 0} of ${r.total ?? 0} scrips`
+              + (unpriced ? ` · ${unpriced} unpriced` : '')
+              + (r.deferred ? ` · ${r.deferred} deferred to next run` : '')
+            );
+          }
         } catch (e: any) {
           toast.error('Live price refresh failed: ' + (e?.message || 'error') + ' — showing last saved prices');
         }
@@ -372,20 +383,28 @@ export default function Holdings({
   // When each scrip's shown price was captured (Prices tab "Updated") — drives the settled-
   // close colouring on the CMP. Indexed exactly like priceMap.
   const priceUpdatedMap = useMemo(() => {
-    const m = new Map<string, string>();
+    const m = new Map<string, { updated: string; priceDate: string }>();
     for (const p of priceRows) {
       if (!(p.price > 0) || !p.updated) continue;
-      if (p.isin) m.set('isin:' + p.isin.toUpperCase(), p.updated);
-      if (p.name) m.set('name:' + normName(p.name), p.updated);
-      if (scrip) { const e = lookupScrip(scrip, p.isin, p.name).entry; if (e) m.set('key:' + e.key, p.updated); }
+      const v = { updated: p.updated, priceDate: p.priceDate || '' };
+      if (p.isin) m.set('isin:' + p.isin.toUpperCase(), v);
+      if (p.name) m.set('name:' + normName(p.name), v);
+      if (scrip) { const e = lookupScrip(scrip, p.isin, p.name).entry; if (e) m.set('key:' + e.key, v); }
     }
     return m;
   }, [priceRows, scrip]);
-  const getCmpUpdated = (isin: string, name: string): string | undefined => {
+  const getCmpStamp = (isin: string, name: string): { updated: string; priceDate: string } | undefined => {
     if (scrip) { const e = lookupScrip(scrip, isin, name).entry; if (e) { const v = priceUpdatedMap.get('key:' + e.key); if (v) return v; } }
     if (isin) { const v = priceUpdatedMap.get('isin:' + isin.toUpperCase()); if (v) return v; }
     return priceUpdatedMap.get('name:' + normName(name));
   };
+  // The newest session present anywhere in the Prices tab IS the current one — the same
+  // self-calibrating trick the updater uses, so no trading-holiday calendar is needed here
+  // either. '' on sheets written before the "Price Date" column existed.
+  const currentSession = useMemo(
+    () => priceRows.reduce((mx, p) => (p.priceDate && p.priceDate > mx ? p.priceDate : mx), ''),
+    [priceRows],
+  );
 
   // Previous-day price baseline (Prices tab "Previous Price" column, rolled once per
   // day at import) → powers "today's gain". Indexed the same way as the CMP map.
@@ -2298,8 +2317,17 @@ export default function Holdings({
     // Is the price on screen the session's settled close? Only meaningful for a real fetched
     // CMP — a typed override or the avg-cost fallback has no capture time behind it.
     const showingRealCmp = customCmp === null && realDetailCmp !== undefined;
-    const detailCmpUpdated = showingRealCmp ? getCmpUpdated(isin, name) : undefined;
-    const cmpIsSettled = !!detailCmpUpdated && isSettledClose(detailCmpUpdated);
+    const detailStamp = showingRealCmp ? getCmpStamp(isin, name) : undefined;
+    const detailCmpUpdated = detailStamp?.updated;
+    // GOLD means "this IS the session's closing price". Two conditions, and the second one is
+    // the important one: the price must belong to the CURRENT session, not merely have been
+    // fetched after the bell. Without it, a scrip Yahoo has gone blind on renders gold every
+    // evening while showing the previous close (Accent Microcell, 7-Aug-2026).
+    // Sheets predating the "Price Date" column have no session to check, so they fall back to
+    // the stamp alone rather than losing the indicator entirely.
+    const priceIsCurrentSession = !currentSession || detailStamp?.priceDate === currentSession;
+    const cmpIsStale = !!currentSession && !!detailStamp?.priceDate && detailStamp.priceDate < currentSession;
+    const cmpIsSettled = !!detailCmpUpdated && isSettledClose(detailCmpUpdated) && priceIsCurrentSession;
     const detailPrevClose = getRealPrevCmp(isin, name);
     const dayChangePct = !usingAvgCostFallback && detailPrevClose && detailPrevClose > 0
       ? ((cmpPrice - detailPrevClose) / detailPrevClose) * 100
@@ -2690,16 +2718,24 @@ export default function Holdings({
                       the 15:30 bell) — brass on paper, gold on the terminal. Only ever for a real
                       fetched CMP: a manual override or an avg-cost fallback stays default ink. */}
                   <span
-                    className={`text-sm font-black font-mono ${cmpIsSettled ? 'cmp-settled' : 'text-slate-850'}`}
+                    className={`text-sm font-black font-mono ${cmpIsSettled ? 'cmp-settled' : cmpIsStale ? 'text-slate-500' : 'text-slate-850'}`}
                     id="cmp-display-price"
-                    title={cmpIsSettled
-                      ? `Closing price — captured ${formatDMYTime(detailCmpUpdated)} IST, after the 15:30 bell.`
-                      : detailCmpUpdated
-                        ? `Live price — captured ${formatDMYTime(detailCmpUpdated)} IST, before the 15:30 close.`
-                        : undefined}
+                    title={cmpIsStale
+                      ? `STALE — this is the ${formatDMY(detailStamp?.priceDate)} close. The feed had no price for ${formatDMY(currentSession)}, though we checked at ${formatDMYTime(detailCmpUpdated)} IST.`
+                      : cmpIsSettled
+                        ? `Closing price for ${formatDMY(detailStamp?.priceDate || currentSession)} — captured ${formatDMYTime(detailCmpUpdated)} IST, after the 15:30 bell.`
+                        : detailCmpUpdated
+                          ? `Live price — captured ${formatDMYTime(detailCmpUpdated)} IST, before the 15:30 close.`
+                          : undefined}
                   >
                     {formatINR(cmpPrice)}
                   </span>
+                  {cmpIsStale && (
+                    <span className="px-1.5 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-[9px] font-black uppercase tracking-wider"
+                      title={`No price for ${formatDMY(currentSession)} — showing the ${formatDMY(detailStamp?.priceDate)} close.`}>
+                      Stale
+                    </span>
+                  )}
                   {/* Day's move vs yesterday's close — hidden when there's no previous close to
                       compare against (never the gain-over-cost, which lives in the return stat). */}
                   {dayChangePct !== undefined && (

@@ -17,7 +17,20 @@ const PRICE_STATUS_TAB = "Price Status";
 /** Which feed last set a scrip's price. Drives the source badge on the stock page. */
 export type PriceSource = "yahoo" | "screener" | "tradingview" | "";
 
-export interface ScripPrice { isin: string; name: string; price: number; updated: string; previousPrice?: number; source?: PriceSource; except?: boolean; }
+export interface ScripPrice {
+  isin: string; name: string; price: number;
+  /** When we FETCHED (IST stamp). NOT the date the price belongs to — see `priceDate`. */
+  updated: string;
+  previousPrice?: number; source?: PriceSource; except?: boolean;
+  /**
+   * The trading session this PRICE belongs to ("yyyy-MM-dd"), written by YahooPriceUpdate.gs.
+   * Distinct from `updated`: a scrip Yahoo has gone blind on gets fetched every 30 minutes
+   * (fresh `updated`) while still carrying a previous session's close. Only `priceDate` can
+   * tell the two apart, so it — not the fetch stamp — decides whether a price is current.
+   * Empty on sheets written before that column existed.
+   */
+  priceDate?: string;
+}
 
 // Optional "Price Exception" column in the Prices tab. NOTE: the Prices tab is a POOR home for
 // this flag — YahooPriceUpdate.gs `writePrices_` does clearContents() + writes 6 columns every
@@ -29,6 +42,12 @@ export interface ScripPrice { isin: string; name: string; price: number; updated
 const DEFAULT_EXCEPT_COL = 7;
 let _exceptCol = DEFAULT_EXCEPT_COL;
 let _exceptColSeen = false;
+
+// "Price Date" (column G) — written by YahooPriceUpdate.gs alongside the price. Detected on
+// read and re-emitted on rewrite, so the app's own writers can't blank a column the .gs owns.
+const DEFAULT_PRICE_DATE_COL = 6;
+let _priceDateCol = DEFAULT_PRICE_DATE_COL;
+let _priceDateColSeen = false;
 
 /** Truthy marker in an exception cell: x / yes / y / true / 1 / a check mark. */
 const isExceptCell = (v: any): boolean => /^(x|yes|y|true|1|✓|✔)$/i.test((v ?? "").toString().trim());
@@ -54,6 +73,12 @@ const istStamp = (): string =>
 // SAME formatter as the stamp so today's key and a stored stamp's date compare exactly.
 const stampDate = (s: string): string => (s || "").split(",")[0].trim();
 
+/** Today in IST as "yyyy-MM-dd" — the session format the .gs writes to "Price Date". */
+const isoToday = (): string => {
+  const d = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
 function parsePriceVals(vals: any[][]): ScripPrice[] {
   const rows: ScripPrice[] = [];
   const header = vals[0] || [];
@@ -63,6 +88,10 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const idx = header.findIndex((h: any) => /exception|exclud/i.test((h ?? "").toString()));
     _exceptColSeen = idx >= 0;
     _exceptCol = idx >= 0 ? idx : DEFAULT_EXCEPT_COL;
+    // "Price Date" (G). Matched on the header rather than a fixed index so the column can move.
+    const pd = header.findIndex((h: any) => /price date|session/i.test((h ?? "").toString()));
+    _priceDateColSeen = pd >= 0;
+    _priceDateCol = pd >= 0 ? pd : DEFAULT_PRICE_DATE_COL;
   }
   for (let i = start; i < vals.length; i++) {
     const r = vals[i]; if (!r) continue;
@@ -73,10 +102,11 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const previousPrice = toNum(r[4]);
     const source = (r[5] || "").toString().trim().toLowerCase() as PriceSource;
     const except = isExceptCell(r[_exceptCol]);
+    const priceDate = (r[_priceDateCol] ?? "").toString().trim();
     // An excepted scrip is kept even without a parseable price — the flag is the point.
     if ((!isin && !name) || (isNaN(price) && !except)) continue;
     const src: PriceSource = source === "yahoo" || source === "screener" || source === "tradingview" ? source : "";
-    rows.push({ isin, name, price: isNaN(price) ? 0 : price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: src, except });
+    rows.push({ isin, name, price: isNaN(price) ? 0 : price, updated, previousPrice: isNaN(previousPrice) ? 0 : previousPrice, source: src, except, priceDate });
   }
   return rows;
 }
@@ -163,17 +193,23 @@ export async function saveScripPrices(
     }
     // A manual screener import stamps source 'screener'; rows it doesn't touch (e.g. Yahoo-fed)
     // keep their existing source.
-    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice, source: "screener", except: prev?.except });
+    // A manual screener import is a scrape taken now, so its session is today. (If the user
+    // pastes a days-old export it will claim today — same assumption `updated` already makes.)
+    map.set(isin, { isin, name: s.name || prev?.name || "", price: s.price, updated: stamp, previousPrice, source: "screener", except: prev?.except, priceDate: isoToday() });
     updated++;
   }
 
   // Preserve a "Price Exception" column ONLY if the sheet already has one (never invent it):
   // pad each row out to its index so this full-tab rewrite doesn't clear or shift the marks.
   const head: any[] = ["ISIN", "Name", "Current Price", "Updated", "Previous Price", "Source"];
+  // "Price Date" belongs to YahooPriceUpdate.gs; re-emit it (same preserve-never-invent rule as
+  // the exception column) so this full-tab rewrite can't blank the .gs's staleness signal.
+  if (_priceDateColSeen) { while (head.length <= _priceDateCol) head.push(""); head[_priceDateCol] = "Price Date"; }
   if (_exceptColSeen) { while (head.length <= _exceptCol) head.push(""); head[_exceptCol] = "Price Exception"; }
   const rows: any[][] = [head];
   for (const p of [...map.values()].sort((a, b) => a.name.localeCompare(b.name))) {
     const row: any[] = [p.isin, p.name, p.price, p.updated, p.previousPrice || "", p.source || ""];
+    if (_priceDateColSeen) { while (row.length <= _priceDateCol) row.push(""); row[_priceDateCol] = p.priceDate || ""; }
     if (_exceptColSeen) { while (row.length <= _exceptCol) row.push(""); row[_exceptCol] = p.except ? "x" : ""; }
     rows.push(row);
   }
