@@ -32,6 +32,13 @@ html, body, #root, * {
 .row-flash-save { animation: flashSave 1.3s ease-out; }
 @media (prefers-reduced-motion: reduce) { .row-flash-save { animation: none; } }
 
+/* Trade Book rows whose running balance has gone negative (more sold than held). Written as an
+   explicit rule per theme rather than a Tailwind bg-rose-50/NN utility: an opacity-suffixed light
+   background that isn't remapped in dark washes out the ivory text [[mono-light-theme]]. Kept
+   faint so it reads as a flag, not an error state — the rose Bal Qty figure carries the detail. */
+.row-neg-bal { background-color: rgba(190, 18, 60, 0.055); }
+.dark .row-neg-bal { background-color: rgba(244, 63, 94, 0.13); }
+
 /* ── Motion system ──────────────────────────────────────────────────────────
    A small, consistent set of entrance/reveal animations. Durations stay short
    and easings soft (a gentle overshoot-free ease-out) so a data-dense tool

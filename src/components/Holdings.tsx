@@ -2664,8 +2664,26 @@ export default function Holdings({
     // (Previously `holdingQty > 0 ? holdingQty : quantity` treated a sold-out 0 as "no
     // data" and showed the stale sheet qty — e.g. Onesource: 860 opening − 860 sold = 0
     // but the card displayed 860 with a phantom unrealised gain.)
-    const finalHoldingQty = hasTransactions ? holdingQty : quantity;
-    const soldOut = hasTransactions && finalHoldingQty <= 1e-4;
+    // Surviving FIFO lots can never go below zero — a sell with no lot left to consume is simply
+    // dropped — so `holdingQty` floors at 0 and an OVERSELL (more sold than ever held, a data
+    // error) reads as "sold out". The Holding tab doesn't hide it: replayFifoHoldings tracks
+    // netQty independently of the lots for exactly this reason, and the holdings list flags
+    // `h.quantity < 0` as a discrepancy. That's why the list showed -1,00,000 while this card
+    // showed 0.
+    //
+    // Rather than re-derive a second net quantity here (which could drift), take the one the
+    // Trade Book already computed: the rolling `balanceQuantity` on the LAST chronological row.
+    // Same ordering rule (buys → actions → sells), so the card and the Bal Qty column agree by
+    // construction.
+    const ledgerNetQty = (() => {
+      const rows = chronxs.filter(t => !t.openingAction && t.balanceQuantity !== undefined);
+      return rows.length ? (rows[rows.length - 1].balanceQuantity as number) : null;
+    })();
+    const finalHoldingQty = hasTransactions ? (ledgerNetQty ?? holdingQty) : quantity;
+    // An oversold position is NOT sold out — it's broken. Keep them apart so a negative doesn't
+    // silently take the sold-out path (which zeroes cost and reads as a clean exit).
+    const detailDiscrepancy = hasTransactions && finalHoldingQty < -1e-4;
+    const soldOut = hasTransactions && Math.abs(finalHoldingQty) <= 1e-4;
 
     const finalAvgBuyPrice = hasTransactions && filteredInventory.reduce((sum, l) => sum + l.remainingQty, 0) > 0
       ? (filteredInventory.reduce((sum, l) => sum + (l.remainingQty * l.price), 0) / filteredInventory.reduce((sum, l) => sum + l.remainingQty, 0))
@@ -2683,8 +2701,11 @@ export default function Holdings({
     // A sold-out position has no cost / market value / unrealised gain left.
     const holdingTabInSync = !isLocal && investedValue > 0 &&
       Math.abs(quantity - finalHoldingQty) <= Math.max(1, finalHoldingQty * 0.01);
-    const displayInvestedValue = soldOut ? 0 : (holdingTabInSync ? investedValue : finalInvestedValue);
-    const displayAvgBuyPrice = soldOut ? 0 : (holdingTabInSync ? avgBuyPrice : finalAvgBuyPrice);
+    // A discrepancy has no meaningful cost basis (the lots ran out before the sells did), so it
+    // is not valued — mirroring the holdings list, which zeroes cost/CMP/gain on `discrepancy`
+    // rather than multiplying a negative quantity into a fake number.
+    const displayInvestedValue = (soldOut || detailDiscrepancy) ? 0 : (holdingTabInSync ? investedValue : finalInvestedValue);
+    const displayAvgBuyPrice = (soldOut || detailDiscrepancy) ? 0 : (holdingTabInSync ? avgBuyPrice : finalAvgBuyPrice);
 
     // Real long-term quantity: lots acquired MORE than 12 months before today (the listed-
     // equity LTCG threshold), summed from the live inventory — replaces the old hardcoded
@@ -2694,7 +2715,7 @@ export default function Holdings({
     const longTermQty = hasTransactions
       ? filteredInventory.reduce((s, l) => { const ts = parseDateStr(l.date); return s + (ts > 0 && ts < ltCutoffTs ? l.remainingQty : 0); }, 0)
       : 0;
-    const totalHoldingValue = soldOut ? 0 : finalHoldingQty * cmpPrice;
+    const totalHoldingValue = (soldOut || detailDiscrepancy) ? 0 : finalHoldingQty * cmpPrice;
     const unrealizedGain = totalHoldingValue - displayInvestedValue;
     const totalGain = unrealizedGain + realisedGain + totalDividend;
 
@@ -2715,8 +2736,11 @@ export default function Holdings({
     });
     cashFlows.push({ date: new Date(), amount: totalHoldingValue });
 
-    const computedXirr = calculateXIRR(cashFlows);
-    const xirrValue = computedXirr !== 0 ? computedXirr : changePct;
+    // Oversold ⇒ the sell cash-flows have no matching buys, so XIRR solves against a phantom
+    // return (Kisan Mouldings: one ₹26 L outflow against ₹72 L of inflows → 178,366%). Refuse to
+    // publish a number rather than print a meaningless one.
+    const computedXirr = detailDiscrepancy ? 0 : calculateXIRR(cashFlows);
+    const xirrValue = detailDiscrepancy ? 0 : (computedXirr !== 0 ? computedXirr : changePct);
 
     // Portfolio profile markers
     const _p = portfolioById(activePortfolio);
@@ -2944,10 +2968,18 @@ export default function Holdings({
               <div className="space-y-1">
                 <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider block">Holding Qty.</span>
                 <div className="flex items-center gap-1 flex-wrap">
-                  <span className="text-base font-black font-mono text-slate-800" id="detail-holding-qty">
+                  <span className={`text-base font-black font-mono ${detailDiscrepancy ? 'text-rose-600' : 'text-slate-800'}`} id="detail-holding-qty">
                     {formatNum(finalHoldingQty)}
                   </span>
-                  {hasTransactions && (
+                  {detailDiscrepancy && (
+                    <span
+                      className="bg-rose-50 border border-rose-200 text-rose-700 font-bold text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5"
+                      title="Impossible negative quantity — more shares sold than were ever held. Cost, market value, gain and XIRR are withheld until the ledger is corrected."
+                    >
+                      <AlertTriangle className="w-2.5 h-2.5" /> Discrepancy
+                    </span>
+                  )}
+                  {hasTransactions && !detailDiscrepancy && (
                     <span className="bg-sky-50 border border-sky-100 text-sky-700 font-bold text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5" title="Long-term shares — lots held more than 12 months (listed-equity LTCG threshold)">
                       <ShieldCheck className="w-2.5 h-2.5" /> LT {formatNum(longTermQty)}
                     </span>
@@ -3288,7 +3320,10 @@ export default function Holdings({
                                 ? (editable ? () => { selecting ? toggleRowSel(t) : openEdit(t); } : undefined)
                                 : () => setExpenseTx(t)}
                               title={editMode ? (selecting ? 'Click to select / deselect this row' : undefined) : 'View expense breakdown'}
-                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${rowSelected ? 'bg-indigo-50/60' : ''} ${(editMode && editable) || !editMode ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
+                              // Rose tint from the row where the running balance first goes
+                              // negative onward — the eye lands straight on where the ledger broke,
+                              // instead of having to scan the Bal Qty column for a minus sign.
+                              className={`transition-colors ${justSaved ? 'row-flash-save' : ''} ${rowSelected ? 'bg-indigo-50/60' : (t.balanceQuantity !== undefined && t.balanceQuantity < -1e-9 ? 'row-neg-bal' : '')} ${(editMode && editable) || !editMode ? 'cursor-pointer hover:bg-indigo-50/40' : 'hover:bg-slate-50/50'}`}>
                               {editMode && (
                                 // The whole cell is the hit target — clicking just beside the box used to
                                 // fall through to the row and open the single-entry editor.
@@ -3331,7 +3366,8 @@ export default function Holdings({
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-850">
                                 {t.openingAction ? '—' : formatINR(t.amount)}
                               </td>
-                              <td className="px-6 py-3.5 text-right font-mono text-slate-450">
+                              <td className={`px-6 py-3.5 text-right font-mono ${t.balanceQuantity !== undefined && t.balanceQuantity < -1e-9 ? 'text-rose-600 font-bold' : 'text-slate-450'}`}
+                                title={t.balanceQuantity !== undefined && t.balanceQuantity < -1e-9 ? 'Negative balance — more shares sold than held at this point in the ledger' : undefined}>
                                 {t.balanceQuantity !== undefined ? formatNum(t.balanceQuantity) : '—'}
                               </td>
                               {editMode && (
