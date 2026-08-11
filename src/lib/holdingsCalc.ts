@@ -441,16 +441,25 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
   // computes "now" and so applies every action unconditionally. Event order doesn't matter here:
   // replayFifoHoldings sorts by (ts, kind) so an action lands between the trades it belongs among.
   if (useFifo) {
-    const corpActions = (await loadCorporateActions(spreadsheetId).catch(() => [] as CorpAction[]))
-      .filter(ca => (parseDateTs(ca.dateStr) || 0) <= asOfTs);
+    const corpActions = await loadCorporateActions(spreadsheetId).catch(() => [] as CorpAction[]);
     for (const ca of corpActions) {
+      // An UNDATEABLE action can't be placed in the timeline. Skip it, matching
+      // generateTrxRegister's handling — the alternative (ts = 0) would spin the NewCo lot off at
+      // the epoch, which both back-dates its holding-period clock and makes this report disagree
+      // with the Capital Gains report about whether the action happened at all.
+      const caTs = parseDateTs(ca.dateStr);
+      if (!caTs) {
+        console.warn(`Historical Holding Report: skipping corporate action with unparseable date "${ca.dateStr}" (${ca.type} ${ca.from} → ${ca.to}).`);
+        continue;
+      }
+      if (caTs > asOfTs) continue;   // hasn't happened yet as of the report date
       // BOTH sides must be REGISTERED, not just pushed as an event: the aggregation below does
       // `byKey.get(key)` and skips anything missing, so an unregistered NewCo would get its lot
       // built correctly and then be silently dropped from the report.
       resolve("", ca.from); resolve("", ca.to);
       fifoEvents.push({
         kind: ca.type === "Merger" ? "MERGER" : "DEMERGER",
-        ts: parseDateTs(ca.dateStr) || 0,
+        ts: caTs,
         fromKey: keyFor("", ca.from),
         toKey: keyFor("", ca.to),
         sharesIn: ca.sharesIn, cost: ca.cost,
