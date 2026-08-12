@@ -39,6 +39,18 @@ html, body, #root, * {
 .row-neg-bal { background-color: rgba(190, 18, 60, 0.055); }
 .dark .row-neg-bal { background-color: rgba(244, 63, 94, 0.13); }
 
+/* Corporate-action badges (dashboard "actions to record" card). Written as explicit per-theme
+   rules rather than Tailwind utilities: the dark theme only remaps the literal classes it knows
+   about, and sky-100/300/800 have no remap at all — a Split badge would have rendered as a pale
+   blue block on the dark parchment. Green = you gain shares, blue = the share count subdivides,
+   amber = we can't tell which from the ratio alone. */
+.ca-badge-bonus  { background-color: #e7f2e4; border-color: #b9d6b0; color: #2f6b3c; }
+.ca-badge-split  { background-color: #e6eef7; border-color: #b3ccdf; color: #2b5b80; }
+.ca-badge-either { background-color: #f6e9c8; border-color: #d9be7e; color: #7a5a12; }
+.dark .ca-badge-bonus  { background-color: rgba(79, 197, 132, 0.16); border-color: rgba(79, 197, 132, 0.42); color: #6fd79b; }
+.dark .ca-badge-split  { background-color: rgba(96, 165, 250, 0.16); border-color: rgba(96, 165, 250, 0.42); color: #8ec5ff; }
+.dark .ca-badge-either { background-color: rgba(240, 198, 90, 0.16); border-color: rgba(240, 198, 90, 0.44); color: #f0c65a; }
+
 /* ── Motion system ──────────────────────────────────────────────────────────
    A small, consistent set of entrance/reveal animations. Durations stay short
    and easings soft (a gentle overshoot-free ease-out) so a data-dense tool

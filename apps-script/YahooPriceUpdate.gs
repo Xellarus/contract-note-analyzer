@@ -41,6 +41,8 @@ var CONFIG = {
   SCRIP_MASTER_ID: '1gLDfmeQe0wzfHWfaBReVk-6KsAvy1ZamfQAMrIVWsHg',   // holds the "Prices" tab
   PRICES_TAB: 'Prices',
   STATUS_TAB: 'Price Status',   // scrips this run couldn't price → read by the app's "unpriced" button
+  ALERTS_TAB: 'Corp Action Alerts',   // detected splits/bonuses → read by the app's dashboard card
+  ALERT_LOOKBACK_DAYS: 550,           // how far back to report an action (~18 months)
   HOLDING_TAB: 'Holding',
   BATCH: 40,                 // symbols per UrlFetchApp.fetchAll call
   MARKET_OPEN_MIN: 9 * 60,   // 09:00 IST
@@ -115,6 +117,18 @@ function doGet(e) {
   // update), so it can be tested straight from the URL. Remove once TradingView is decided.
   if (e && e.parameter && e.parameter.probe === 'tv') {
     return ContentService.createTextOutput(JSON.stringify(probeTradingView_())).setMimeType(ContentService.MimeType.JSON);
+  }
+  // /exec?scan=corp → run the split/bonus scan on demand and rewrite the "Corp Action Alerts"
+  // tab, without opening the editor. Safe to hit repeatedly: writeCorpActionAlerts_ merges by
+  // ISIN+ex-date and preserves the Status column, so dismissals survive.
+  if (e && e.parameter && e.parameter.probe === 'nse') {
+    return ContentService.createTextOutput(JSON.stringify(probeNse_())).setMimeType(ContentService.MimeType.JSON);
+  }
+  if (e && e.parameter && e.parameter.scan === 'corp') {
+    var s;
+    try { s = scanCorpActions(); s.ok = true; }
+    catch (e2) { s = { ok: false, error: (e2 && e2.message) ? e2.message : String(e2) }; }
+    return ContentService.createTextOutput(JSON.stringify(s)).setMimeType(ContentService.MimeType.JSON);
   }
   var out;
   // `session` + `staleYahoo` are the staleness gate's diagnostics: which trading session these
@@ -705,6 +719,358 @@ function writeMisses_(misses) {
 // HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════════
+// CORPORATE-ACTION SCAN — splits & bonuses on held scrips
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Yahoo's chart endpoint carries corporate actions under `events` when asked, and it represents
+// an Indian BONUS as a split: a 1:1 bonus shows up as "2:1" (RELIANCE 28-Oct-2024), a face-value
+// split as its own ratio (IRCTC 5:1, 28-Oct-2021). So one free parameter on an endpoint we
+// already call covers both action types we care about.
+//
+// Two things drive the shape of this:
+//   • Events are only returned for the REQUESTED RANGE, and the price passes use range=5d — far
+//     too short. But events are independent of the candle interval, so range=2y&interval=1mo
+//     gets two years of actions for ~24 candles per scrip instead of ~500.
+//   • The feed HAS FALSE POSITIVES. Manbro shows 1:10 (2018) and 10:1 (2026) — an exact inverse
+//     pair that looks like Yahoo correcting a bad entry rather than two real events. So this
+//     writes ADVISORY rows for a human to confirm, and the Status column is preserved across
+//     runs so a dismissal sticks.
+//
+// Deliberately NOT detected: rights issues, mergers, demergers. They have no price-ratio
+// representation, so this feed can't see them; they stay manual.
+function scanCorpActions() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) { Logger.log('Corp-action scan: another run holds the lock — skipped.'); return { busy: true }; }
+  try { return scanCorpActionsLocked_(true); }
+  finally { lock.releaseLock(); }
+}
+
+// DAILY pass — BSE only. BSE states the action type outright but returns ONLY today's ex-dates,
+// so it has to be checked every day or a bonus falling on a skipped day is lost from the one
+// source that can name it. One instant request, no Yahoo sweep.
+function scanCorpActionsBse() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) { Logger.log('BSE corp-action pass: another run holds the lock — skipped.'); return { busy: true }; }
+  try { return scanCorpActionsLocked_(false); }
+  finally { lock.releaseLock(); }
+}
+
+function scanCorpActionsLocked_(includeYahoo) {
+  var master = loadMasterSymbols_();
+  var held = collectHeldScrips_();
+  var targets = [], seen = {};
+  for (var i = 0; i < held.length; i++) {
+    var h = held[i];
+    var key = (h.isin || h.name).toUpperCase();
+    if (seen[key]) continue; seen[key] = true;
+    if (isIgnored_(h.isin, h.name)) continue;
+    var syms = symbolsFor_(master, h.isin, h.name);
+    if (!syms.primary) continue;   // no symbol → nothing to ask Yahoo about
+    targets.push({ isin: h.isin, name: h.name, sym: syms.primary });
+  }
+
+  var cutoff = Date.now() - CONFIG.ALERT_LOOKBACK_DAYS * 86400000;
+  var found = [];
+
+  // BSE first: it's one instant call and its `Purpose` is authoritative on bonus-vs-split, which
+  // Yahoo can never be. Matched to holdings on scrip code / ticker / name — BSE returns no ISIN.
+  var bseHits = 0;
+  var bse = bseCorpActions_();
+  if (bse) {
+    for (var b = 0; b < bse.length; b++) {
+      var row = bse[b];
+      if (!row.kind || !row.exDate) continue;                 // dividends, AGMs → not ours
+      var t = matchBseToTarget_(row, targets, master);
+      if (!t) continue;                                        // not a scrip we hold
+      found.push({ isin: t.isin, name: t.name, type: row.kind, ratio: '', exDate: row.exDate, source: 'bse' });
+      bseHits++;
+    }
+  } else {
+    Logger.log('BSE unreachable this run — Yahoo detection only.');
+  }
+
+  if (!includeYahoo) {
+    var wrB = writeCorpActionAlerts_(found, false);
+    Logger.log('BSE corp-action pass: ' + bseHits + ' held bonus/split today; ' + wrB.added + ' new, ' + wrB.updated + ' relabelled.');
+    return { mode: 'bse', scanned: targets.length, found: found.length, added: wrB.added, updated: wrB.updated, at: nowStamp_() };
+  }
+
+  for (var start = 0; start < targets.length; start += CONFIG.BATCH) {
+    var chunk = targets.slice(start, start + CONFIG.BATCH);
+    var requests = chunk.map(function (t) {
+      return {
+        url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(t.sym) +
+             '?interval=1mo&range=2y&events=split',
+        muteHttpExceptions: true, followRedirects: true,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      };
+    });
+    var responses;
+    try { responses = UrlFetchApp.fetchAll(requests); }
+    catch (e) { Logger.log('Corp-action fetchAll failed: ' + e); continue; }
+    for (var k = 0; k < responses.length; k++) {
+      var evs = parseSplitEvents_(responses[k]);
+      for (var e = 0; e < evs.length; e++) {
+        if (evs[e].ts * 1000 < cutoff) continue;
+        found.push({ isin: chunk[k].isin, name: chunk[k].name, type: '', ratio: evs[e].ratio, exDate: ymdIST_(evs[e].ts), source: 'yahoo' });
+      }
+    }
+  }
+  var wrote = writeCorpActionAlerts_(found, true);
+  Logger.log('Corp-action scan: ' + found.length + ' event(s) across ' + targets.length + ' scrips; ' +
+             wrote.added + ' new, ' + wrote.kept + ' carried over, ' + wrote.updated + ' relabelled by BSE.');
+  return { scanned: targets.length, found: found.length, bseHits: bseHits,
+           added: wrote.added, kept: wrote.kept, updated: wrote.updated, at: nowStamp_() };
+}
+
+// BSE identifies a company by numeric scrip code + BSE ticker, never ISIN — so map it onto a held
+// target via the scrip master's BSE cell (which may hold "TICKER | CODE"), then the ticker, then a
+// normalised name. Returns null when we don't hold it.
+function matchBseToTarget_(row, targets, master) {
+  var code = String(row.code || '').trim();
+  var sec = String(row.name || '').trim().toUpperCase();
+  var wantName = normName_(row.name);
+  for (var i = 0; i < targets.length; i++) {
+    var t = targets[i];
+    var e = (t.isin && master.byIsin[t.isin]) || master.byName[normName_(t.name)] || null;
+    if (e && e.bse) {
+      var parts = String(e.bse).toUpperCase().split(/[|,]/);
+      for (var q = 0; q < parts.length; q++) {
+        var pv = parts[q].trim();
+        if (!pv) continue;
+        if (code && pv === code) return t;
+        if (sec && pv === sec) return t;
+      }
+    }
+    if (wantName && normName_(t.name) === wantName) return t;
+  }
+  return null;
+}
+
+// Pull the split/bonus events out of a chart response → [{ ts, ratio }].
+function parseSplitEvents_(resp) {
+  var out = [];
+  try {
+    if (resp.getResponseCode() !== 200) return out;
+    var j = JSON.parse(resp.getContentText());
+    var res = j && j.chart && j.chart.result && j.chart.result[0];
+    var sp = res && res.events && res.events.splits;
+    if (!sp) return out;
+    for (var k in sp) {
+      var s = sp[k]; if (!s) continue;
+      var ts = num_(s.date); if (!(ts > 0)) continue;
+      // Prefer the numerator/denominator pair; splitRatio is a display string ("2:1").
+      var n = num_(s.numerator), d = num_(s.denominator);
+      var ratio = (n > 0 && d > 0) ? (n + ':' + d) : String(s.splitRatio || '').trim();
+      if (!ratio) continue;
+      out.push({ ts: ts, ratio: ratio });
+    }
+  } catch (e) { /* malformed → no events */ }
+  return out;
+}
+
+// Merge detected actions into the alerts tab, keyed ISIN+ex-date. Existing Status values are
+// PRESERVED: a dismissal must survive every later scan, or a false positive nags forever.
+function writeCorpActionAlerts_(found, fullSweep) {
+  var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
+  var sh = ss.getSheetByName(CONFIG.ALERTS_TAB) || ss.insertSheet(CONFIG.ALERTS_TAB);
+  var existing = sh.getDataRange().getValues();
+
+  // UPSERT, not replace. The two sources run on different cadences (Yahoo weekly, BSE daily), so a
+  // BSE-only pass must never delete the Yahoo rows it didn't look for. Keyed ISIN|ex-date.
+  var byKey = {}, order = [];
+  var hdr0 = existing.length ? existing[0].join(',') : '';
+  var startRow = /isin|ex-date|ratio/i.test(hdr0) ? 1 : 0;
+  // Tolerate the ORIGINAL 6-column layout (ISIN|Name|Ratio|Ex-Date|Detected|Status) as well as the
+  // current 8-column one, so an existing tab migrates in place instead of being mangled.
+  var legacy = startRow === 1 && !/type/i.test(hdr0);
+  for (var i = startRow; i < existing.length; i++) {
+    var r = existing[i]; if (!r) continue;
+    var isin = String(r[0] == null ? '' : r[0]).trim().toUpperCase();
+    var ex = ymdCell_(legacy ? r[3] : r[4]);
+    if (!isin || !ex) continue;
+    var k = isin + '|' + ex;
+    if (byKey[k]) continue;
+    byKey[k] = legacy
+      ? { isin: isin, name: String(r[1] || '').trim(), type: '', ratio: String(r[2] || '').trim(),
+          exDate: ex, source: 'yahoo', detected: String(r[4] || '').trim(), status: String(r[5] || '').trim() }
+      : { isin: isin, name: String(r[1] || '').trim(), type: String(r[2] || '').trim(), ratio: String(r[3] || '').trim(),
+          exDate: ex, source: String(r[5] || '').trim(), detected: String(r[6] || '').trim(), status: String(r[7] || '').trim() };
+    order.push(k);
+  }
+
+  var stamp = nowStamp_();
+  var addedN = 0, keptN = 0, updN = 0;
+  for (var f = 0; f < found.length; f++) {
+    var it = found[f];
+    var key = (it.isin || '').toUpperCase() + '|' + it.exDate;
+    var cur = byKey[key];
+    if (!cur) {
+      byKey[key] = { isin: it.isin, name: it.name, type: it.type || '', ratio: it.ratio || '',
+                     exDate: it.exDate, source: it.source, detected: stamp, status: '' };
+      order.push(key); addedN++;
+      continue;
+    }
+    keptN++;
+    // BSE names the type; Yahoo can only guess it. So a BSE hit RELABELS an existing Yahoo row,
+    // but never the reverse — and Detected/Status are always preserved so a dismissal survives.
+    if (it.source === 'bse' && it.type && cur.type !== it.type) { cur.type = it.type; cur.source = 'bse'; updN++; }
+    else if (!cur.type && it.type) { cur.type = it.type; updN++; }
+    if (!cur.ratio && it.ratio) cur.ratio = it.ratio;
+    if (!cur.name && it.name) cur.name = it.name;
+  }
+
+  // Only a FULL sweep may prune: it alone knows the complete current picture. Drop anything past
+  // the lookback window so the tab doesn't grow without bound.
+  var cutoffIso = ymdIST_(Math.floor((Date.now() - CONFIG.ALERT_LOOKBACK_DAYS * 86400000) / 1000));
+  var keys = [];
+  for (var o = 0; o < order.length; o++) {
+    var kk = order[o], v = byKey[kk];
+    if (!v) continue;
+    if (fullSweep && cutoffIso && v.exDate < cutoffIso) continue;
+    keys.push(kk);
+  }
+  keys.sort(function (x, y) { return byKey[x].exDate < byKey[y].exDate ? 1 : byKey[x].exDate > byKey[y].exDate ? -1 : 0; });
+
+  var rows = [['ISIN', 'Name', 'Type', 'Ratio', 'Ex-Date', 'Source', 'Detected', 'Status']];
+  for (var z = 0; z < keys.length; z++) {
+    var v2 = byKey[keys[z]];
+    rows.push([v2.isin, v2.name, v2.type, v2.ratio, v2.exDate, v2.source, v2.detected, v2.status]);
+  }
+  // Ex-Date + Detected pinned to TEXT before writing: setValues parses a date-looking string just
+  // as typing would, which turned "2026-03-25" into a Date cell and broke the merge key.
+  sh.getRange(1, 5, Math.max(rows.length, 1), 3).setNumberFormat('@');
+  sh.getRange(1, 1, rows.length, 8).setValues(rows);
+  SpreadsheetApp.flush();
+  var lastRow = sh.getLastRow(), lastCol = Math.max(8, sh.getLastColumn());
+  if (lastRow > rows.length) sh.getRange(rows.length + 1, 1, lastRow - rows.length, lastCol).clearContent();
+  return { added: addedN, kept: keptN, updated: updN };
+}
+
+// ── NSE corporate actions — the AUTHORITATIVE bonus-vs-split source ─────────────────────────
+//
+// Yahoo files a bonus and a split identically (a 1:1 bonus arrives as "2:1"), so it can never
+// answer "which was it?". NSE's own feed states it outright:
+//     "Bonus 1:10"
+//     "Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share"
+// and carries the ISIN, so it joins straight onto our holdings.
+//
+// The catch: NSE rejects unprimed clients. You must GET an html page first, keep its cookies, and
+// send them with the API call — and it is known to block datacenter IPs, which may well include
+// Google's. So this is written to FAIL SOFT: nseCorpActions_ returns null when it can't get data,
+// and the caller falls back to the Yahoo scan. Use /exec?probe=nse to find out which you get.
+function nseCorpActions_(fromDDMMYYYY, toDDMMYYYY) {
+  var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+  var cookies = '';
+  try {
+    var prime = UrlFetchApp.fetch('https://www.nseindia.com/companies-listing/corporate-filings-actions', {
+      muteHttpExceptions: true, followRedirects: true,
+      headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+    var all = prime.getAllHeaders();
+    var sc = all['Set-Cookie'] || all['set-cookie'];
+    if (sc) {
+      var list = (Object.prototype.toString.call(sc) === '[object Array]') ? sc : [sc];
+      var parts = [];
+      for (var i = 0; i < list.length; i++) parts.push(String(list[i]).split(';')[0]);
+      cookies = parts.join('; ');
+    }
+  } catch (e) { Logger.log('NSE prime failed: ' + e); return null; }
+  if (!cookies) { Logger.log('NSE prime returned no cookies — treating as blocked.'); return null; }
+
+  var url = 'https://www.nseindia.com/api/corporates-corporateActions?index=equities' +
+            '&from_date=' + encodeURIComponent(fromDDMMYYYY) + '&to_date=' + encodeURIComponent(toDDMMYYYY);
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true, followRedirects: true,
+      headers: {
+        'User-Agent': UA, 'Accept': 'application/json',
+        'Referer': 'https://www.nseindia.com/companies-listing/corporate-filings-actions',
+        'Cookie': cookies,
+      },
+    });
+  } catch (e2) { Logger.log('NSE fetch failed: ' + e2); return null; }
+  if (resp.getResponseCode() !== 200) { Logger.log('NSE HTTP ' + resp.getResponseCode()); return null; }
+  var j; try { j = JSON.parse(resp.getContentText()); } catch (e3) { Logger.log('NSE body not JSON'); return null; }
+  var rows = (Object.prototype.toString.call(j) === '[object Array]') ? j : (j && j.data) || null;
+  if (!rows) return null;
+
+  var out = [];
+  for (var r = 0; r < rows.length; r++) {
+    var it = rows[r] || {};
+    var parsed = parseNseSubject_(it.subject);
+    if (!parsed) continue;                     // dividends, AGMs, rights… not our two types
+    var ex = ymdCell_(it.exDate);              // "02-Jan-2026" → ISO
+    if (!ex) continue;
+    out.push({
+      isin: String(it.isin || '').trim().toUpperCase(),
+      name: String(it.comp || it.symbol || '').trim(),
+      type: parsed.type, ratio: parsed.ratio, factor: parsed.factor,
+      exDate: ex, source: 'nse',
+    });
+  }
+  return out;
+}
+
+// "Bonus 1:10" → 1 new share per 10 held (factor 1.1). "Face Value Split ... Rs 10/- ... Rs 2/-"
+// → 1 share becomes 5 (factor 5). null for anything that isn't a bonus or a split.
+function parseNseSubject_(subject) {
+  var s = String(subject == null ? '' : subject).trim();
+  if (!s) return null;
+  var m = /bonus\s*(?:issue\s*)?[:\-]?\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)/i.exec(s);
+  if (m) {
+    var a = parseFloat(m[1]), b = parseFloat(m[2]);
+    if (a > 0 && b > 0) return { type: 'Bonus', ratio: a + ':' + b, factor: 1 + a / b };
+    return null;
+  }
+  if (/split|sub[\s-]*division/i.test(s)) {
+    // Pull both money figures: "From Rs 10/- Per Share To Rs 2/- Per Share" (also "Re 1/-").
+    var f = /from\s*(?:rs|re)\.?\s*([\d.]+)/i.exec(s), t = /to\s*(?:rs|re)\.?\s*([\d.]+)/i.exec(s);
+    if (f && t) {
+      var fv = parseFloat(f[1]), tv = parseFloat(t[1]);
+      if (fv > 0 && tv > 0 && fv > tv) return { type: 'Split', ratio: '1:' + (fv / tv), factor: fv / tv };
+    }
+    return null;   // a split we can't quantify is worse than no row
+  }
+  return null;
+}
+
+// /exec?probe=nse — is NSE reachable from Apps Script's IPs at all?
+function probeNse_() {
+  var to = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'dd-MM-yyyy');
+  var from = Utilities.formatDate(new Date(Date.now() - 120 * 86400000), 'Asia/Kolkata', 'dd-MM-yyyy');
+  var rows = nseCorpActions_(from, to);
+  if (rows === null) return { ok: false, reachable: false, note: 'NSE blocked or unreachable from Apps Script — the Yahoo fallback stays in use.', from: from, to: to };
+  var sample = rows.slice(0, 5).map(function (r) { return r.name + ' — ' + r.type + ' ' + r.ratio + ' (' + r.exDate + ')'; });
+  return { ok: true, reachable: true, bonusOrSplitRows: rows.length, from: from, to: to, sample: sample };
+}
+
+// A sheet cell that should hold "yyyy-MM-dd" → that ISO string. Accepts a real Date (Sheets
+// coerced it), an ISO string, or dd-mm-yyyy; '' when unreadable. Keeps the alert merge key stable
+// no matter how the cell was stored.
+function ymdCell_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Kolkata', 'yyyy-MM-dd');
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return '';
+  var p2 = function (x) { return x.length < 2 ? '0' + x : x; };
+  var m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) return m[1] + '-' + p2(m[2]) + '-' + p2(m[3]);
+  m = /^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})/.exec(s);
+  if (m) return m[3] + '-' + p2(m[2]) + '-' + p2(m[1]);
+  // "02-Jan-2026" — NSE's exDate format.
+  m = /^(\d{1,2})[-\s]([A-Za-z]{3})[-\s](\d{4})/.exec(s);
+  if (m) {
+    var MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+    var mo = MON[m[2].toLowerCase()];
+    if (mo) return m[3] + '-' + p2(String(mo)) + '-' + p2(m[1]);
+  }
+  var t = new Date(s);
+  if (!isNaN(t.getTime()) && t.getFullYear() > 1990) return Utilities.formatDate(t, 'Asia/Kolkata', 'yyyy-MM-dd');
+  return '';
+}
+
 function isMarketHours_() {
   var tz = 'Asia/Kolkata';
   var day = parseInt(Utilities.formatDate(new Date(), tz, 'u'), 10);   // 1=Mon … 7=Sun
@@ -796,6 +1162,83 @@ function installPriceTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scheduledUpdate') ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('scheduledUpdate').timeBased().everyMinutes(CONFIG.TRIGGER_MINUTES).create();
 }
+// Weekly corporate-action scan. Separate from the price trigger on purpose: splits and bonuses
+// are announced days ahead and the ex-date doesn't move, so checking 6× an hour would be waste.
+function installCorpActionTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scanCorpActions') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('scanCorpActions').timeBased().everyWeeks(1).onWeekDay(ScriptApp.WeekDay.SATURDAY).atHour(8).create();
+}
+// BSE pass runs DAILY — its feed only shows today's ex-dates, so a missed day is a lost label.
+function installBseCorpActionTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scanCorpActionsBse') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('scanCorpActionsBse').timeBased().everyDays(1).atHour(19).create();
+}
+function removeBseCorpActionTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scanCorpActionsBse') ScriptApp.deleteTrigger(t); });
+}
+function testBseCorpActionPass() { Logger.log(JSON.stringify(scanCorpActionsBse(), null, 2)); }
+
+function removeCorpActionTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scanCorpActions') ScriptApp.deleteTrigger(t); });
+}
+// Run once from the editor to populate the tab immediately, without waiting for Saturday.
+function testCorpActionScan() { Logger.log(JSON.stringify(scanCorpActions())); }
+
+// Is NSE's corporate-actions API reachable from Apps Script's IPs? This is the one thing that
+// can't be tested from a laptop — NSE blocks many datacenter ranges, and Google's may be among
+// them. NOTE the name has no trailing underscore ON PURPOSE: Apps Script hides `name_` functions
+// from the Run dropdown, which is why probeNse_ doesn't appear there.
+function testNseProbe() {
+  var r = probeNse_();
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+// BSE's corporate-actions feed. Also states the type outright ("Bonus issue", "Stock Split"),
+// answers instantly from a laptop, and needs no cookie handshake — so it's the more likely of the
+// two to survive Google's IPs. Its limitation is the window: it ignores every date parameter and
+// returns only TODAY's ex-dates, so it can't backfill history — but scanned daily it would catch
+// every future action WITH the correct type, which is the part Yahoo can't give us.
+function bseCorpActions_() {
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch('https://api.bseindia.com/BseIndiaAPI/api/Corpaction/w?scripcode=', {
+      muteHttpExceptions: true, followRedirects: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json',
+        'Origin': 'https://www.bseindia.com',
+        'Referer': 'https://www.bseindia.com/',
+      },
+    });
+  } catch (e) { Logger.log('BSE fetch failed: ' + e); return null; }
+  if (resp.getResponseCode() !== 200) { Logger.log('BSE HTTP ' + resp.getResponseCode()); return null; }
+  var j; try { j = JSON.parse(resp.getContentText()); } catch (e2) { Logger.log('BSE body not JSON'); return null; }
+  if (Object.prototype.toString.call(j) !== '[object Array]') return null;
+  var out = [];
+  for (var i = 0; i < j.length; i++) {
+    var it = j[i] || {};
+    var p = String(it.Purpose || '');
+    var kind = /bonus/i.test(p) ? 'Bonus' : /split|sub[\s-]*division/i.test(p) ? 'Split' : '';
+    out.push({ code: String(it.Code || '').trim(), name: String(it.Security || '').trim(),
+               purpose: p, kind: kind, exDate: ymdCell_(it.ExDate) });
+  }
+  return out;
+}
+
+function testBseProbe() {
+  var rows = bseCorpActions_();
+  var r;
+  if (rows === null) r = { ok: false, reachable: false, note: 'BSE blocked or unreachable from Apps Script.' };
+  else r = {
+    ok: true, reachable: true, rowsToday: rows.length,
+    bonusOrSplitToday: rows.filter(function (x) { return x.kind; }).length,
+    purposes: rows.slice(0, 8).map(function (x) { return x.name + ' — ' + x.purpose + ' (' + x.exDate + ')'; }),
+  };
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
 function removePriceTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'scheduledUpdate') ScriptApp.deleteTrigger(t); });
 }

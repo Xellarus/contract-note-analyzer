@@ -52,6 +52,51 @@ let _priceDateColSeen = false;
 /** Truthy marker in an exception cell: x / yes / y / true / 1 / a check mark. */
 const isExceptCell = (v: any): boolean => /^(x|yes|y|true|1|✓|✔)$/i.test((v ?? "").toString().trim());
 
+/**
+ * Normalise a "Price Date" cell to ISO `yyyy-mm-dd`, or `""` when it can't be read.
+ *
+ * This column is written with `USER_ENTERED`, so Sheets is free to reinterpret `2026-08-10` as a
+ * real date cell and hand it back in a locale format — `Mon Aug 10 2026 …`, `Aug 10, 2026`,
+ * `10-08-2026`, or a serial. Consumers compare these values to find the newest session, and a raw
+ * string comparison makes a letter-initial rendering sort ABOVE every ISO date ('M' > '2'): one
+ * such cell then becomes the "current session", every real date compares as older, and the whole
+ * app reads as stale (which also blocks the settled-close indicator, since that needs an exact
+ * match). Normalising here keeps a single odd cell inert instead of contagious.
+ *
+ * Ambiguous d-m vs m-d is resolved as INDIAN (dd-mm-yyyy), matching formatDMY [[date-display-format]].
+ */
+const SHEET_EPOCH_MS = Date.UTC(1899, 11, 30);
+const iso = (y: number, m: number, d: number): string =>
+  `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+export function normalisePriceDate(v: any): string {
+  if (v == null || v === "") return "";
+  // Sheet serial (UNFORMATTED_VALUE) — days since 1899-12-30.
+  if (typeof v === "number" && isFinite(v) && v > 0) {
+    const dt = new Date(SHEET_EPOCH_MS + Math.round(v * 86400000));
+    return iso(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+  }
+  const s = v.toString().trim();
+  if (!s) return "";
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);                      // already ISO
+  if (m) return iso(+m[1], +m[2], +m[3]);
+  m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/.exec(s);                  // dd-mm-yyyy (or mm-dd)
+  if (m) {
+    let d = +m[1], mo = +m[2];
+    if (d <= 12 && mo > 12) { const t = d; d = mo; mo = t; }           // clearly US → swap
+    return iso(+m[3], mo, d);
+  }
+  // "Mon Aug 10 2026 00:00:00 GMT+0530", "Aug 10, 2026", "10 Aug 2026" — let Date parse it, but
+  // only trust a result that yields a sane year, so junk text can't become a date.
+  const t = Date.parse(s);
+  if (!isNaN(t)) {
+    const dt = new Date(t);
+    const y = dt.getFullYear();
+    if (y >= 1990 && y <= 2200) return iso(y, dt.getMonth() + 1, dt.getDate());
+  }
+  return "";
+}
+
 /** A scrip the Yahoo updater could not fetch a price for (no symbol, or Yahoo had none). */
 export interface PriceMiss { isin: string; name: string; reason: string; checked: string; }
 
@@ -102,7 +147,9 @@ function parsePriceVals(vals: any[][]): ScripPrice[] {
     const previousPrice = toNum(r[4]);
     const source = (r[5] || "").toString().trim().toLowerCase() as PriceSource;
     const except = isExceptCell(r[_exceptCol]);
-    const priceDate = (r[_priceDateCol] ?? "").toString().trim();
+    // Normalised, NOT raw: downstream code orders these to find the current session, so a
+    // locale-formatted cell must not leak through. See normalisePriceDate.
+    const priceDate = normalisePriceDate(r[_priceDateCol]);
     // An excepted scrip is kept even without a parseable price — the flag is the point.
     if ((!isin && !name) || (isNaN(price) && !except)) continue;
     const src: PriceSource = source === "yahoo" || source === "screener" || source === "tradingview" ? source : "";
@@ -219,6 +266,35 @@ export async function saveScripPrices(
   await (gapi.client as any).sheets.spreadsheets.values.update({
     spreadsheetId, range: `${PRICES_TAB}!A1`, valueInputOption: "USER_ENTERED", resource: { values: rows },
   });
+  // Force the "Price Date" column back to plain text. Under USER_ENTERED, Sheets is free to parse
+  // an ISO date into a real date cell, after which it reads back in whatever locale format the
+  // cell carries — which is how one row came back as "Mon Aug 10 2026 …" and, before
+  // normalisePriceDate existed, made every scrip in the app look stale. Text format keeps what we
+  // wrote. Best-effort: a failure here costs formatting, not data, and the reader normalises anyway.
+  if (_priceDateColSeen) {
+    try {
+      const meta = await (gapi.client as any).sheets.spreadsheets.get({ spreadsheetId });
+      const sheet = (meta?.result?.sheets || []).find(
+        (s: any) => (s.properties?.title || "").trim().toLowerCase() === PRICES_TAB.toLowerCase());
+      const sheetId = sheet?.properties?.sheetId;
+      if (sheetId != null) {
+        await (gapi.client as any).sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          resource: {
+            requests: [{
+              repeatCell: {
+                range: { sheetId, startRowIndex: 1, startColumnIndex: _priceDateCol, endColumnIndex: _priceDateCol + 1 },
+                cell: { userEnteredFormat: { numberFormat: { type: "TEXT" } } },
+                fields: "userEnteredFormat.numberFormat",
+              },
+            }],
+          },
+        });
+      }
+    } catch (e) {
+      console.warn("Could not pin the Price Date column to text format (harmless):", e);
+    }
+  }
   invalidatePriceCache();
   return { updated, total: map.size };
 }

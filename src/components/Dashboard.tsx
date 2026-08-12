@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Wallet, RefreshCw, AlertCircle, TrendingUp, TrendingDown, LineChart, SlidersHorizontal } from 'lucide-react';
+import { Wallet, RefreshCw, AlertCircle, AlertTriangle, TrendingUp, TrendingDown, LineChart, SlidersHorizontal } from 'lucide-react';
+import { formatDMY } from '../lib/dates';
 import { PortfolioHolding } from '../types';
 import { computeAum, AumResult } from '../lib/holdingsCalc';
 import { computeInvestedTimeline, AumTimelinePoint } from '../lib/aumTimeline';
@@ -7,6 +8,7 @@ import { logAumSnapshot, loadAumHistory, AumSnapshot } from '../lib/aumHistory';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
 import { computeCrossHoldings, CrossHolding } from '../lib/crossHoldings';
+import { computePendingCorpActions, dismissCorpActionAlert, PendingCorpAction } from '../lib/corpActionAlerts';
 import CubeLoader from './ui/CubeLoader';
 import PriceStatusButton from './PriceStatusButton';
 import AllHoldingsTable from './AllHoldingsTable';
@@ -323,6 +325,10 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
   const [marketHist, setMarketHist] = useState<AumSnapshot[]>([]);
   const [holdingRows, setHoldingRows] = useState<CrossHolding[]>([]);
   const [holdingsFailed, setHoldingsFailed] = useState<string[]>([]);
+  // Splits/bonuses detected on held scrips with no matching ledger entry. The card is
+  // self-clearing: record the action and the row stops qualifying on the next load.
+  const [pendingActions, setPendingActions] = useState<PendingCorpAction[]>([]);
+  const [dismissing, setDismissing] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -338,13 +344,17 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
     try {
       // AUM, the invested-capital timeline and the consolidated holdings run together; a
       // failure in one never blocks the others, so one bad sheet can't blank the page.
-      const [aumRes, tlRes, chRes] = await Promise.allSettled([
+      const [aumRes, tlRes, chRes, caRes] = await Promise.allSettled([
         computeAum(list), computeInvestedTimeline(list), computeCrossHoldings(full),
+        computePendingCorpActions(full),
       ]);
       if (aumRes.status === 'fulfilled') setAum(aumRes.value);
       else setError(aumRes.reason?.result?.error?.message || aumRes.reason?.message || 'Could not compute AUM.');
       if (tlRes.status === 'fulfilled') setTimeline(tlRes.value);
       if (chRes.status === 'fulfilled') { setHoldingRows(chRes.value.rows); setHoldingsFailed(chRes.value.failed); }
+      // Unrecorded splits/bonuses. Advisory only, so a failure is silent — the tab may not
+      // exist yet if the weekly scanCorpActions() hasn't run.
+      if (caRes.status === 'fulfilled') setPendingActions(caRes.value);
       // Log today's AUM snapshot (once per IST day; same-day reloads refresh
       // the row) and pull the accumulated market-value history for the chart.
       // Best-effort: a failure here never blocks the dashboard.
@@ -436,6 +446,96 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
       {/* AUM timeline — invested capital through time + logged market AUM */}
       {timeline && timeline.length >= 2 && (
         <AumTimelineChart points={timeline} market={marketHist} aumToday={aum ? aum.totalCurrent : null} />
+      )}
+
+      {/* Unrecorded splits / bonuses. Renders ONLY when something needs entering, so a clean
+          ledger shows nothing at all — and recording the action makes the row disappear on the
+          next load rather than needing a "done" tick. Amber, not red: Yahoo's split feed has
+          false positives (an exact inverse ratio pair usually means a corrected entry), so this
+          asks you to check rather than asserting the ledger is wrong. Hence Dismiss. */}
+      {pendingActions.length > 0 && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-amber-200">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+            <span className="text-[11px] font-black uppercase tracking-widest text-amber-800">
+              Corporate action{pendingActions.length > 1 ? 's' : ''} to record
+            </span>
+            <span className="text-[10px] font-bold text-amber-700 bg-amber-100 border border-amber-300 rounded-full px-2 py-0.5">
+              {pendingActions.length}
+            </span>
+            <span className="ml-auto text-[10px] text-amber-700 hidden sm:block">
+              Detected from price data — confirm against the exchange notice before recording
+            </span>
+          </div>
+
+          <div className="divide-y divide-amber-200">
+            {pendingActions.map((pa) => {
+              const rd = pa.reading;
+              // BONUS / SPLIT / ambiguous each get their own badge tone. Only literal colour
+              // classes here — the dark theme remaps those, not arbitrary variants.
+              const badge =
+                rd?.kind === 'BONUS' ? 'ca-badge-bonus'
+                : rd?.kind === 'SPLIT' ? 'ca-badge-split'
+                : 'ca-badge-either';
+              return (
+                <div key={`${pa.alert.rowIndex}:${pa.portfolioId}`} className="px-4 py-3">
+                  {/* Line 1 — what happened */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => onOpenStock({ portfolioId: pa.portfolioId, scripName: pa.alert.name, isin: pa.alert.isin })}
+                      className="text-[13px] font-black text-amber-900 hover:underline cursor-pointer text-left"
+                      title="Open this stock to add the entry"
+                    >
+                      {pa.alert.name}
+                    </button>
+                    <span
+                      className={`text-[10px] font-black uppercase tracking-wider border rounded px-1.5 py-0.5 ${badge}`}
+                      title={rd?.note || 'Ratio could not be interpreted — check the exchange notice.'}
+                    >
+                      {rd ? rd.label : pa.alert.ratio}
+                    </span>
+                    {pa.alert.source === 'bse' && rd?.kind !== 'EITHER' ? (
+                      <span className="text-[10px] font-bold text-amber-700" title="Type confirmed by the BSE corporate-actions feed, not inferred from the price ratio.">
+                        &#10003; exchange-confirmed
+                      </span>
+                    ) : rd?.kind === 'EITHER' ? (
+                      <span className="text-[10px] font-bold text-amber-700" title={rd.note}>needs confirming</span>
+                    ) : null}
+                    <button
+                      onClick={async () => {
+                        setDismissing(pa.alert.rowIndex);
+                        try {
+                          await dismissCorpActionAlert(pa.alert.rowIndex, pa.alert.statusCol);
+                          setPendingActions(cur => cur.filter(x => x.alert.rowIndex !== pa.alert.rowIndex));
+                        } catch (e: any) {
+                          setError('Could not dismiss: ' + (e?.result?.error?.message || e?.message || 'error'));
+                        } finally { setDismissing(null); }
+                      }}
+                      disabled={dismissing === pa.alert.rowIndex}
+                      className="ml-auto text-[10px] font-bold uppercase tracking-wider text-amber-700 hover:text-white hover:bg-amber-600 border border-amber-300 hover:border-amber-600 rounded px-2 py-1 cursor-pointer disabled:opacity-50 transition-colors"
+                      title="Not a real action, or already handled — silence this permanently"
+                    >
+                      {dismissing === pa.alert.rowIndex ? 'Dismissing…' : 'Dismiss'}
+                    </button>
+                  </div>
+
+                  {/* Line 2 — the facts you need to enter it */}
+                  <div className="mt-1 flex items-center gap-x-4 gap-y-1 flex-wrap text-[11px] text-amber-700">
+                    <span>Ex-date <span className="font-mono font-bold text-amber-900">{formatDMY(pa.alert.exDate)}</span></span>
+                    <span>{pa.portfolioLabel}</span>
+                    <span>Holding <span className="font-mono font-bold text-amber-900">{pa.heldQty.toLocaleString('en-IN')}</span></span>
+                    {pa.impliedNewShares > 0 && (
+                      <span>
+                        Expect <span className="font-mono font-bold text-amber-900">+{Math.round(pa.impliedNewShares).toLocaleString('en-IN')}</span>
+                        {' '}&rarr; <span className="font-mono font-bold text-amber-900">{Math.round(pa.heldQty + pa.impliedNewShares).toLocaleString('en-IN')}</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       )}
 
       {/* Consolidated holdings across every portfolio (replaced the per-portfolio shortcut
