@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { Wallet, RefreshCw, AlertCircle, AlertTriangle, TrendingUp, TrendingDown, LineChart, SlidersHorizontal } from 'lucide-react';
+import { Wallet, RefreshCw, AlertCircle, AlertTriangle, TrendingUp, TrendingDown, LineChart, SlidersHorizontal, FileText, Loader2 } from 'lucide-react';
 import { formatDMY } from '../lib/dates';
 import { PortfolioHolding } from '../types';
-import { computeAum, AumResult } from '../lib/holdingsCalc';
+import { computeAum, computeIndustryAllocation, AumResult } from '../lib/holdingsCalc';
 import { computeInvestedTimeline, AumTimelinePoint } from '../lib/aumTimeline';
 import { logAumSnapshot, loadAumHistory, AumSnapshot } from '../lib/aumHistory';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
 import { computeCrossHoldings, CrossHolding } from '../lib/crossHoldings';
 import { computePendingCorpActions, dismissCorpActionAlert, PendingCorpAction } from '../lib/corpActionAlerts';
+import { computeNavTimeline, type NavResult } from '../lib/navTimeline';
+import PortfolioCharts from './PortfolioCharts';
+import { toast } from './ui/overlay';
 import CubeLoader from './ui/CubeLoader';
 import PriceStatusButton from './PriceStatusButton';
 import AllHoldingsTable from './AllHoldingsTable';
@@ -323,6 +326,8 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
   const [aum, setAum] = useState<AumResult | null>(null);
   const [timeline, setTimeline] = useState<AumTimelinePoint[] | null>(null);
   const [marketHist, setMarketHist] = useState<AumSnapshot[]>([]);
+  /** Real market-value history (Price History tab). null until loaded / if not backfilled. */
+  const [navHist, setNavHist] = useState<NavResult | null>(null);
   const [holdingRows, setHoldingRows] = useState<CrossHolding[]>([]);
   const [holdingsFailed, setHoldingsFailed] = useState<string[]>([]);
   // Splits/bonuses detected on held scrips with no matching ledger entry. The card is
@@ -331,6 +336,34 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
   const [dismissing, setDismissing] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [factsheetBusy, setFactsheetBusy] = useState(false);
+
+  /**
+   * Build the factsheet from what's already on screen, so it can never disagree with the numbers
+   * the user is looking at. Sector allocation is the one extra read (the Dashboard doesn't load it
+   * otherwise); a failure there leaves the sector block empty rather than blocking the download.
+   */
+  const downloadFactsheet = async () => {
+    if (factsheetBusy) return;
+    setFactsheetBusy(true);
+    try {
+      const list = PORTFOLIOS.map(p => ({ id: p.id, label: p.label, sheetId: p.sheetId }));
+      const industries = await computeIndustryAllocation(list).catch(() => null);
+      const { buildFactsheet } = await import('../lib/factsheet');
+      const { downloadFactsheetPdf } = await import('../lib/factsheetPdf');
+      const sheet = buildFactsheet({
+        title: 'Consolidated Portfolio',
+        aum, holdings: holdingRows, nav: navHist, industries,
+        portfolios: PORTFOLIOS.map(p => ({ code: p.code, label: p.label })),
+      });
+      await downloadFactsheetPdf(sheet);
+    } catch (e: any) {
+      console.error('Factsheet failed', e);
+      toast.error(`Could not build the factsheet — ${e?.message || 'unknown error'}`);
+    } finally {
+      setFactsheetBusy(false);
+    }
+  };
 
   const load = async () => {
     if (!hasValidGoogleToken()) {
@@ -344,13 +377,17 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
     try {
       // AUM, the invested-capital timeline and the consolidated holdings run together; a
       // failure in one never blocks the others, so one bad sheet can't blank the page.
-      const [aumRes, tlRes, chRes, caRes] = await Promise.allSettled([
+      const [aumRes, tlRes, chRes, caRes, navRes] = await Promise.allSettled([
         computeAum(list), computeInvestedTimeline(list), computeCrossHoldings(full),
-        computePendingCorpActions(full),
+        computePendingCorpActions(full), computeNavTimeline(list),
       ]);
       if (aumRes.status === 'fulfilled') setAum(aumRes.value);
       else setError(aumRes.reason?.result?.error?.message || aumRes.reason?.message || 'Could not compute AUM.');
       if (tlRes.status === 'fulfilled') setTimeline(tlRes.value);
+      // Market-value history from the Price History tab. Advisory: if the tab hasn't been
+      // backfilled the chart falls back to the cost-only view rather than failing the page.
+      if (navRes.status === 'fulfilled') setNavHist(navRes.value);
+      else console.warn('NAV timeline unavailable', navRes.reason);
       if (chRes.status === 'fulfilled') { setHoldingRows(chRes.value.rows); setHoldingsFailed(chRes.value.failed); }
       // Unrecorded splits/bonuses. Advisory only, so a failure is silent — the tab may not
       // exist yet if the weekly scanCorpActions() hasn't run.
@@ -398,6 +435,15 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
         <div className="flex items-center gap-2">
           <PriceStatusButton />
           <button
+            onClick={downloadFactsheet} disabled={loading || factsheetBusy || !aum}
+            title={aum ? 'Download the portfolio factsheet as a PDF' : 'Waiting for AUM'}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {factsheetBusy
+              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Building…</>
+              : <><FileText className="w-3.5 h-3.5" /> Factsheet</>}
+          </button>
+          <button
             onClick={load} disabled={loading}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
           >
@@ -443,9 +489,14 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
         </div>
       )}
 
-      {/* AUM timeline — invested capital through time + logged market AUM */}
+      {/* Portfolio charts — AUM (cost + real market value), Performance vs benchmark, per-portfolio */}
       {timeline && timeline.length >= 2 && (
-        <AumTimelineChart points={timeline} market={marketHist} aumToday={aum ? aum.totalCurrent : null} />
+        <PortfolioCharts
+          points={timeline}
+          nav={navHist}
+          aumToday={aum ? aum.totalCurrent : null}
+          portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label }))}
+        />
       )}
 
       {/* Unrecorded splits / bonuses. Renders ONLY when something needs entering, so a clean

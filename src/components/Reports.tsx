@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
-import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Download, Briefcase, CalendarDays, TrendingUp, Receipt, Coins, Layers, X } from 'lucide-react';
+import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Briefcase, CalendarDays, TrendingUp, Receipt, Coins, Layers, X } from 'lucide-react';
 import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
 import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
-import { formatDMY, isDateHeader } from '../lib/dates';
+import { formatDMY, formatDMMMY, isDateHeader } from '../lib/dates';
 import { loadOpeningHoldings } from '../lib/openingHoldings';
 import { useVirtualRows } from './ui/useVirtualRows';
+import ExportMenu from './ExportMenu';
+import type { ReportDoc, ReportCol, ReportRow } from '../lib/reportDoc';
+import { inferCols, rowsFromGrid, fileSafe } from '../lib/reportDoc';
 
 type Step = 'home' | 'portfolio' | 'config' | 'result';
 type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expenses-detailed';
@@ -123,7 +126,6 @@ function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, 
 
 const todayStr = () => new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const csvEsc = (v: any) => { const s = (v ?? '').toString(); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 const looksNumeric = (s: string) => /^-?[\d,]+(\.\d+)?$/.test(s.trim()) && s.trim().length > 0;
 
 // Parse a sheet date cell (DD/MM/YYYY, DD-MM-YYYY, DD-MMM-YYYY, YYYY-MM-DD) → epoch ms, or null.
@@ -284,30 +286,77 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     }
   };
 
-  const downloadCsv = () => {
-    if (!portfolio) return;
+  /**
+   * Describe the generated report as a typed document, which the CSV / XLSX / PDF renderers
+   * all consume. Built on demand (when a format is picked) rather than per render.
+   *
+   * Filenames and the CSV's own shape are deliberately unchanged from the previous
+   * CSV-only export, so anything downstream that already consumes these files keeps working.
+   */
+  const buildDoc = (): ReportDoc => {
+    const p = portfolio!;
     // Stock-scoped reports lead the filename with the scrip name (sanitised for a filename).
-    const stockTag = focus ? `${(focus.scripName || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}_` : '';
-    let rows: any[][];
-    let filename: string;
+    const stockTag = focus ? `${fileSafe(focus.scripName)}_` : '';
+    const params: Array<[string, string]> = [['Portfolio', `${p.code} — ${p.label}`]];
+    if (focus) params.push(['Stock', focus.scripName + (focus.isin ? ` · ${focus.isin}` : '')]);
+
     if (reportType === 'holding') {
-      rows = [["Company Name", "ISIN", "Quantity", "Avg Buy Price", "Invested Value"]];
-      positions.forEach(p => rows.push([p.securityName, p.isin, String(p.quantity), String(p.avgBuyPrice), String(p.invested)]));
-      rows.push(["Total", "", "", "", String(totalInvested)]);
-      filename = `Holding_${stockTag}${portfolio.code}_as_of_${asOf}.csv`;
-    } else {
-      rows = [genHeader, ...genRows];
-      const range = `_${fromDate || 'inception'}_to_${toDate || 'today'}`;
-      const fnMap: Record<ReportType, string> = { holding: 'Holding', capgains: 'CapitalGains', transactions: 'Transactions', expenses: 'ExpenseReport', 'expenses-detailed': 'DetailedExpenseReport' };
-      filename = `${fnMap[reportType]}_${stockTag}${portfolio.code}${range}.csv`;
+      params.push(['As on', formatDMMMY(asOf)]);
+      params.push(['Positions', `${positions.length}`]);
+      params.push(['Trades replayed', `${tradeRows}`]);
+      const cols: ReportCol[] = [
+        { key: 'name', label: 'Company Name', type: 'text' },
+        { key: 'isin', label: 'ISIN', type: 'text' },
+        { key: 'qty', label: 'Quantity', type: 'int' },
+        { key: 'avg', label: 'Avg Buy Price', type: 'rate' },
+        { key: 'inv', label: 'Invested Value', type: 'money' },
+      ];
+      const rows: ReportRow[] = positions.map(pos => ({
+        cells: { name: pos.securityName, isin: pos.isin, qty: pos.quantity, avg: pos.avgBuyPrice, inv: pos.invested },
+      }));
+      // Matches the on-screen footer, and the row the CSV has always carried.
+      rows.push({ cells: { name: 'Total', isin: '', qty: '', avg: '', inv: totalInvested }, total: true });
+      return {
+        holder: p.label,
+        title: meta.title,
+        params,
+        cols,
+        rows,
+        footnotes: [
+          'Positions are replayed from the portfolio’s full trade history as it stood on the date above, including mergers, demergers, splits and bonuses.',
+          'Amounts in ₹. Cost per share is carried at full precision, not rounded to paise. Negative amounts appear in parentheses; a negative quantity indicates an unreconciled position.',
+        ],
+        filenameBase: `Holding_${stockTag}${p.code}_as_of_${asOf}`,
+      };
     }
-    const csv = rows.map(r => r.map(csvEsc).join(",")).join("\r\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+
+    const cols = inferCols(genHeader, genRows);
+    const rows = rowsFromGrid(genHeader, genRows);
+    params.push(['Period', `${fromDate ? formatDMMMY(fromDate) : 'inception'} to ${toDate ? formatDMMMY(toDate) : 'today'}`]);
+    params.push(['Rows', `${genRows.length}`]);
+    const range = `_${fromDate || 'inception'}_to_${toDate || 'today'}`;
+    const fnMap: Record<ReportType, string> = { holding: 'Holding', capgains: 'CapitalGains', transactions: 'Transactions', expenses: 'ExpenseReport', 'expenses-detailed': 'DetailedExpenseReport' };
+    const SOURCE: Record<ReportType, string> = {
+      holding: '',
+      capgains: 'Source: the portfolio’s capital-gains ledger (LTST tab), which records one row per sale.',
+      transactions: 'Source: the portfolio’s True Entry trade ledger. Carried-in opening lots appear as “Opening Buy” rows.',
+      expenses: 'Charges summed per trade date from the True Entry ledger. Blank cells are charges the broker did not levy.',
+      'expenses-detailed': 'Charges summed per trade date and scrip from the True Entry ledger. A blank date repeats the date above it.',
+    };
+    return {
+      holder: p.label,
+      title: meta.title,
+      params,
+      cols,
+      rows,
+      footnotes: [
+        SOURCE[reportType],
+        'Amounts in ₹. Negative amounts are shown in parentheses.',
+      ].filter(Boolean),
+      // Wide ledgers need the extra width; the 5-column reports read better upright.
+      landscape: cols.length > 6,
+      filenameBase: `${fnMap[reportType]}_${stockTag}${p.code}${range}`,
+    };
   };
 
   const reset = () => { setStep('home'); setPortfolio(null); setError(null); setPositions([]); setGenHeader([]); setGenRows([]); };
@@ -501,11 +550,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                     : ` · ${fromDate ? formatDMY(fromDate) : 'inception'} → ${toDate ? formatDMY(toDate) : 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
                 </p>
               </div>
-              {hasResult && (
-                <button onClick={downloadCsv} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer shrink-0">
-                  <Download className="w-3.5 h-3.5" /> Download CSV
-                </button>
-              )}
+              {hasResult && <ExportMenu doc={buildDoc} />}
             </div>
 
             {/* Holding report — structured table */}

@@ -32,45 +32,76 @@ const fromSerial = (n: number) => {
   return { d: dt.getUTCDate(), m: dt.getUTCMonth() + 1, y: dt.getUTCFullYear() };
 };
 
-/** Format any of the shapes above as `dd/mm/yyyy`. Returns "" for empty, and the input
- *  verbatim when it isn't a date we recognise. */
-export function formatDMY(value: any): string {
-  if (value == null || value === "") return "";
+/** A parsed calendar date, with `m` 1-based. */
+export interface DMY { d: number; m: number; y: number; }
+
+/**
+ * Parse any of the shapes above into its calendar parts, or null when the value isn't a
+ * date we recognise. This is the one parse step behind every formatter in this file, and
+ * it is exported so the report exporters can render a date differently (`dd-Mmm-yyyy` in a
+ * PDF, a real date cell in XLSX) WITHOUT growing a second parser — divergent date parsing
+ * is exactly how this app has broken before.
+ */
+export function parseDMY(value: any): DMY | null {
+  if (value == null || value === "") return null;
   if (value instanceof Date) {
-    return isNaN(value.getTime()) ? "" : dmy(value.getDate(), value.getMonth() + 1, value.getFullYear());
+    return isNaN(value.getTime()) ? null : { d: value.getDate(), m: value.getMonth() + 1, y: value.getFullYear() };
   }
 
   const s = value.toString().trim();
-  if (!s) return "";
+  if (!s) return null;
 
   // Bare number → a Sheets serial (guarded to a plausible 1954-2119 window so a stray
   // quantity or price that reached a date column isn't rewritten as a date).
   if (/^\d+(\.\d+)?$/.test(s)) {
     const n = parseFloat(s);
-    if (n > 20000 && n < 80000) { const { d, m, y } = fromSerial(n); return dmy(d, m, y); }
-    return s;
+    return n > 20000 && n < 80000 ? fromSerial(n) : null;
   }
 
   // ISO yyyy-mm-dd (optionally with a time part) — unambiguous, check it first.
   let m0 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s]|$)/);
-  if (m0) return dmy(+m0[3], +m0[2], +m0[1]);
+  if (m0) return { d: +m0[3], m: +m0[2], y: +m0[1] };
 
   // d-m-yyyy / m-d-yyyy / d.m.yyyy — resolve by whichever part is > 12.
   m0 = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
   if (m0) {
     const a = +m0[1], b = +m0[2], y = +m0[3];
-    if (a > 12 && b <= 12) return dmy(a, b, y);        // certainly dd-mm
-    if (b > 12 && a <= 12) return dmy(b, a, y);        // certainly mm-dd (legacy US rows)
-    return dmy(a, b, y);                                // ambiguous → Indian dd-mm
+    if (a > 12 && b <= 12) return { d: a, m: b, y };   // certainly dd-mm
+    if (b > 12 && a <= 12) return { d: b, m: a, y };   // certainly mm-dd (legacy US rows)
+    return { d: a, m: b, y };                          // ambiguous → Indian dd-mm
   }
 
   // "25 Mar 2026" / "25-Mar-2026" / "Mar 25, 2026"
   m0 = s.match(/^(\d{1,2})[\s-]+([A-Za-z]{3,})[\s-]+(\d{4})$/);
-  if (m0) { const mo = MONTHS[m0[2].slice(0, 3).toLowerCase()]; if (mo) return dmy(+m0[1], mo, +m0[3]); }
+  if (m0) { const mo = MONTHS[m0[2].slice(0, 3).toLowerCase()]; if (mo) return { d: +m0[1], m: mo, y: +m0[3] }; }
   m0 = s.match(/^([A-Za-z]{3,})[\s-]+(\d{1,2}),?[\s-]+(\d{4})$/);
-  if (m0) { const mo = MONTHS[m0[1].slice(0, 3).toLowerCase()]; if (mo) return dmy(+m0[2], mo, +m0[3]); }
+  if (m0) { const mo = MONTHS[m0[1].slice(0, 3).toLowerCase()]; if (mo) return { d: +m0[2], m: mo, y: +m0[3] }; }
 
-  return s;   // not a date we know — show it as-is rather than guess
+  return null;   // not a date we know
+}
+
+/** Format any of the shapes above as `dd/mm/yyyy`. Returns "" for empty, and the input
+ *  verbatim when it isn't a date we recognise. */
+export function formatDMY(value: any): string {
+  if (value == null || value === "") return "";
+  const p = parseDMY(value);
+  if (p) return dmy(p.d, p.m, p.y);
+  if (value instanceof Date) return "";              // an invalid Date shows as nothing
+  return value.toString().trim();                    // not a date we know — show it as-is rather than guess
+}
+
+const MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * `dd-Mmm-yyyy` — the form used in GENERATED REPORTS (PDF/XLSX) rather than the app's own
+ * dd/mm/yyyy screens. A report can leave this machine and be read by someone who doesn't
+ * know which convention it was written in, so the month is spelled out. Falls back to the
+ * same as-is string as formatDMY when the value isn't a date.
+ */
+export function formatDMMMY(value: any): string {
+  const p = parseDMY(value);
+  if (!p || p.m < 1 || p.m > 12) return formatDMY(value);
+  return `${pad(p.d)}-${MON3[p.m - 1]}-${p.y}`;
 }
 
 /** `dd/mm/yyyy hh:mm[:ss]` for stamps that carry a time (e.g. the Prices tab's "updated"). */

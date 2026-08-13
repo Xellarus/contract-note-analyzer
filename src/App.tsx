@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import { 
   Upload, X, Download, FileText, Info, CheckCircle2, AlertCircle, 
   ArrowRightLeft, ListChecks, Play, Trash2, PlusCircle, AlertTriangle, 
-  RefreshCw, Check, ShieldAlert, Award, ChevronRight, Gauge,
+  RefreshCw, Check, ShieldAlert, Award, ChevronRight, ArrowLeft, Gauge,
   Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3,
   Briefcase, ShieldCheck
 } from 'lucide-react';
@@ -35,8 +35,7 @@ import ImportHistory from './components/ImportHistory';
 import Login from './components/Login';
 import Reports, { StockFocus } from './components/Reports';
 import ScreenerImport from './components/ScreenerImport';
-import OpeningBasisImport from './components/OpeningBasisImport';
-import CorpActionsImport from './components/CorpActionsImport';
+import OpeningBasisHub, { OpeningSection } from './components/OpeningBasisHub';
 import LiveClock from './components/LiveClock';
 import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
@@ -684,8 +683,16 @@ export default function App() {
   }, [cashBalance]);
 
   const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
-  // Imports page sub-view: the upload/import flow vs. the import-history log.
-  const [importPageTab, setImportPageTab] = useState<'import' | 'history' | 'screener' | 'opening'>('import');
+  // Imports page tabs. "Import" is no longer one of them: the log IS the landing page and
+  // the upload flow is a page you enter from its Import button (see importFlow below).
+  const [importPageTab, setImportPageTab] = useState<'history' | 'screener' | 'opening'>('history');
+  // The upload flow, opened over the tab strip. `notes` = contract notes from the three
+  // brokers; `txn` = a transaction statement (entered from Opening Basis → Add Trx
+  // Statement, which is where the old "Txn Report" broker button moved to). null = closed.
+  const [importFlow, setImportFlow] = useState<'notes' | 'txn' | null>(null);
+  // Which Opening Basis tool is open. Lifted here so backing out of the txn-statement
+  // import — which unmounts the hub — returns to the chooser rather than a blank tab.
+  const [openingSection, setOpeningSection] = useState<OpeningSection>('menu');
   const [data, setData] = useState<ContractNoteResult | null>(null);
   const [showRawText, setShowRawText] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
@@ -795,6 +802,56 @@ export default function App() {
   const [isLogicOpen, setIsLogicOpen] = useState(false);
   const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | 'integrated' | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Imports page navigation ────────────────────────────────────────────────
+  // Enter the upload flow. A note that's still mid-flight is KEPT — backing out to the log
+  // and coming back shouldn't throw away a parse that took a minute, and "Clear Note" is
+  // the explicit discard. It's dropped in the two cases where keeping it is worse than
+  // losing it: it was already written to Sheets (Import is disabled, so the page would be
+  // a dead end), or it belongs to the other flow (a transaction statement rendered under
+  // "New Import", or vice versa).
+  const openImportFlow = (flow: 'notes' | 'txn') => {
+    const wrongFlow = !!data && (flow === 'txn') !== (data.brokerName === 'transaction-report');
+    if (sheetsImportStatus?.success || wrongFlow) {
+      setData(null);
+      setSheetsImportStatus(null);
+      setShowExportConfirmation(false);
+    }
+    setBroker((b) => (flow === 'txn' ? 'transaction-report' : b === 'transaction-report' ? 'zerodha' : b));
+    setError(null);
+    setIsPasswordRequired(false);
+    setPendingFiles(null);
+    setImportFlow(flow);
+  };
+
+  // Is the upload flow actually on screen? The `analyse` term matters: the audit/tests
+  // panels replace the analyse panel, so without it a non-analyse tab would render neither
+  // the flow page NOR the tab strip that hides behind it — a blank page with no way back.
+  const showImportFlow = !!importFlow && activeTab === 'analyse';
+
+  // Back inside the Imports page unwinds THIS page first — upload flow (3), then the
+  // open Opening Basis tool (2) — before the shared depth-1 step drops to the Dashboard.
+  // Refs keep the predicates on current state; see [[spa-navigation-back-button]].
+  const importFlowRef = useRef(importFlow);
+  importFlowRef.current = importFlow;
+  const openingSectionRef = useRef(openingSection);
+  openingSectionRef.current = openingSection;
+  const importPageTabRef = useRef(importPageTab);
+  importPageTabRef.current = importPageTab;
+  useEffect(() => {
+    const unFlow = registerBackStep(3, () => currentViewRef.current === 'imports' && importFlowRef.current !== null, () => setImportFlow(null));
+    // The tab term is load-bearing: an open Opening Basis tool is only ON SCREEN while that
+    // tab is selected, so without it a stale `openingSection` would keep this step "active"
+    // on the other tabs — where Back would silently spend the press resetting invisible
+    // state instead of dropping to the Dashboard.
+    const unTool = registerBackStep(
+      2,
+      () => currentViewRef.current === 'imports' && importPageTabRef.current === 'opening' && openingSectionRef.current !== 'menu',
+      () => setOpeningSection('menu'),
+    );
+    return () => { unFlow(); unTool(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Sort once per (data, sort, broker) change instead of re-sorting on every render.
   const sortedTrades = React.useMemo(() => getSortedTrades(), [data, sortConfig, broker]);
@@ -1860,8 +1917,10 @@ export default function App() {
               )}
               {/* Show a destination picker when the note carries no resolvable UCC
                   (transaction reports never do; Zerodha notes don't either) so the
-                  import doesn't silently fall back to the default portfolio. */}
-              {data && (data.brokerName === 'transaction-report' || !portfolioByUcc(data.ucc || '')) && (
+                  import doesn't silently fall back to the default portfolio. Only while
+                  the upload flow is actually open — a parsed note survives backing out
+                  to the log, and a stray dropdown up here would have nothing to explain it. */}
+              {importFlow && data && (data.brokerName === 'transaction-report' || !portfolioByUcc(data.ucc || '')) && (
                 <div className="inline-flex flex-col gap-1">
                   <span className="text-[9px] font-bold uppercase tracking-wider text-amber-600">
                     {data.ucc ? `UCC ${data.ucc} not recognised — pick destination` : 'No account code in note — pick destination'}
@@ -2289,97 +2348,100 @@ export default function App() {
           />
         ) : (
           <>
-            {/* Imports sub-view toggle: Import vs Import History */}
-            <div className="flex justify-center mb-6">
-              <div className="inline-flex items-center p-1 bg-white border border-slate-200 rounded-xl shadow-xs">
-                <button
-                  type="button"
-                  onClick={() => setImportPageTab('import')}
-                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'import' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
-                >
-                  Import
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImportPageTab('history')}
-                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'history' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
-                >
-                  Import History
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImportPageTab('screener')}
-                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'screener' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
-                >
-                  Securities &amp; Prices
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImportPageTab('opening')}
-                  className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === 'opening' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
-                >
-                  Opening Basis
-                </button>
+            {/* Imports page tabs. The upload flow is a PAGE reached from the Import button on
+                the Imports tab, so the strip is hidden while that page is open. */}
+            {!showImportFlow && (
+              <div className="flex justify-center mb-6">
+                <div className="inline-flex items-center p-1 bg-white border border-slate-200 rounded-xl shadow-xs">
+                  {([
+                    { key: 'history', label: 'Imports' },
+                    { key: 'screener', label: 'Securities & Prices' },
+                    { key: 'opening', label: 'Opening Basis' },
+                  ] as const).map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      // Leaving the Opening Basis tab closes whatever tool was open. The tool's
+                      // own state is lost to the unmount either way, so re-entering on the
+                      // chooser is both honest and what the back step expects.
+                      onClick={() => { setImportPageTab(t.key); if (t.key !== 'opening') setOpeningSection('menu'); }}
+                      className={`px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${importPageTab === t.key ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-50'}`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
-            {importPageTab === 'history' && <ImportHistory />}
+            {!showImportFlow && importPageTab === 'history' && (
+              <ImportHistory onNewImport={() => openImportFlow('notes')} />
+            )}
 
-            {importPageTab === 'screener' && <ScreenerImport />}
+            {!showImportFlow && importPageTab === 'screener' && <ScreenerImport />}
 
-            {importPageTab === 'opening' && <OpeningBasisImport />}
+            {!showImportFlow && importPageTab === 'opening' && (
+              <OpeningBasisHub
+                section={openingSection}
+                onSection={setOpeningSection}
+                onOpenTxnImport={() => openImportFlow('txn')}
+              />
+            )}
 
-            {importPageTab === 'import' && activeTab === 'analyse' && (
+            {showImportFlow && (
               <div className="space-y-6">
+            {/* Page header for the upload flow — names where you are and how to get back. */}
+            <div className="flex flex-wrap items-center justify-between gap-3 max-w-3xl mx-auto">
+              <button
+                onClick={() => setImportFlow(null)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-lg shadow-xs hover:bg-slate-50 transition-colors cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                {importFlow === 'txn' ? 'Opening Basis' : 'Imports'}
+              </button>
+              <h2 className="text-sm font-black text-slate-800 tracking-tight">
+                {importFlow === 'txn' ? 'Add Transaction Statement' : 'New Import'}
+              </h2>
+            </div>
             {!data && !isLoading && (
               <div className="text-center max-w-3xl mx-auto mt-6 space-y-5">
-                {/* Broker Selection Control Panel */}
-                <div className="flex flex-col items-center justify-center space-y-2 mb-2">
-                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Select Broker Contract Note Source</span>
-                  <div className="inline-flex items-center justify-center p-1 bg-white border border-slate-200/80 shadow-xs rounded-xl overflow-hidden max-w-full">
-                    <button
-                      id="btn-broker-zerodha"
-                      type="button"
-                      onClick={() => setBroker('zerodha')}
-                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'zerodha' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
-                    >
-                      <span>Zerodha</span>
-                    </button>
-                    <button
-                      id="btn-broker-shareindia"
-                      type="button"
-                      onClick={() => setBroker('shareindia')}
-                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'shareindia' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
-                    >
-                      <span className="flex items-center gap-1 font-bold">
-                        <span>Share</span>
-                        <span>India</span>
-                      </span>
-                    </button>
-                    <button
-                      id="btn-broker-integrated"
-                      type="button"
-                      onClick={() => setBroker('integrated')}
-                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'integrated' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
-                    >
-                      <span>Integrated</span>
-                    </button>
-                    <button
-                      id="btn-broker-txnreport"
-                      type="button"
-                      onClick={() => setBroker('transaction-report')}
-                      title="Upload a broker transaction report PDF to seed historical trades"
-                      className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${broker === 'transaction-report' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
-                    >
-                      <span>Txn Report</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Transaction report has no embedded portfolio code — pick the destination sheet */}
-                {broker === 'transaction-report' && (
+                {/* Broker Selection Control Panel — the three contract-note brokers. A
+                    transaction statement is NOT a broker source any more; it has its own
+                    entry under Opening Basis → Add Trx Statement (which lands here with
+                    importFlow === 'txn'). */}
+                {importFlow === 'notes' && (
                   <div className="flex flex-col items-center justify-center space-y-2 mb-2">
-                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Export To Portfolio Sheet</span>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Select Broker Contract Note Source</span>
+                    <div className="inline-flex items-center justify-center p-1 bg-white border border-slate-200/80 shadow-xs rounded-xl overflow-hidden max-w-full">
+                      {([
+                        { id: 'btn-broker-zerodha', key: 'zerodha', label: 'Zerodha' },
+                        { id: 'btn-broker-shareindia', key: 'shareindia', label: 'Share India' },
+                        { id: 'btn-broker-integrated', key: 'integrated', label: 'Integrated' },
+                      ] as const).map((b) => (
+                        <button
+                          key={b.key}
+                          id={b.id}
+                          type="button"
+                          onClick={() => setBroker(b.key)}
+                          className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${broker === b.key ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                        >
+                          {b.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* A transaction statement carries no portfolio code — pick the destination sheet */}
+                {importFlow === 'txn' && (
+                  <div className="flex flex-col items-center justify-center space-y-2 mb-2">
+                    <p className="text-[12px] text-slate-500 leading-relaxed max-w-xl mx-auto">
+                      Seeds <b className="text-slate-700">historical trades</b> from a broker transaction statement. Buy and
+                      Sell rows are parsed like a contract note and written to the sheet below. To take only the
+                      Bonus / Split / Rights out of the same file, use{' '}
+                      <b className="text-slate-700">Corporate Actions from a Trx Statement</b> instead.
+                    </p>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 pt-1">Export To Portfolio Sheet</span>
                     <select
                       value={txnReportPortfolio}
                       onChange={(e) => setTxnReportPortfolio(e.target.value)}
@@ -2433,9 +2495,6 @@ export default function App() {
                 </div>
               </div>
             )}
-
-            {/* Corp-actions-only import: detect Bonus/Split/Rights from a FY26 statement (trades ignored) */}
-            {!data && !isLoading && <CorpActionsImport />}
 
             {isLoading && (
               <div className="text-center py-20 max-w-md mx-auto">

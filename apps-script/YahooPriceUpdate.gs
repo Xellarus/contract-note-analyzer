@@ -51,7 +51,24 @@ var CONFIG = {
   // when installPriceTrigger() calls everyMinutes(). Changing this does nothing until you re-run
   // installPriceTrigger(); the interval is baked into the trigger, not read at fire time.
   TRIGGER_MINUTES: 10,
+
+  // ── Price history (for the AUM / Performance charts) ───────────────────────
+  HISTORY_TAB: 'Price History',
+  HISTORY_RANGE: '2y',        // full backfill depth — verified available even for thin BSE names
+  HISTORY_TOPUP_RANGE: '1mo', // the daily pass re-fetches a month so it SELF-HEALS any gap
+  HISTORY_BATCH: 15,          // smaller than BATCH: each response is ~500 candles, not 5
 };
+
+/**
+ * Benchmarks stored alongside the scrips, as columns keyed with a leading '^'.
+ * NIFTYSMLCAP250.NS is the real Yahoo symbol for "NIFTY SMLCAP 250" (verified: 500 daily
+ * candles over 2y, 1,239 over 5y). Note '^CNXSC' is Smallcap *100* and returns a near-empty
+ * series, so it is deliberately not used.
+ */
+var BENCHMARKS = [
+  { key: '^NIFTYSMLCAP250', symbol: 'NIFTYSMLCAP250.NS', label: 'NIFTY Smallcap 250' },
+  { key: '^NIFTY50',        symbol: '^NSEI',             label: 'NIFTY 50' },
+];
 
 // Portfolio sheets to read holdings from (mirrors src/lib/portfolios.ts / the auto-import .gs).
 var PORTFOLIOS = [
@@ -129,6 +146,18 @@ function doGet(e) {
     try { s = scanCorpActions(); s.ok = true; }
     catch (e2) { s = { ok: false, error: (e2 && e2.message) ? e2.message : String(e2) }; }
     return ContentService.createTextOutput(JSON.stringify(s)).setMimeType(ContentService.MimeType.JSON);
+  }
+  // /exec?hist=full  → full 2-year price-history rebuild (run this ONCE to seed the tab)
+  // /exec?hist=topup → the daily incremental pass, on demand
+  // A full backfill fetches ~500 candles per scrip, so it may exceed the 6-minute limit on a
+  // large universe; re-running is safe and picks up where the tab left off for the columns that
+  // already landed. Watch `priced` / `missed` / `dates` in the response.
+  if (e && e.parameter && e.parameter.hist) {
+    var h;
+    try {
+      h = e.parameter.hist === 'full' ? backfillPriceHistory() : updatePriceHistory();
+    } catch (e3) { h = { ok: false, error: (e3 && e3.message) ? e3.message : String(e3) }; }
+    return ContentService.createTextOutput(JSON.stringify(h)).setMimeType(ContentService.MimeType.JSON);
   }
   var out;
   // `session` + `staleYahoo` are the staleness gate's diagnostics: which trading session these
@@ -299,7 +328,9 @@ function loadMasterSymbols_() {
     var nse = firstToken_(r[ci.nse]);
     var bse = firstToken_(r[ci.bse]);
     if (!isin && !name) continue;
-    var entry = { nse: nse, bse: bse, name: name };
+    // `isin` is carried on the entry so a name-only row (True Entry has no ISIN column) can be
+    // canonicalised to its ISIN — the column key the price-history grid and the app agree on.
+    var entry = { nse: nse, bse: bse, name: name, isin: isin };
     if (isin && !m.byIsin[isin]) m.byIsin[isin] = entry;
     var nk = normName_(name);
     if (nk && !m.byName[nk]) m.byName[nk] = entry;
@@ -739,6 +770,360 @@ function writeMisses_(misses) {
 //
 // Deliberately NOT detected: rights issues, mergers, demergers. They have no price-ratio
 // representation, so this feed can't see them; they stay manual.
+// ═════════════════════════════════════════════════════════════════════════════
+//  PRICE HISTORY — daily closes per scrip, so the app can value PAST positions
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The app could previously chart only the COST of open positions through time: the Prices tab
+// is a single snapshot, so no market-value history existed and the AUM chart's "market" line
+// was limited to the handful of days someone had opened the Dashboard.
+//
+// This writes a wide grid — one row per trading date, one column per scrip (plus benchmark
+// columns keyed with a leading '^') — from which the app recomputes NAV as
+// Σ shares_held(date) × close(date), using the share counts its own FIFO replay already
+// produces. Prices are the SOURCE OF TRUTH here, not the NAV: correcting a trade or recording
+// a late split fixes the whole history automatically, with no rebuild.
+//
+// ⚠️ CLOSES ARE STORED UN-ADJUSTED (what the stock really traded at that day). Yahoo serves a
+// SPLIT-ADJUSTED series, while the ledger holds the shares actually held on each date — so
+// multiplying Yahoo's number by a historical share count under-reports every pre-split day by
+// the split factor. parseHistory_ multiplies each bar by the product of every split factor
+// with an ex-date AFTER it. Verified against Manbro 10:1 (25-Mar-2026), Time Technoplast's two
+// consecutive 2:1s (15 and 23-Sep-2025, compounding to ×4 before both) and Reliance 2:1.
+
+/** Full 2-year rebuild. Safe to re-run; it rewrites the tab. */
+function backfillPriceHistory() { return priceHistoryLocked_(CONFIG.HISTORY_RANGE, true); }
+
+/**
+ * Daily top-up. Deliberately re-fetches a MONTH rather than a day, so a missed run, a late
+ * correction or a Yahoo outage heals itself on the next pass instead of leaving a permanent
+ * hole (the failure mode of the old append-only AUM log).
+ */
+function updatePriceHistory() { return priceHistoryLocked_(CONFIG.HISTORY_TOPUP_RANGE, false); }
+
+function priceHistoryLocked_(range, full) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) return { ok: false, busy: true };
+  try {
+    var t0 = new Date().getTime();
+    var master = loadMasterSymbols_();
+    var universe = collectHistoryUniverse_();
+
+    // Resolve each scrip to a Yahoo symbol + a stable column key. The key is the ISIN whenever
+    // one is known (directly or via the master), else the normalised name — matching how the
+    // app keys its own positions, so the two sides line up without a second lookup table.
+    // Dedupe on the FINAL column key, not on the universe key. collectHistoryUniverse_ can't do
+    // this: it sees a Holding row keyed by ISIN and a True Entry row for the same security keyed
+    // by name (True Entry has no ISIN column), and only the master lookup below collapses them.
+    // Deduping late meant fetching ~500 candles twice for the same symbol — measured 551 fetches
+    // collapsing into 328 columns on the first real backfill, i.e. 40% of the run wasted.
+    var targets = [], noSymbol = 0, dupes = 0, seenKey = {};
+    for (var i = 0; i < universe.length; i++) {
+      var u = universe[i];
+      var syms = symbolsFor_(master, u.isin, u.name);
+      if (!syms.primary) { noSymbol++; continue; }
+      var e = (u.isin && master.byIsin[u.isin]) || master.byName[normName_(u.name)] || null;
+      var key = u.isin || (e && e.isin) || normName_(u.name);
+      if (!key) continue;
+      if (seenKey[key]) { dupes++; continue; }
+      seenKey[key] = true;
+      targets.push({ key: key, name: u.name, symbol: syms.primary, fallback: syms.fallback });
+    }
+    for (var b = 0; b < BENCHMARKS.length; b++) {
+      targets.push({ key: BENCHMARKS[b].key, name: BENCHMARKS[b].label, symbol: BENCHMARKS[b].symbol, fallback: '' });
+    }
+
+    var res = fetchHistoryBatch_(targets, range);
+    // One retry on the other exchange for anything the primary symbol couldn't serve.
+    var retry = [];
+    for (var f = 0; f < res.failed.length; f++) {
+      var t = res.failed[f];
+      if (t.fallback) retry.push({ key: t.key, name: t.name, symbol: t.fallback, fallback: '' });
+    }
+    var res2 = retry.length ? fetchHistoryBatch_(retry, range) : { ok: [], failed: [] };
+    var got = res.ok.concat(res2.ok);
+
+    // Pivot to { ymd: { key: close } }.
+    var byDate = {}, cols = [], seenCol = {}, splitScrips = 0;
+    for (var g = 0; g < got.length; g++) {
+      var row = got[g];
+      if (!seenCol[row.t.key]) { seenCol[row.t.key] = true; cols.push(row.t.key); }
+      if (row.series.splits > 0) splitScrips++;
+      for (var d = 0; d < row.series.dates.length; d++) {
+        var ymd = row.series.dates[d];
+        if (!byDate[ymd]) byDate[ymd] = {};
+        byDate[ymd][row.t.key] = row.series.closes[d];
+      }
+    }
+
+    var written = writePriceHistory_(cols, byDate, full);
+    return {
+      ok: true, full: !!full, range: range,
+      universe: universe.length, targets: targets.length, noSymbol: noSymbol, dupes: dupes,
+      priced: got.length, missed: res2.failed.length + (res.failed.length - retry.length),
+      splitAdjusted: splitScrips,
+      dates: written.dates, cols: written.cols,
+      // Scrips we could not price at all, so the app can show WHICH names a NAV is missing
+      // rather than quietly under-reporting. Capped so the JSON stays small.
+      uncovered: uncoveredNames_(res, res2),
+      ms: new Date().getTime() - t0, at: nowStamp_(),
+    };
+  } finally { lock.releaseLock(); }
+}
+
+/**
+ * Every scrip the portfolios have EVER held — current holdings plus every name in True Entry
+ * and Opening Holdings. collectHeldScrips_ deliberately skips qty <= 0, which is right for
+ * pricing today but wrong here: a position sold last year still needs its prices, or the NAV
+ * on the days it was held silently understates.
+ */
+function collectHistoryUniverse_() {
+  var out = [], seen = {};
+  var add = function (isin, name) {
+    name = String(name == null ? '' : name).trim();
+    isin = String(isin == null ? '' : isin).trim().toUpperCase();
+    if (!name && !isin) return;
+    if (name && /^(total|grand total)$/i.test(name)) return;
+    var k = (isin || normName_(name));
+    if (!k || seen[k]) return;
+    seen[k] = true;
+    out.push({ isin: isin, name: name });
+  };
+
+  for (var p = 0; p < PORTFOLIOS.length; p++) {
+    var ss;
+    try { ss = SpreadsheetApp.openById(PORTFOLIOS[p].sheetId); }
+    catch (e) { Logger.log('history universe: cannot open ' + PORTFOLIOS[p].code + ': ' + e); continue; }
+
+    // Holding tab — includes negative/zero rows here, unlike the pricing pass.
+    try {
+      var hs = ss.getSheetByName(CONFIG.HOLDING_TAB);
+      if (hs) {
+        var hv = hs.getDataRange().getValues();
+        if (hv.length > 1) {
+          var hh = hv[0].map(function (c) { return String(c == null ? '' : c).trim().toLowerCase(); });
+          var hn = indexOfAny_(hh, ['company name', 'stock name', 'name']); if (hn < 0) hn = 0;
+          var hi = indexOfAny_(hh, ['isin']);
+          for (var r = 1; r < hv.length; r++) add(hi >= 0 ? hv[r][hi] : '', hv[r][hn]);
+        }
+      }
+    } catch (e2) { Logger.log('history universe: Holding read failed for ' + PORTFOLIOS[p].code + ': ' + e2); }
+
+    // True Entry — the trade ledger. No ISIN column by design, so names resolve via the master.
+    try {
+      var ts = ss.getSheetByName('True Entry');
+      if (ts) {
+        var tv = ts.getDataRange().getValues();
+        if (tv.length > 1) {
+          var th = tv[0].map(function (c) { return String(c == null ? '' : c).trim().toLowerCase(); });
+          var tn = indexOfAny_(th, ['stock name', 'security name', 'name']); if (tn < 0) tn = 2;
+          for (var r2 = 1; r2 < tv.length; r2++) add('', tv[r2][tn]);
+        }
+      }
+    } catch (e3) { Logger.log('history universe: True Entry read failed for ' + PORTFOLIOS[p].code + ': ' + e3); }
+
+    // Opening Holdings — the carried-in lots that predate the FY26 ledger.
+    try {
+      var os = ss.getSheetByName('Opening Holdings');
+      if (os) {
+        var ov = os.getDataRange().getValues();
+        if (ov.length > 1) {
+          var oh = ov[0].map(function (c) { return String(c == null ? '' : c).trim().toLowerCase(); });
+          var on = indexOfAny_(oh, ['stock name', 'company name', 'name']); if (on < 0) on = 1;
+          var oi = indexOfAny_(oh, ['isin']);
+          for (var r3 = 1; r3 < ov.length; r3++) add(oi >= 0 ? ov[r3][oi] : '', ov[r3][on]);
+        }
+      }
+    } catch (e4) { Logger.log('history universe: Opening Holdings read failed for ' + PORTFOLIOS[p].code + ': ' + e4); }
+  }
+  return out;
+}
+
+/**
+ * Names of the scrips NO symbol could price, so the app can name what a NAV is missing instead
+ * of quietly under-reporting it. Capped, to keep the /exec JSON small.
+ */
+function uncoveredNames_(res, res2) {
+  var out = [], seen = {}, CAP = 40;
+  var push = function (t) {
+    if (!t || !t.name || seen[t.name]) return;
+    seen[t.name] = true;
+    if (out.length < CAP) out.push(t.name);
+  };
+  for (var i = 0; i < res.failed.length; i++) if (!res.failed[i].fallback) push(res.failed[i]);
+  for (var j = 0; j < res2.failed.length; j++) push(res2.failed[j]);
+  return out;
+}
+
+/** Batched daily-candle fetch. Smaller chunks than the price pass: ~500 candles per response. */
+function fetchHistoryBatch_(targets, range) {
+  var ok = [], failed = [];
+  for (var start = 0; start < targets.length; start += CONFIG.HISTORY_BATCH) {
+    var chunk = targets.slice(start, start + CONFIG.HISTORY_BATCH);
+    var requests = chunk.map(function (t) {
+      return {
+        url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(t.symbol) +
+             '?interval=1d&range=' + encodeURIComponent(range) + '&events=split',
+        muteHttpExceptions: true,
+        followRedirects: true,
+        headers: { 'User-Agent': 'Mozilla/5.0' },   // Yahoo 403s a blank UA
+      };
+    });
+    var responses;
+    try { responses = UrlFetchApp.fetchAll(requests); }
+    catch (e) {
+      Logger.log('history fetchAll failed: ' + e);
+      for (var z = 0; z < chunk.length; z++) failed.push(chunk[z]);
+      continue;
+    }
+    for (var k = 0; k < responses.length; k++) {
+      var h = parseHistory_(responses[k]);
+      if (h && h.dates.length) ok.push({ t: chunk[k], series: h });
+      else failed.push(chunk[k]);
+    }
+  }
+  return { ok: ok, failed: failed };
+}
+
+/**
+ * v8 chart response → { dates:[yyyy-MM-dd], closes:[true close], splits:count }.
+ * Nulls (holidays, untraded sessions) are dropped rather than zero-filled, so the app can
+ * forward-fill knowingly instead of charting a scrip crashing to ₹0.
+ */
+function parseHistory_(resp) {
+  try {
+    if (resp.getResponseCode() !== 200) return null;
+    var j = JSON.parse(resp.getContentText());
+    var res = j && j.chart && j.chart.result && j.chart.result[0];
+    if (!res) return null;
+
+    // Split events: Yahoo files an Indian BONUS as a split too (1:1 bonus → numerator 2).
+    var splits = [];
+    var ev = res.events && res.events.splits;
+    if (ev) {
+      for (var k in ev) {
+        if (!ev.hasOwnProperty(k)) continue;
+        var s = ev[k];
+        var num = parseFloat(s.numerator), den = parseFloat(s.denominator);
+        var factor = (num > 0 && den > 0) ? num / den : 1;
+        var sec = Number(s.date);
+        if (factor !== 1 && sec > 0) splits.push({ ts: sec, factor: factor });
+      }
+      splits.sort(function (a, b) { return a.ts - b.ts; });
+    }
+
+    var ts = res.timestamp || [];
+    var raw = (res.indicators && res.indicators.quote && res.indicators.quote[0] &&
+               res.indicators.quote[0].close) || [];
+    var dates = [], closes = [];
+    for (var i = 0; i < raw.length; i++) {
+      var v = raw[i];
+      if (!(typeof v === 'number' && isFinite(v) && v > 0)) continue;
+      var sec2 = ts[i] || 0;
+      if (!(sec2 > 0)) continue;
+      // Un-adjust for every split whose ex-date is STRICTLY AFTER this bar. A bar dated on the
+      // ex-date already reflects the split, so '>' (not '>=') is what keeps it at factor 1.
+      var f = 1;
+      for (var q = 0; q < splits.length; q++) if (splits[q].ts > sec2) f *= splits[q].factor;
+      dates.push(ymdIST_(sec2));
+      closes.push(Math.round(v * f * 10000) / 10000);
+    }
+    return { dates: dates, closes: closes, splits: splits.length };
+  } catch (e) { return null; }
+}
+
+/**
+ * Write the wide grid: Date | <key> | <key> | … Merges into whatever is already there when
+ * `full` is false, so a top-up neither loses columns nor reorders them.
+ */
+function writePriceHistory_(newCols, byDate, full) {
+  var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
+  var sh = ss.getSheetByName(CONFIG.HISTORY_TAB) || ss.insertSheet(CONFIG.HISTORY_TAB);
+
+  var colIndex = {}, cols = [], rowByDate = {};
+
+  if (!full) {
+    var vals = sh.getDataRange().getValues();
+    if (vals.length > 1) {
+      var hdr = vals[0];
+      for (var c = 1; c < hdr.length; c++) {
+        var key = String(hdr[c] == null ? '' : hdr[c]).trim();
+        if (!key || (key in colIndex)) continue;
+        colIndex[key] = cols.length; cols.push(key);
+      }
+      for (var r = 1; r < vals.length; r++) {
+        var ymd = ymdCell_(vals[r][0]);
+        if (!ymd) continue;
+        var arr = [];
+        for (var c2 = 0; c2 < cols.length; c2++) {
+          var v = vals[r][c2 + 1];
+          arr.push((typeof v === 'number' && isFinite(v)) ? v : '');
+        }
+        rowByDate[ymd] = arr;
+      }
+    }
+  }
+
+  for (var n = 0; n < newCols.length; n++) {
+    if (!(newCols[n] in colIndex)) { colIndex[newCols[n]] = cols.length; cols.push(newCols[n]); }
+  }
+
+  for (var ymd2 in byDate) {
+    if (!byDate.hasOwnProperty(ymd2)) continue;
+    var row = rowByDate[ymd2] || (rowByDate[ymd2] = []);
+    var m = byDate[ymd2];
+    for (var key2 in m) {
+      if (!m.hasOwnProperty(key2)) continue;
+      var ci = colIndex[key2];
+      if (ci == null) continue;
+      while (row.length <= ci) row.push('');
+      row[ci] = m[key2];
+    }
+  }
+
+  var dates = Object.keys(rowByDate).sort();
+  var out = [['Date'].concat(cols)];
+  for (var d2 = 0; d2 < dates.length; d2++) {
+    var rw = rowByDate[dates[d2]];
+    while (rw.length < cols.length) rw.push('');
+    out.push([dates[d2]].concat(rw.slice(0, cols.length)));
+  }
+  if (out.length < 2) return { dates: 0, cols: cols.length };
+
+  var needR = out.length, needC = out[0].length;
+  if (sh.getMaxRows() < needR) sh.insertRowsAfter(sh.getMaxRows(), needR - sh.getMaxRows());
+  if (sh.getMaxColumns() < needC) sh.insertColumnsAfter(sh.getMaxColumns(), needC - sh.getMaxColumns());
+
+  // Pin the DATE column to TEXT *before* writing. setValues() coerces an ISO string into a real
+  // Date cell, which then reads back locale-formatted and breaks the merge key on the next
+  // top-up — the exact trap already hit by the Prices tab and the Corp Action Alerts tab.
+  sh.getRange(1, 1, needR, 1).setNumberFormat('@');
+  sh.getRange(1, 1, needR, needC).setValues(out);
+
+  // Write-then-trim (never clearContents-then-write): a failure mid-run leaves the old grid
+  // intact rather than an empty tab.
+  if (sh.getMaxRows() > needR) sh.deleteRows(needR + 1, sh.getMaxRows() - needR);
+  if (sh.getMaxColumns() > needC) sh.deleteColumns(needC + 1, sh.getMaxColumns() - needC);
+  SpreadsheetApp.flush();
+  return { dates: dates.length, cols: cols.length };
+}
+
+/** Daily top-up at ~19:30 IST, well after the close and after the price pass has settled. */
+function installPriceHistoryTrigger() {
+  removePriceHistoryTrigger();
+  ScriptApp.newTrigger('updatePriceHistory').timeBased().atHour(19).nearMinute(30).everyDays(1)
+    .inTimezone('Asia/Kolkata').create();
+  Logger.log('Price history top-up trigger installed (daily ~19:30 IST).');
+}
+function removePriceHistoryTrigger() {
+  var ts = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < ts.length; i++) {
+    if (ts[i].getHandlerFunction() === 'updatePriceHistory') ScriptApp.deleteTrigger(ts[i]);
+  }
+}
+function testPriceHistoryBackfill() { Logger.log(JSON.stringify(backfillPriceHistory(), null, 2)); }
+function testPriceHistoryTopup() { Logger.log(JSON.stringify(updatePriceHistory(), null, 2)); }
+
 function scanCorpActions() {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(0)) { Logger.log('Corp-action scan: another run holds the lock — skipped.'); return { busy: true }; }

@@ -793,6 +793,13 @@ export interface IndustryAllocationResult {
   slices: IndustrySlice[];  // sorted: most companies first
   totalCompanies: number;   // distinct companies across all portfolios
   classified: number;       // companies with a known (non-"Unclassified") industry
+  /**
+   * Canonical scrip key → industry, for callers that need a PER-HOLDING sector rather than the
+   * per-industry totals in `slices` (the factsheet labels each holding with its sector). Keys match
+   * CrossHolding.key, since both resolve through `lookupScrip(...).entry.key` with the same
+   * ISIN-then-normalised-name fallback.
+   */
+  sectorByKey: Map<string, string>;
 }
 
 /**
@@ -846,7 +853,9 @@ export async function computeIndustryAllocation(portfolios: { id: string; label:
     s.companies++; s.invested += c.invested; s.current += c.current;
   }
   const slices = [...byInd.values()].sort((a, b) => (b.companies - a.companies) || (b.current - a.current));
-  return { slices, totalCompanies: companies.size, classified };
+  const sectorByKey = new Map<string, string>();
+  for (const [key, c] of companies) sectorByKey.set(key, c.industry);
+  return { slices, totalCompanies: companies.size, classified, sectorByKey };
 }
 
 export interface CapitalGainsResult {
