@@ -61,7 +61,7 @@ function mkNav(n: number, opts: { flowOn?: number; gapCoverage?: boolean } = {})
     fromTs: pts[0].ts,
     toTs: pts[pts.length - 1].ts,
     unpriced: ['Some Delisted Ltd', 'Another Old Name', 'Third', 'Fourth', 'Fifth'],
-    lowCoverageCount: opts.gapCoverage ? 5 : 0,
+    lowCoverageCount: opts.gapCoverage ? 5 : 0, flowsById: new Map(), partialFlowIds: [],
   };
 }
 
@@ -122,7 +122,7 @@ console.log('\n2. No market history at all (tab not backfilled)');
 console.log('\n3. Degenerate inputs');
 {
   // Two cost points only, nav present but empty.
-  const empty: NavResult = { total: [], byPortfolio: [], benchmark: [], fromTs: null, toTs: null, unpriced: [], lowCoverageCount: 0 };
+  const empty: NavResult = { total: [], byPortfolio: [], benchmark: [], fromTs: null, toTs: null, unpriced: [], lowCoverageCount: 0 , flowsById: new Map(), partialFlowIds: []};
   render({ points: cost.slice(0, 2), nav: empty, aumToday: null, portfolios: [] }, 'empty-nav');
   // A single NAV session (nothing to draw a line with).
   render({ points: cost, nav: mkNav(1), aumToday: 100, portfolios: PORTFOLIOS }, 'one-session');

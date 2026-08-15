@@ -1,6 +1,8 @@
 import { gapi } from "gapi-script";
 import { loadOpeningHoldings } from "./openingHoldings";
 import { loadCorporateActions } from "./corporateActions";
+import { loadOpeningTxns } from "./openingTxns";
+import type { CashFlow } from "./xirr";
 import { loadScripMaster, lookupScrip, normName, SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
 import {
   loadPriceGrid, fillColumn, sessionIndexOnOrAfter, sessionIndexAsOf,
@@ -52,9 +54,17 @@ export interface NavResult {
   unpriced: string[];
   /** Sessions whose coverage fell below COVERAGE_OK. */
   lowCoverageCount: number;
+  /** Dated cash flows per portfolio id, for the money-weighted return. Investor's signs: buys
+   *  negative, sells positive. No terminal value — computeReturns appends that itself so it
+   *  always matches the NAV endpoint the CAGR used. */
+  flowsById: Map<string, CashFlow[]>;
+  /** Portfolio ids whose `Opening Txns` history is absent OR doesn't reach back as far as their
+   *  oldest surviving lot, so the pre-FY26 cash flows fall back to those lots alone: every
+   *  position opened AND closed before 31-Mar-2025 is missing, which biases XIRR. */
+  partialFlowIds: string[];
 }
 
-const EMPTY: NavResult = { total: [], byPortfolio: [], benchmark: [], fromTs: null, toTs: null, unpriced: [], lowCoverageCount: 0 };
+const EMPTY: NavResult = { total: [], byPortfolio: [], benchmark: [], fromTs: null, toTs: null, unpriced: [], lowCoverageCount: 0, flowsById: new Map(), partialFlowIds: [] };
 
 const toNum = (s: any): number => {
   const v = parseFloat((s ?? "").toString().replace(/,/g, "").trim());
@@ -185,14 +195,17 @@ export async function computeNavTimeline(
 
   const unpriced = new Set<string>();
   const perPortfolio: NavPortfolio[] = [];
+  const flowsById = new Map<string, CashFlow[]>();
+  const partialFlowIds: string[] = [];
 
   for (const p of portfolios) {
     let n = 0; const ord = () => n++;
     const names = new Map<string, string>();          // key → a human name, for `unpriced`
-    const [lots, te, cas] = await Promise.all([
+    const [lots, te, cas, otx] = await Promise.all([
       loadOpeningHoldings(p.sheetId).catch(() => []),
       trueEntryEvents(p.sheetId, keyOf, ord, names).catch(() => [] as Ev[]),
       loadCorporateActions(p.sheetId).catch(() => []),
+      loadOpeningTxns(p.sheetId).catch(() => []),
     ]);
 
     const events: Ev[] = [...te];
@@ -221,6 +234,57 @@ export async function computeNavTimeline(
     }
     if (!events.length) { perPortfolio.push({ id: p.id, points: [] }); continue; }
     events.sort((a, b) => (a.ts - b.ts) || (a.pri - b.pri) || (a.ord - b.ord));
+
+    // ── dated CASH flows, for the money-weighted return (XIRR) ────────────────
+    // Investor's sign convention: a buy is money out (negative), a sell is money back
+    // (positive). NOT clamped to NAV_START_TS — XIRR discounts cash flows rather than replaying
+    // positions, so the opening-basis cutoff that binds the NAV series doesn't bind it.
+    //
+    // The pre-FY26 leg has two possible sources and they are NOT equivalent:
+    //   Opening Txns   the full statement history — every buy AND every sell, including
+    //                  positions opened and closed before the cutoff. Complete.
+    //   opening lots   only the lots that SURVIVED to 31-Mar-2025. Every realised round-trip
+    //                  before then is missing, both legs, which biases the rate. Used only as
+    //                  a fallback, and the portfolio is reported in `partialFlowIds` so the
+    //                  number can be labelled rather than quietly trusted.
+    const cash: CashFlow[] = [];
+    const preFy26 = otx.filter((t) => {
+      const ts = dateTs(t.iso);
+      return !isNaN(ts) && ts < NAV_START_TS;
+    });
+    // A history that exists is not necessarily a history that's COMPLETE: Add-batch mode is fed
+    // in slices, so a half-finished seeding leaves a tab holding only the recent years. Every
+    // surviving lot was bought at some point, so if the oldest lot predates the oldest recorded
+    // transaction, the earlier slices are missing — and using that history alone would be worse
+    // than the lots fallback, silently. `min` by loop, not Math.min(...arr): these arrays run to
+    // thousands and spreading them overflows the argument stack.
+    const minTs = (list: number[]) => list.reduce((m, t) => (isNaN(t) ? m : Math.min(m, t)), Infinity);
+    const earliestLot = minTs(lots.filter((l) => l.qty > 0).map((l) => dateTs(l.acqDate)));
+    const earliestTxn = minTs(preFy26.map((t) => dateTs(t.iso)));
+    const coversAllLots = !isFinite(earliestLot) || earliestTxn <= earliestLot + 7 * 86400000;
+
+    if (preFy26.length && coversAllLots) {
+      for (const t of preFy26) {
+        if (/bonus|split/i.test(t.type)) continue;             // shares, not cash
+        const amt = t.amount > 0 ? t.amount : t.qty * t.price;
+        if (!(amt > 0)) continue;
+        cash.push({ ts: dateTs(t.iso), amount: /sell/i.test(t.type) ? amt : -amt });
+      }
+    } else {
+      partialFlowIds.push(p.id);   // fall through to the surviving lots below
+    }
+    const useTxnHistory = preFy26.length > 0 && coversAllLots;
+    for (const e of events) {
+      // Corporate actions and bonus/split rows carry amount 0, so they drop out here on their
+      // own — correct, since none of them move cash.
+      if (e.side === "CA" || !e.amount) continue;
+      // With a full statement history the surviving lots are already represented by their
+      // original purchases; taking them again would double-count the same money.
+      if (useTxnHistory && e.ts < NAV_START_TS) continue;
+      cash.push({ ts: e.ts, amount: e.side === "BUY" ? -e.amount : e.amount });
+    }
+    cash.sort((a, b) => a.ts - b.ts);
+    flowsById.set(p.id, cash);
 
     // Corporate-action boundaries per key, as SESSION INDICES — mapped with an as-of lookup so an
     // ex-date falling on a weekend or holiday still lands on a real session.
@@ -345,6 +409,8 @@ export async function computeNavTimeline(
   return {
     total,
     byPortfolio: perPortfolio,
+    flowsById,
+    partialFlowIds,
     benchmark,
     fromTs: sessions.length ? sessions[0] : null,
     toTs: sessions.length ? sessions[sessions.length - 1] : null,

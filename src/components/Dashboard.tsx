@@ -11,6 +11,7 @@ import { computeCrossHoldings, CrossHolding } from '../lib/crossHoldings';
 import { computePendingCorpActions, dismissCorpActionAlert, PendingCorpAction } from '../lib/corpActionAlerts';
 import { computeNavTimeline, type NavResult } from '../lib/navTimeline';
 import PortfolioCharts from './PortfolioCharts';
+import ReturnsPanel from './ReturnsPanel';
 import { toast } from './ui/overlay';
 import CubeLoader from './ui/CubeLoader';
 import PriceStatusButton from './PriceStatusButton';
@@ -498,6 +499,10 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
           portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label }))}
         />
       )}
+
+      {/* Headline returns — CAGR (time-weighted) beside XIRR (money-weighted). Sits under the
+          charts because it is the same series reduced to two numbers. */}
+      <ReturnsPanel nav={navHist} portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label }))} />
 
       {/* Unrecorded splits / bonuses. Renders ONLY when something needs entering, so a clean
           ledger shows nothing at all — and recording the action makes the row disappear on the

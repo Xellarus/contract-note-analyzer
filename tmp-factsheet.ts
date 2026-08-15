@@ -47,7 +47,7 @@ const nav: NavResult = {
   benchmark: navPts.slice(anchor).map((p, k) => ({ ts: p.ts, index: 1000 * (1 + 0.00035 * k) })),
   fromTs: navPts[0].ts, toTs: navPts[339].ts,
   unpriced: ['Some Delisted Ltd', 'Another Old Name'],
-  lowCoverageCount: 3,
+  lowCoverageCount: 3, flowsById: new Map(), partialFlowIds: [],
 };
 
 const SEED: [string, string][] = [
