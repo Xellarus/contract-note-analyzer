@@ -6,7 +6,8 @@
  *   id      internal key (lowercase, stable — usually the UCC lowercased)
  *   code    UCC / client code shown as a badge
  *   label   display name (disambiguated with the broker where a name repeats)
- *   broker  'integrated' | 'shareindia' | 'zerodha' (which broker the account is with)
+ *   broker  'integrated' | 'shareindia' | 'zerodha' | 'nuvama' (which broker the
+ *           account is with — documentation only; nothing branches on it)
  *   sheetId Google Sheet ID backing this portfolio
  *   ucc     UCC code(s) that route an imported contract note to this sheet
  *           (usually just [code]; leave [] for manual-entry-only portfolios)
@@ -31,6 +32,9 @@ export const PORTFOLIOS: Portfolio[] = [
   { id: 'cs1106', code: 'CS1106', label: 'Shree Balaji Investments',    broker: 'shareindia', sheetId: '1qZL9Mhpwvm7jVuqmBQppRZ-9BW1V86haY3q0keOjDYY', ucc: ['CS1106'] },
   { id: 'oaeu09', code: 'OAEU09', label: 'Aditya Agarwal (ShareIndia)', broker: 'shareindia', sheetId: '1snmLk3-Y8VoopYSRjVWAMqkINf34daW_ZwA6-Gs9UZM', ucc: ['OAEU09'] },
   { id: 'njw724', code: 'NJW724', label: 'Aditya Agarwal (Zerodha)',    broker: 'zerodha',    sheetId: '1QoW51xsJfLtjkSGnEnaqsClgFd4AHJdbnVQKMLHhmYY', ucc: ['NJW724'] },
+  // Nuvama UCCs are numeric ("Trading/ Back Office Code" on the note), not letter+digits
+  // like the other brokers — so the code badge reads as a number here.
+  { id: '60072941', code: '60072941', label: 'Uma Agarawal', broker: 'nuvama', sheetId: '1LSfd2WVg0-Q_95lgsCZNI93ULZKqBi9PPdvT5Jo4qGs', ucc: ['60072941'] },
 ];
 
 /** Where blank/unknown routing falls back to. */
