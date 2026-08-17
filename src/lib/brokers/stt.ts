@@ -1,6 +1,6 @@
 // ── Securities Transaction Tax (STT) allocation ─────────────────────────────
-// Shared by every contract-note parser (Integrated, Zerodha, Share India,
-// Standard) so STT is booked identically across brokers.
+// Shared by every contract-note parser (Integrated, Zerodha, Share India, Nuvama)
+// so STT is booked identically across brokers.
 //
 // MODEL (2026-07 redesign — the note's PRINTED total STT is the anchor):
 //   • Within each security the MATCHED quantity min(buyQty, sellQty) is treated

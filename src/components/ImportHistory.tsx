@@ -132,8 +132,8 @@ export default function ImportHistory({ onNewImport }: { onNewImport?: () => voi
           <div>
             <h3 className="text-sm font-black text-slate-800 tracking-tight">Import contract notes</h3>
             <p className="text-[12px] text-slate-500 mt-0.5 leading-relaxed max-w-xl">
-              Zerodha, Share India or Integrated. Drop the notes, check the reconciliation audit, then write
-              them to <b className="font-bold text-slate-600">Raw Entry</b> and <b className="font-bold text-slate-600">True Entry</b>.
+              Zerodha, Share India, Integrated or Nuvama. Drop the notes, check the reconciliation audit, then
+              write them to <b className="font-bold text-slate-600">Raw Entry</b> and <b className="font-bold text-slate-600">True Entry</b>.
             </p>
           </div>
         </div>

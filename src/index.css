@@ -420,7 +420,7 @@ html:not(.dark) .shadow-indigo-500\/25,
 html:not(.dark) .shadow-indigo-500\/20 { --tw-shadow-color: rgb(0 0 0 / 0.18); }
 html:not(.dark) .shadow-indigo-200  { --tw-shadow-color: rgb(0 0 0 / 0.12); }
 
-/* Decorative gradient stops → ink (panel accent bar, CsvAuditor header) */
+/* Decorative gradient stops → ink (panel accent bars) */
 html:not(.dark) .from-blue-600,
 html:not(.dark) .from-indigo-700    { --tw-gradient-from: #8a6a1e; }
 html:not(.dark) .to-violet-600      { --tw-gradient-to: #b8923a; }

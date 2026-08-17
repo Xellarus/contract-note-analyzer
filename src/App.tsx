@@ -1,16 +1,15 @@
 import { gapi } from "gapi-script";
 import React, { useState, useRef, useEffect } from 'react';
 import * as XLSX from 'xlsx';
-import { 
-  Upload, X, Download, FileText, Info, CheckCircle2, AlertCircle, 
-  ArrowRightLeft, ListChecks, Play, Trash2, PlusCircle, AlertTriangle, 
-  RefreshCw, Check, ShieldAlert, Award, ChevronRight, ArrowLeft, Gauge,
+import {
+  Upload, X, Download, FileText, CheckCircle2, AlertCircle, AlertTriangle,
+  RefreshCw, Check, ShieldAlert, ChevronRight, ArrowLeft, Gauge,
   Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3,
   Briefcase, ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGoogleLogin } from '@react-oauth/google';
-import { ContractNoteResult, ReconciliationStatus, PortfolioHolding, PortfolioUser } from './types';
+import { ContractNoteResult, PortfolioHolding, PortfolioUser } from './types';
 import { persistGoogleToken, restoreGoogleToken, clearGoogleToken, hasValidGoogleToken } from './lib/googleAuth';
 import { installSheetsRetry } from './lib/sheetsRetry';
 import { registerBackStep } from './lib/appBack';
@@ -26,9 +25,9 @@ import { formatDMY } from './lib/dates';
 import { useVirtualRows } from './components/ui/useVirtualRows';
 import CubeLoader from './components/ui/CubeLoader';
 import ThemeToggle from './components/ui/ThemeToggle';
-import { processFile, mergeResults, calculateReconciliation } from './lib/parsers';
+import { processFile, mergeResults } from './lib/parsers';
+import { BrokerId } from './lib/brokers/types';
 import sessionVaultSvg from './assets/session-vault.svg?url';
-import CsvAuditor from './components/CsvAuditor';
 import Dashboard from './components/Dashboard';
 import Holdings from './components/Holdings';
 import ImportHistory from './components/ImportHistory';
@@ -37,11 +36,50 @@ import Reports, { StockFocus } from './components/Reports';
 import ScreenerImport from './components/ScreenerImport';
 import OpeningBasisHub, { OpeningSection } from './components/OpeningBasisHub';
 import LiveClock from './components/LiveClock';
-import { seedRegressionCases, runRegressionTests, RegressionTestCase, TestResult } from './lib/regressionMemory';
 
-const SummaryCard = ({ 
-  label, 
-  value, 
+/**
+ * Brokers whose notes quote rates to four decimals, so display and export have to
+ * as well. Rounding such a rate to paise breaks the amount↔price round-trip — a
+ * Nuvama V1 note aggregates 13 fills into an avgPrice of 484.005, which at 2dp
+ * becomes 484.01 and turns ₹9,68,010 of turnover into ₹9,68,020.
+ *
+ * One definition because this test was previously hand-written at five separate
+ * sites (`data.brokerName === 'shareindia' ? 4 : 2`) that had to be kept in step.
+ */
+const RATE_4DP_BROKERS = new Set(['shareindia', 'nuvama']);
+const rateDecimals = (brokerName?: string | null): number =>
+  RATE_4DP_BROKERS.has(brokerName || '') ? 4 : 2;
+
+/**
+ * The three Nuvama note templates, in the order the dropdown offers them. Nuvama
+ * rewrote its contract note twice, so the parser cannot be inferred from the
+ * broker alone — the template has to be named. See brokers/nuvama.ts for the
+ * layout differences and the verified arithmetic behind each.
+ */
+const NUVAMA_VARIANTS = [
+  {
+    key: 'nuvama-v1' as const,
+    short: 'V1',
+    label: 'V1 — 2021 Edelweiss',
+    hint: 'Older notes on the EDELWEISS BROKING LTD. letterhead. Per-trade rows.',
+  },
+  {
+    key: 'nuvama-v2' as const,
+    short: 'V2',
+    label: 'V2 — 2023 Nuvama',
+    hint: 'Same table as V1, Nuvama letterhead ("Formerly - Edelweiss Broking Limited").',
+  },
+  {
+    key: 'nuvama-v3' as const,
+    short: 'V3',
+    label: 'V3 — current (new)',
+    hint: 'The 2026 rewrite: one weighted-average row per ISIN, with a separate Annexure page.',
+  },
+];
+
+const SummaryCard = ({
+  label,
+  value,
   highlight = false, 
   alertState = false, 
   labelStyle = {}, 
@@ -241,7 +279,7 @@ export default function App() {
       const isIntegrated = data.brokerName === 'integrated';
       const showIpf = data.brokerName === 'integrated';
 
-      const numDecimals = data.brokerName === 'shareindia' ? 4 : 2;
+      const numDecimals = rateDecimals(data.brokerName);
       const formatCSV = (val: number) => {
         const fixed = val.toFixed(numDecimals);
         if (numDecimals === 4) {
@@ -499,7 +537,10 @@ export default function App() {
       // Record the import: Date | Time | Contract Note Name | Broker | User.
       const brokerLabel = ({
         zerodha: 'Zerodha', integrated: 'Integrated', shareindia: 'ShareIndia',
-        standard: 'Standard', 'transaction-report': 'Transaction Report',
+        'transaction-report': 'Transaction Report', nuvama: 'Nuvama',
+        // All three Nuvama variants report brokerName 'nuvama' on purpose, so the
+        // Import Log's broker filter stays one option rather than fragmenting into
+        // three (filterImportLogRows matches exactly, case-sensitively).
       } as Record<string, string>)[data.brokerName || ''] || (data.brokerName || 'Unknown');
       const noteName = uploadedNoteNames.length
         ? uploadedNoteNames.join(', ')
@@ -682,7 +723,6 @@ export default function App() {
     localStorage.setItem('portfolio_cash_balance', cashBalance.toString());
   }, [cashBalance]);
 
-  const [activeTab, setActiveTab] = useState<'analyse' | 'audit' | 'tests'>('analyse');
   // Imports page tabs. "Import" is no longer one of them: the log IS the landing page and
   // the upload flow is a page you enter from its Import button (see importFlow below).
   const [importPageTab, setImportPageTab] = useState<'history' | 'screener' | 'opening'>('history');
@@ -696,7 +736,7 @@ export default function App() {
   const [data, setData] = useState<ContractNoteResult | null>(null);
   const [showRawText, setShowRawText] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
-  const isShareIndia = data?.brokerName === 'shareindia';
+  const priceDecimals = rateDecimals(data?.brokerName);
 
   const requestSort = (key: string) => {
     let direction: 'asc' | 'desc' = 'desc';
@@ -790,7 +830,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [fileCount, setFileCount] = useState({ total: 0, processed: 0 });
   const [dragging, setDragging] = useState(false);
-  const [broker, setBroker] = useState<'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard' | 'transaction-report'>('zerodha');
+  const [broker, setBroker] = useState<BrokerId>('zerodha');
+  // Nuvama's variant dropdown. The picker has to name the template explicitly
+  // because Nuvama rewrote its contract note twice — see brokers/nuvama.ts.
+  const [nuvamaMenuOpen, setNuvamaMenuOpen] = useState(false);
+  const nuvamaMenuRef = useRef<HTMLDivElement>(null);
+  const isNuvama = broker.startsWith('nuvama');
   // A transaction-report CSV carries no portfolio code, so the user picks the
   // destination explicitly; this overrides UCC-based routing for that source.
   const [txnReportPortfolio, setTxnReportPortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
@@ -800,8 +845,26 @@ export default function App() {
   const [showExportConfirmation, setShowExportConfirmation] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isLogicOpen, setIsLogicOpen] = useState(false);
-  const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | 'integrated' | null>(null);
+  const [selectedLogicBroker, setSelectedLogicBroker] = useState<'zerodha' | 'shareindia' | 'integrated' | 'nuvama' | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Close the Nuvama variant menu on an outside click or Escape — same pattern as
+  // ExportMenu. Capture phase is not needed here; the menu owns no focus trap.
+  useEffect(() => {
+    if (!nuvamaMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (nuvamaMenuRef.current && !nuvamaMenuRef.current.contains(e.target as Node)) {
+        setNuvamaMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setNuvamaMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [nuvamaMenuOpen]);
 
   // ── Imports page navigation ────────────────────────────────────────────────
   // Enter the upload flow. A note that's still mid-flight is KEPT — backing out to the log
@@ -824,10 +887,11 @@ export default function App() {
     setImportFlow(flow);
   };
 
-  // Is the upload flow actually on screen? The `analyse` term matters: the audit/tests
-  // panels replace the analyse panel, so without it a non-analyse tab would render neither
-  // the flow page NOR the tab strip that hides behind it — a blank page with no way back.
-  const showImportFlow = !!importFlow && activeTab === 'analyse';
+  // Is the upload flow actually on screen? This used to also test `activeTab === 'analyse'`,
+  // because the audit/tests panels replaced the analyse panel and a non-analyse tab would
+  // otherwise render neither the flow page NOR the tab strip behind it — a blank page with no
+  // way back. Those panels are gone, so the tab no longer exists and the flag is just the flow.
+  const showImportFlow = !!importFlow;
 
   // Back inside the Imports page unwinds THIS page first — upload flow (3), then the
   // open Opening Basis tool (2) — before the shared depth-1 step drops to the Dashboard.
@@ -920,7 +984,7 @@ export default function App() {
 
   // ── Right after a successful parse, confirm each security's name against the
   // NSE/BSE list. Runs for EVERY broker that produced named securities:
-  // ISIN-bearing notes (Integrated, Zerodha, Share India, Standard) confirm
+  // ISIN-bearing notes (Integrated, Zerodha, Share India) confirm
   // primarily by ISIN — but when a note's ISIN isn't in the master they'd
   // otherwise fall through to fuzzy name-matching with no human check, so the
   // popup catches that. The name-only Transaction Report confirms by name — for
@@ -966,10 +1030,12 @@ export default function App() {
 
     let fileArray = Array.from(files);
 
-    if (broker === 'zerodha') {
+    // The `accept` attribute on the file input is bypassable by drag-and-drop, which
+    // calls this directly — so PDF-only brokers are re-checked here with a real message.
+    if (broker === 'zerodha' || isNuvama) {
       const allowedFiles = fileArray.filter(file => file.name.toLowerCase().endsWith('.pdf'));
       if (allowedFiles.length === 0) {
-        setError("Only PDF contract notes are allowed for Zerodha.");
+        setError(`Only PDF contract notes are allowed for ${broker === 'zerodha' ? 'Zerodha' : 'Nuvama'}.`);
         setIsLoading(false);
         return;
       }
@@ -1034,7 +1100,7 @@ export default function App() {
         const merged = mergeResults(results);
         setData(merged);
         setPendingFiles(null);
-        confirmSecurities(merged);  // security-confirmation popup for every broker (Integrated, Zerodha, Share India, Standard, Transaction Report)
+        confirmSecurities(merged);  // security-confirmation popup for every broker (Integrated, Zerodha, Share India, Transaction Report)
       }
     } catch (err: any) {
       setError(err?.message || "Failed to parse the files. Please check if they are valid contract notes.");
@@ -1161,7 +1227,7 @@ export default function App() {
       "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class"
     ];
 
-    const numDecimals = data.brokerName === 'shareindia' ? 4 : 2;
+    const numDecimals = rateDecimals(data.brokerName);
     const formatCSV = (val: number) => {
       const fixed = val.toFixed(numDecimals);
       if (numDecimals === 4) {
@@ -1358,7 +1424,7 @@ export default function App() {
 
       const sharesLedgerName = getSharesLedgerName(securityName);
 
-      const narration = `${securityName} ${qty} Nos @ ${data.brokerName === 'shareindia' ? avgPrice.toFixed(4) : avgPrice.toFixed(2)}`;
+      const narration = `${securityName} ${qty} Nos @ ${avgPrice.toFixed(rateDecimals(data.brokerName))}`;
 
       const addRow = (ledgerName: string, entryType: "Debit" | "Credit", amount: number, rowNarration: string = "") => {
         sheetData.push([
@@ -1591,7 +1657,7 @@ export default function App() {
       };
 
       const sharesLedgerName = getSharesLedgerName(securityName);
-      const narration = `${securityName} ${qty} Nos @ ${data.brokerName === 'shareindia' ? avgPrice.toFixed(4) : avgPrice.toFixed(2)}`;
+      const narration = `${securityName} ${qty} Nos @ ${avgPrice.toFixed(rateDecimals(data.brokerName))}`;
 
       const brokerLedger = ledgerMappings.BROKER || "Broker Ledger";
 
@@ -1718,47 +1784,6 @@ export default function App() {
       setShowExportConfirmation(true);
     } else {
       importToSheets();
-    }
-  };
-
-  // State for Regression Testing tab
-  const [testResults, setTestResults] = useState<TestResult[]>([]);
-  const [isRunningTests, setIsRunningTests] = useState(false);
-  const [customCases, setCustomCases] = useState<RegressionTestCase[]>(() => {
-    const saved = localStorage.getItem('custom_regression_cases');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [activeTestDetail, setActiveTestDetail] = useState<string | null>(null);
-
-  const runAllTests = async () => {
-    setIsRunningTests(true);
-    try {
-      const results = await runRegressionTests(customCases);
-      setTestResults(results);
-    } catch (e) {
-      console.error("Error running regression tests", e);
-    } finally {
-      setIsRunningTests(false);
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab === 'tests') {
-      runAllTests();
-    }
-  }, [activeTab, customCases]);
-
-  const clearCustomCases = async () => {
-    const ok = await confirmDialog({
-      title: 'Delete all custom regression cases?',
-      body: 'This removes every custom test case you added. This cannot be undone.',
-      danger: true,
-      confirmLabel: 'Delete all',
-    });
-    if (ok) {
-      localStorage.removeItem('custom_regression_cases');
-      setCustomCases([]);
-      setTestResults([]);
     }
   };
 
@@ -2069,6 +2094,17 @@ export default function App() {
                                 </span>
                                 <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
                               </button>
+
+                              <button
+                                onClick={() => setSelectedLogicBroker('nuvama')}
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                              >
+                                <span className="flex items-center gap-2">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                  Nuvama Logic Model
+                                </span>
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                              </button>
                             </div>
                           </motion.div>
                         )}
@@ -2204,7 +2240,7 @@ export default function App() {
                             <h3 className="text-xs font-black tracking-wider uppercase text-red-400">Share India Calculation Model</h3>
                           </div>
                           <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
-                            Mathematical rules used dynamically by the Share India extension of the Standard note layout engine.
+                            Mathematical rules used dynamically by the Share India note layout engine.
                           </p>
                         </div>
 
@@ -2290,6 +2326,70 @@ export default function App() {
                             </h4>
                             <p className="mb-1.5 text-slate-655 font-sans">
                               Verifies that the sum of the rows equals exactly the grand total shown on the summary page.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : selectedLogicBroker === 'nuvama' ? (
+                      <div className="space-y-4 animate-fadeIn">
+                        <div className="p-4 rounded-xl bg-slate-900 text-white shadow-md">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                            <h3 className="text-xs font-black tracking-wider uppercase text-amber-400">Nuvama Calculation Model</h3>
+                          </div>
+                          <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+                            Three note templates behind one parser — pick the matching variant in the broker picker.
+                          </p>
+                        </div>
+
+                        <div className="space-y-3.5 text-xs text-slate-700 leading-relaxed">
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>1. Brokerage from the amount column</span>
+                              <span className="text-[10px] uppercase font-mono text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded">Trap</span>
+                            </h4>
+                            <p className="text-slate-655 font-sans">
+                              V1/V2 print a <b>Brokerage Rate Per Unit</b> that is a rounded display of amount ÷ qty, not an
+                              input. One sampled row prints 0.4841 for 200 shares while the real brokerage is ₹96.81
+                              (0.484050) — rebuilding it from the rate gives ₹96.82 and the note stops tying out.
+                            </p>
+                          </div>
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>2. Settlement sign is inverted</span>
+                              <span className="text-[10px] uppercase font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">Core Formula</span>
+                            </h4>
+                            <p className="mb-1.5 text-slate-655 font-sans">
+                              Nuvama prints <b>(−) credit / (+) debit</b> — the opposite of this app, where money coming to
+                              the client is positive. The printed figure is negated on the way in.
+                            </p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-indigo-700 leading-normal">
+                              summary.netSettlement = −(printed net amount)
+                            </code>
+                          </div>
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>3. GST base</span>
+                              <span className="text-[10px] uppercase font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">Verified</span>
+                            </h4>
+                            <p className="mb-1.5 text-slate-655 font-sans">
+                              The same rule in all three generations. V3 prints it outright as <b>Taxable Value of
+                              Supply</b>, which is <i>not</i> the brokerage and is deliberately not read as one.
+                            </p>
+                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-indigo-700 leading-normal">
+                              GST base = Brokerage + Exchange Txn Charges + SEBI Fees + IPFT
+                            </code>
+                          </div>
+                          <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
+                            <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
+                              <span>4. STT and exempt instruments</span>
+                              <span className="text-[10px] uppercase font-mono text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded font-bold">Shared</span>
+                            </h4>
+                            <p className="text-slate-655 font-sans">
+                              STT uses the shared allocator, anchored on the note's printed total. Units on an
+                              <b> INF-series ISIN</b> (ETF / mutual fund) are exempt and book ₹0 — note that such a note
+                              trips the audit's <b>Suspicious STT</b> flag, which is expected and does not mean the parse
+                              is wrong.
                             </p>
                           </div>
                         </div>
@@ -2405,14 +2505,19 @@ export default function App() {
             </div>
             {!data && !isLoading && (
               <div className="text-center max-w-3xl mx-auto mt-6 space-y-5">
-                {/* Broker Selection Control Panel — the three contract-note brokers. A
+                {/* Broker Selection Control Panel — the contract-note brokers. A
                     transaction statement is NOT a broker source any more; it has its own
                     entry under Opening Basis → Add Trx Statement (which lands here with
-                    importFlow === 'txn'). */}
+                    importFlow === 'txn').
+
+                    Nuvama is a dropdown rather than a plain button because it has issued
+                    three different note templates and the right parser has to be named
+                    explicitly — see brokers/nuvama.ts. Note the strip below no longer sets
+                    `overflow-hidden`: it would clip the absolutely-positioned panel. */}
                 {importFlow === 'notes' && (
                   <div className="flex flex-col items-center justify-center space-y-2 mb-2">
                     <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">Select Broker Contract Note Source</span>
-                    <div className="inline-flex items-center justify-center p-1 bg-white border border-slate-200/80 shadow-xs rounded-xl overflow-hidden max-w-full">
+                    <div className="inline-flex items-center justify-center p-1 bg-white border border-slate-200/80 shadow-xs rounded-xl max-w-full">
                       {([
                         { id: 'btn-broker-zerodha', key: 'zerodha', label: 'Zerodha' },
                         { id: 'btn-broker-shareindia', key: 'shareindia', label: 'Share India' },
@@ -2422,13 +2527,53 @@ export default function App() {
                           key={b.key}
                           id={b.id}
                           type="button"
-                          onClick={() => setBroker(b.key)}
+                          onClick={() => { setBroker(b.key); setNuvamaMenuOpen(false); }}
                           className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${broker === b.key ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
                         >
                           {b.label}
                         </button>
                       ))}
+
+                      <div className="relative" ref={nuvamaMenuRef}>
+                        <button
+                          id="btn-broker-nuvama"
+                          type="button"
+                          onClick={() => setNuvamaMenuOpen((v) => !v)}
+                          aria-haspopup="menu"
+                          aria-expanded={nuvamaMenuOpen}
+                          className={`flex items-center justify-center gap-1.5 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${isNuvama ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                        >
+                          Nuvama
+                          {isNuvama && <span className="opacity-80">· {NUVAMA_VARIANTS.find((v) => v.key === broker)?.short}</span>}
+                          <ChevronDown className={`w-3.5 h-3.5 transition-transform ${nuvamaMenuOpen ? 'rotate-180' : ''}`} />
+                        </button>
+
+                        {nuvamaMenuOpen && (
+                          <div
+                            role="menu"
+                            className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-72 z-30 rounded-xl bg-white border border-slate-200 shadow-lg overflow-hidden animate-fadeIn text-left"
+                          >
+                            {NUVAMA_VARIANTS.map((v) => (
+                              <button
+                                key={v.key}
+                                type="button"
+                                role="menuitem"
+                                onClick={() => { setBroker(v.key); setNuvamaMenuOpen(false); }}
+                                className={`w-full flex flex-col items-start gap-0.5 px-3 py-2.5 text-left border-b border-slate-100 last:border-b-0 cursor-pointer transition-colors ${broker === v.key ? 'bg-indigo-50' : 'hover:bg-indigo-50'}`}
+                              >
+                                <span className="text-xs font-black text-slate-800">{v.label}</span>
+                                <span className="text-[10px] font-semibold text-slate-500 leading-snug">{v.hint}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
+                    {isNuvama && (
+                      <p className="text-[11px] font-semibold text-slate-500 max-w-md">
+                        {NUVAMA_VARIANTS.find((v) => v.key === broker)?.hint}
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -2466,7 +2611,7 @@ export default function App() {
                     type="file" 
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
                     onChange={(e) => e.target.files && handleFileUpload(e.target.files)} 
-                    accept={broker === 'transaction-report' ? '.csv,.pdf' : broker === 'zerodha' ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'}
+                    accept={broker === 'transaction-report' ? '.csv,.pdf' : broker === 'zerodha' || isNuvama ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'}
                     multiple 
                     disabled={isLoading} 
                   />
@@ -2478,7 +2623,7 @@ export default function App() {
                     <p className="text-xl md:text-2xl font-black text-slate-800 tracking-tight leading-tight">
                       {broker === 'transaction-report'
                         ? "Drop the broker transaction report here"
-                        : `Drop ${broker === 'shareindia' ? "Share India" : broker === 'zerodha' ? "Zerodha" : broker === 'integrated' ? "Integrated" : "your"} contract notes here`}
+                        : `Drop ${broker === 'shareindia' ? "Share India" : broker === 'zerodha' ? "Zerodha" : broker === 'integrated' ? "Integrated" : isNuvama ? `Nuvama ${NUVAMA_VARIANTS.find((v) => v.key === broker)?.short}` : "your"} contract notes here`}
                     </p>
                     <div className="flex items-center justify-center gap-2 mt-3">
                       <span className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg text-sm font-bold shadow-sm pointer-events-auto">Browse Files</span>
@@ -2488,7 +2633,9 @@ export default function App() {
                         ? `Only HTM/HTML files.`
                         : broker === 'transaction-report'
                           ? `Transaction report CSV (preferred) or PDF — seeds historical trades.`
-                          : `PDFs Contract Note valid only`
+                          : isNuvama
+                            ? `PDF only. Make sure the template matches ${NUVAMA_VARIANTS.find((v) => v.key === broker)?.short} — the wrong variant will not reconcile.`
+                            : `PDFs Contract Note valid only`
                       }
                     </p>
                   </div>
@@ -2680,7 +2827,7 @@ export default function App() {
                   </div>
                   
                   <div className="relative z-10 p-6 sm:p-10 w-full md:w-auto flex flex-col sm:flex-row gap-4 items-center justify-start md:justify-end">
-                    {(data.brokerName === 'shareindia' || data.brokerName === 'integrated') && data.ucc && (
+                    {(data.brokerName === 'shareindia' || data.brokerName === 'integrated' || data.brokerName === 'nuvama') && data.ucc && (
                       <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 hover:shadow-2xl transition-all relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
                         {/* Subtle highlight in the UCC card */}
                         <div className="absolute inset-x-0 top-0 h-px bg-slate-600 opacity-40"></div>
@@ -2992,24 +3139,24 @@ export default function App() {
                 )}
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
-                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   {data?.brokerName === 'integrated' ? (
-                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   ) : (
-                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   )}
-                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   )}
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="Demat Charges" value={calculatedTotals.dmat} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={isShareIndia ? 4 : 2} />
+                    <SummaryCard label="Demat Charges" value={calculatedTotals.dmat} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   )}
                 </div>
 
@@ -3060,8 +3207,8 @@ export default function App() {
                           ? t.turnover + t.totalExpensesExclSTT 
                           : t.turnover - t.totalExpensesExclSTT;
 
-                        const numDigits = isShareIndia ? 4 : 2;
-                        const fmt = (val: number) => val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: isShareIndia ? 4 : 2 });
+                        const numDigits = priceDecimals;
+                        const fmt = (val: number) => val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: priceDecimals });
 
                         return (
                            <tr key={t.id} ref={tradesVirtual && _vi === 0 ? tradeVR.measureRow : undefined} className="hover:bg-slate-50 transition-colors">
@@ -3149,188 +3296,6 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === 'audit' && (
-          <CsvAuditor parsedContractNote={data} onImportContractNote={(cn) => setData(cn)} />
-        )}
-
-        {/* REGRESSION TEST CENTER (Step 5) */}
-        {activeTab === 'tests' && (
-          <div className="space-y-6 animate-fadeIn">
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-4">
-                <div>
-                  <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
-                    <ListChecks className="w-5 h-5 text-indigo-600 animate-pulse" />
-                    Regression Testing Center
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                    Protect your parsers against future code breakdowns. Running the test library evaluates the extraction rules instantly against core Indian brokerage templates (including normal, broken, multi-asset, and custom-uploaded structures).
-                  </p>
-                </div>
-
-                <div className="flex gap-2 shrink-0">
-                  <button 
-                    onClick={runAllTests} 
-                    disabled={isRunningTests}
-                    className="bg-indigo-600 hover:bg-slate-800 disabled:bg-slate-200 disabled:text-slate-400 text-xs text-white font-black py-2.5 px-4 rounded-xl shadow-sm flex items-center gap-1.5 transition-all cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isRunningTests ? 'animate-spin' : ''}`} />
-                    {isRunningTests ? "Executing Tests..." : "Run Validation Suite"}
-                  </button>
-                  {customCases.length > 0 && (
-                    <button 
-                      onClick={clearCustomCases}
-                      className="bg-slate-100 hover:bg-rose-50 border border-slate-300 hover:border-rose-200 text-slate-600 hover:text-rose-700 text-xs font-bold py-2.5 px-4 rounded-xl transition-all"
-                    >
-                      Delete Custom Cases ({customCases.length})
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Grid of seed and test case categories */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-slate-150">
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 flex items-center gap-3">
-                  <Award className="w-10 h-10 text-emerald-600 bg-emerald-100/60 p-2 rounded-xl" />
-                  <div>
-                    <span className="text-[9px] uppercase font-bold text-slate-400">Golden Test Suite</span>
-                    <strong className="block text-sm text-slate-800">{seedRegressionCases.length} Standard Cases</strong>
-                  </div>
-                </div>
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 flex items-center gap-3">
-                  <PlusCircle className="w-10 h-10 text-indigo-600 bg-indigo-100/60 p-2 rounded-xl" />
-                  <div>
-                    <span className="text-[9px] uppercase font-bold text-slate-400">User Tests (Persisted)</span>
-                    <strong className="block text-sm text-slate-800">{customCases.length} Custom formats</strong>
-                  </div>
-                </div>
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 flex items-center gap-3">
-                  <Gauge className="w-10 h-10 text-indigo-600 bg-indigo-100/60 p-2 rounded-xl" />
-                  <div>
-                    <span className="text-[9px] uppercase font-bold text-slate-400">Verification Accuracy</span>
-                    <strong className="block text-sm text-slate-800">
-                      {testResults.length > 0 
-                        ? `${Math.round((testResults.filter(t => t.passed).length / testResults.length) * 100)}% Pass Ratio`
-                        : "Ready to Evaluate"}
-                    </strong>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Test Case Outputs Rows */}
-            <div className="space-y-4">
-              <h4 className="text-xs font-black text-slate-400 font-mono tracking-wider uppercase">Running Test Cases Verification</h4>
-              
-              {testResults.length === 0 ? (
-                <div className="bg-white border rounded-2xl p-10 text-center text-slate-500 text-sm italic shadow-sm hover:border-slate-300 transition-all">
-                  <CubeLoader className="w-14 mx-auto mb-3" />
-                  Evaluating test suite libraries in browser loop...
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {testResults.map((tc) => {
-                    const seedCase = [...seedRegressionCases, ...customCases].find(c => c.id === tc.caseId);
-                    const isExpanded = activeTestDetail === tc.caseId;
-
-                    return (
-                      <div key={tc.caseId} className={`border rounded-2xl overflow-hidden transition-all bg-white shadow-sm ${tc.passed ? 'border-emerald-200' : tc.actual?.isValid === false ? 'border-amber-200 hover:border-amber-300' : 'border-rose-250 hover:border-rose-300'}`}>
-                        <div 
-                          onClick={() => setActiveTestDetail(isExpanded ? null : tc.caseId)}
-                          className="px-5 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/50"
-                        >
-                          <div className="flex items-start sm:items-center gap-3">
-                            <div className={`p-2 rounded-xl mt-0.5 sm:mt-0 ${tc.passed ? 'bg-emerald-50 text-emerald-600' : tc.actual?.isValid === false ? 'bg-amber-50 text-amber-600' : 'bg-rose-50 text-rose-600'}`}>
-                              {tc.passed ? <Check className="w-4 h-4 stroke-[3px]" /> : <ShieldAlert className="w-4 h-4" />}
-                            </div>
-                            <div>
-                              <p className="font-extrabold text-xs text-slate-800 tracking-tight">{tc.name}</p>
-                              <p className="text-[10px] text-slate-400 leading-none mt-0.5">{seedCase?.description}</p>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-3">
-                            {seedCase?.id.startsWith('custom-') && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  const idToDelete = seedCase.id;
-                                  const updated = customCases.filter(c => c.id !== idToDelete);
-                                  setCustomCases(updated);
-                                  localStorage.setItem('custom_regression_cases', JSON.stringify(updated));
-                                }}
-                                className="bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-600 p-1.5 rounded-lg border border-slate-200 hover:border-rose-200 transition-all"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded inline-block font-mono ${tc.passed ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : tc.actual?.isValid === false ? 'bg-amber-100 text-amber-800 border border-amber-200' : 'bg-rose-100 text-rose-800 border border-rose-200'}`}>
-                              {tc.passed ? "PASS" : tc.actual?.isValid === false ? "PASS / Uncertain" : "TEST REJECTED"}
-                            </span>
-                            <ChevronRight className={`w-4 h-4 text-slate-400 transition-all ${isExpanded ? 'rotate-90' : ''}`} />
-                          </div>
-                        </div>
-
-                        {/* Expandable test logs */}
-                        {isExpanded && (
-                          <div className="p-6 bg-slate-50 border-t border-slate-100 space-y-4 font-mono text-xs text-slate-600 animate-fadeIn">
-                            {tc.error ? (
-                              <div className="p-4 bg-rose-50 text-rose-700 border border-rose-150 rounded-xl leading-relaxed">
-                                <strong>Runtime Parse Fail:</strong> {tc.error}
-                              </div>
-                            ) : (
-                              <div className="space-y-4">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                                  <div className="bg-white p-3.5 border border-slate-150 rounded-xl shadow-sm">
-                                    <span className="text-[9px] font-bold text-slate-400 block uppercase">Trades Count</span>
-                                    <span className="text-xs font-bold font-mono text-slate-800 block mt-1">Expected: {seedCase?.expected.tradesCount} | Actual: {tc.actual?.tradesCount}</span>
-                                  </div>
-                                  <div className="bg-white p-3.5 border border-slate-150 rounded-xl shadow-sm">
-                                    <span className="text-[9px] font-bold text-slate-400 block uppercase">STT Levy Charge</span>
-                                    <span className="text-xs font-bold font-mono text-slate-800 block mt-1">Expected: ₹{seedCase?.expected.stt.toFixed(2)} | Actual: ₹{tc.actual?.stt.toFixed(2)}</span>
-                                  </div>
-                                  <div className="bg-white p-3.5 border border-slate-150 rounded-xl shadow-sm">
-                                    <span className="text-[9px] font-bold text-slate-400 block uppercase">Brokerage (Taxable Services)</span>
-                                    <span className="text-xs font-bold font-mono text-slate-800 block mt-1">Expected: ₹{seedCase?.expected.brokerage.toFixed(2)} | Actual: ₹{tc.actual?.brokerage.toFixed(2)}</span>
-                                  </div>
-                                  <div className="bg-white p-3.5 border border-slate-150 rounded-xl shadow-sm">
-                                    <span className="text-[9px] font-bold text-slate-400 block uppercase">Net Obligation</span>
-                                    <span className="text-xs font-bold font-mono text-slate-800 block mt-1">Expected: ₹{seedCase?.expected.payinObligation.toFixed(2)} | Actual: ₹{tc.actual?.payinObligation.toFixed(2)}</span>
-                                  </div>
-                                  <div className="bg-white p-3.5 border border-slate-150 rounded-xl shadow-sm">
-                                    <span className="text-[9px] font-bold text-slate-400 block uppercase">Final Net Settlement</span>
-                                    <span className="text-xs font-bold font-mono text-slate-800 block mt-1">Expected: ₹{seedCase?.expected.netSettlement.toFixed(2)} | Actual: ₹{tc.actual?.netSettlement.toFixed(2)}</span>
-                                  </div>
-                                  <div className="bg-white p-3.5 border border-slate-150 rounded-xl shadow-sm">
-                                    <span className="text-[9px] font-bold text-slate-400 block uppercase">Parser Validation Status</span>
-                                    <span className={`text-xs font-black block mt-1 font-mono uppercase ${tc.actual?.isValid ? 'text-emerald-700' : 'text-rose-700'}`}>
-                                      {tc.actual?.isValid ? 'PASSED / RECONCILED' : 'Parser Uncertain'}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                {/* Mathematical logic summary inside details */}
-                                <div className="p-4 bg-indigo-50/50 border border-indigo-150 rounded-xl text-[11px] leading-relaxed font-sans text-indigo-900">
-                                  <p className="font-bold">🧪 Regression Mathematical Verification Audit:</p>
-                                  <p className="mt-1">
-                                    Sells Gross minus Buys Gross minus Charges extracted equals <strong>₹{(tc.actual!.payinObligation - (tc.actual!.stt + tc.actual!.brokerage)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>, 
-                                    which matches the parsed Net Settlement of <strong>₹{tc.actual!.netSettlement.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong> within 
-                                    a micro-variance of <strong>₹{tc.actual?.difference.toFixed(4)}</strong>. 
-                                    Formula compliant mathematically? <strong className="font-bold whitespace-nowrap">{tc.actual?.isValid ? "✓ YES (100% Correct)" : "❌ NO (Parser Uncertain flag triggered correctly!)"}</strong>.
-                                  </p>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
           </>
         )}
       </main>

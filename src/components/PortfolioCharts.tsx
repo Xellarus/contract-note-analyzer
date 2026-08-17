@@ -82,10 +82,17 @@ export interface PortfolioChartsProps {
   portfolios: { id: string; code: string; label: string }[];
 }
 
+/**
+ * The range the chart opens on, and the one it returns to when the mode changes. ALL spans back to
+ * the first acquisition (2006 for the oldest book), which compresses the part anyone is actually
+ * reading into the last inch of the axis.
+ */
+const DEFAULT_PRESET = '6M';
+
 export default function PortfolioCharts({ points, nav, aumToday, portfolios }: PortfolioChartsProps) {
   const [mode, setMode] = useState<Mode>('aum');
   const [win, setWin] = useState<{ from: number; to: number } | null>(null);
-  const [preset, setPreset] = useState<string>('ALL');
+  const [preset, setPreset] = useState<string>(DEFAULT_PRESET);
   const [showNav, setShowNav] = useState(false);
   const [hoverTs, setHoverTs] = useState<number | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -149,39 +156,6 @@ export default function PortfolioCharts({ points, nav, aumToday, portfolios }: P
   const allTs = lines.flatMap(l => l.pts.map(p => p.ts));
   const T0 = allTs.length ? Math.min(...allTs) : Date.now() - 30 * DAY_MS;
   const T1 = Math.max(allTs.length ? Math.max(...allTs) : Date.now(), Date.now());
-  const from = win ? Math.max(win.from, T0) : T0;
-  const to = win ? Math.min(win.to, T1) : T1;
-  const span = Math.max(to - from, DAY_MS);
-
-  const W = 720, H = 250, ML = 14, MR = 84, MT = 16, MB = 30;
-  const iw = W - ML - MR, ih = H - MT - MB;
-
-  const clipped = lines.map(l => ({ ...l, pts: clipSeries(l.pts, from, to, l.key === 'cost') }));
-  const vis = clipped.flatMap(l => l.pts.map(p => p.v));
-  const markerVisible = mode === 'aum' && aumToday !== null && T1 >= from && T1 <= to;
-  const rawMax = Math.max(...vis, markerVisible ? (aumToday as number) : 0, 1);
-  // Guard the empty window: Math.min of nothing is Infinity, which would poison the padded domain
-  // below into NaN and render an invisible chart rather than an empty one.
-  const rawMin = vis.length ? Math.min(...vis) : 0;
-  // Performance indices cluster near 1000; a zero-anchored axis would flatten every move into a
-  // straight line, so that mode gets a padded min/max domain instead.
-  const yMax = zeroAnchored ? rawMax * 1.1 : rawMax + (rawMax - rawMin) * 0.12 + 1;
-  const yMin = zeroAnchored ? 0 : Math.max(0, rawMin - (rawMax - rawMin) * 0.12 - 1);
-  const ySpan = Math.max(yMax - yMin, 1);
-
-  const x = (ts: number) => ML + ((ts - from) / span) * iw;
-  const y = (v: number) => MT + ih - ((v - yMin) / ySpan) * ih;
-  const pathOf = (s: SeriesPt[]) => s.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.ts).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
-  const areaOf = (s: SeriesPt[]) => s.length
-    ? `${pathOf(s)} L${x(s[s.length - 1].ts).toFixed(1)},${(MT + ih).toFixed(1)} L${x(s[0].ts).toFixed(1)},${(MT + ih).toFixed(1)} Z`
-    : '';
-
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => yMin + f * ySpan);
-  const xTicks = [0, 0.25, 0.5, 0.75, 1].map(f => from + f * span);
-  const shortWin = span < 150 * DAY_MS;
-  const fmtTick = (ts: number) => new Date(ts).toLocaleDateString('en-IN', shortWin ? { day: '2-digit', month: 'short' } : { month: 'short', year: '2-digit' });
-  const fmtRange = (ts: number) => new Date(ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-  const axisFmt = lines[primaryIdx]?.fmt ?? fmtCr;
 
   // ── range presets, gated on what the mode can actually show ────────────────
   const PRESETS: { key: string; label: string; title: string }[] = [
@@ -216,6 +190,56 @@ export default function PortfolioCharts({ points, nav, aumToday, portfolios }: P
     if (k === 'ALL') return false;
     return startOf(k) < dataFrom - DAY_MS;
   };
+
+  /**
+   * `win` is null until the user picks a preset or drags the brush, and a null window follows
+   * `preset` — which starts at DEFAULT_PRESET, not ALL. Six months is the range actually worth
+   * reading day to day; ALL squashes it into one rising line with 2006 on the left edge.
+   *
+   * Derived here rather than seeded into `win` at mount on purpose: NAV history arrives after the
+   * first render, so T0/T1 move underneath us, and a window frozen at mount would be stale by the
+   * time the data lands. If the default is impossible in this mode (its data starts later than the
+   * window would), fall back to ALL so the highlighted button matches what is drawn.
+   */
+  const effPreset = preset && preset !== 'ALL' && presetDisabled(preset) ? 'ALL' : preset;
+  const autoWin = effPreset && effPreset !== 'ALL'
+    ? { from: Math.max(startOf(effPreset), T0), to: T1 }
+    : null;
+  const winNow = win ?? autoWin;
+  const from = winNow ? Math.max(winNow.from, T0) : T0;
+  const to = winNow ? Math.min(winNow.to, T1) : T1;
+  const span = Math.max(to - from, DAY_MS);
+
+  const W = 720, H = 250, ML = 14, MR = 84, MT = 16, MB = 30;
+  const iw = W - ML - MR, ih = H - MT - MB;
+
+  const clipped = lines.map(l => ({ ...l, pts: clipSeries(l.pts, from, to, l.key === 'cost') }));
+  const vis = clipped.flatMap(l => l.pts.map(p => p.v));
+  const markerVisible = mode === 'aum' && aumToday !== null && T1 >= from && T1 <= to;
+  const rawMax = Math.max(...vis, markerVisible ? (aumToday as number) : 0, 1);
+  // Guard the empty window: Math.min of nothing is Infinity, which would poison the padded domain
+  // below into NaN and render an invisible chart rather than an empty one.
+  const rawMin = vis.length ? Math.min(...vis) : 0;
+  // Performance indices cluster near 1000; a zero-anchored axis would flatten every move into a
+  // straight line, so that mode gets a padded min/max domain instead.
+  const yMax = zeroAnchored ? rawMax * 1.1 : rawMax + (rawMax - rawMin) * 0.12 + 1;
+  const yMin = zeroAnchored ? 0 : Math.max(0, rawMin - (rawMax - rawMin) * 0.12 - 1);
+  const ySpan = Math.max(yMax - yMin, 1);
+
+  const x = (ts: number) => ML + ((ts - from) / span) * iw;
+  const y = (v: number) => MT + ih - ((v - yMin) / ySpan) * ih;
+  const pathOf = (s: SeriesPt[]) => s.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.ts).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+  const areaOf = (s: SeriesPt[]) => s.length
+    ? `${pathOf(s)} L${x(s[s.length - 1].ts).toFixed(1)},${(MT + ih).toFixed(1)} L${x(s[0].ts).toFixed(1)},${(MT + ih).toFixed(1)} Z`
+    : '';
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => yMin + f * ySpan);
+  const xTicks = [0, 0.25, 0.5, 0.75, 1].map(f => from + f * span);
+  const shortWin = span < 150 * DAY_MS;
+  const fmtTick = (ts: number) => new Date(ts).toLocaleDateString('en-IN', shortWin ? { day: '2-digit', month: 'short' } : { month: 'short', year: '2-digit' });
+  const fmtRange = (ts: number) => new Date(ts).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  const axisFmt = lines[primaryIdx]?.fmt ?? fmtCr;
+
   /** True when the CURRENT window reaches back past where market value exists. */
   const windowPredatesNav = navFrom !== null && from < navFrom - DAY_MS;
 
@@ -314,7 +338,7 @@ export default function PortfolioCharts({ points, nav, aumToday, portfolios }: P
           {MODES.map(m => (
             <button
               key={m.key}
-              onClick={() => { if (!m.disabled) { setMode(m.key); setPreset('ALL'); setWin(null); setHoverTs(null); } }}
+              onClick={() => { if (!m.disabled) { setMode(m.key); setPreset(DEFAULT_PRESET); setWin(null); setHoverTs(null); } }}
               disabled={m.disabled}
               title={m.disabled ? m.why : undefined}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-bold transition-colors ${
@@ -339,7 +363,7 @@ export default function PortfolioCharts({ points, nav, aumToday, portfolios }: P
               key={p.key} onClick={() => !off && applyPreset(p.key)} title={off ? 'No market-value history for this range yet' : p.title}
               disabled={off}
               className={`px-2 py-1 rounded-md text-[11px] font-bold tracking-wide transition-colors ${
-                preset === p.key ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
+                effPreset === p.key ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'
               } ${off ? 'opacity-35 cursor-not-allowed' : 'cursor-pointer'}`}
             >
               {p.label}

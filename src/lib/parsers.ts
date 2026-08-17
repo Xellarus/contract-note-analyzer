@@ -1,22 +1,9 @@
 import { ContractNoteResult, Summary, Trade } from '../types';
 import { extractTextFromPDF, calculateReconciliation } from './brokers/utils';
 import { getBroker, detectBroker } from './brokers/registry';
+import { BrokerId } from './brokers/types';
 
 export { calculateReconciliation };
-
-/**
- * Parses raw PDF text by detecting the broker contents automatically.
- * Supports the diagnostic regression tests by mapping directly to strategies.
- */
-export const parsePdfContractNote = async (text: string): Promise<ContractNoteResult | null> => {
-  const broker = detectBroker(text, true);
-  // Default to Zerodha if auto-detection fails to parse, for backward compatibility with older test runners
-  let result = await broker.parsePdfText(text);
-  if (!result && broker.id !== 'zerodha') {
-    result = await getBroker('zerodha').parsePdfText(text);
-  }
-  return result;
-};
 
 /**
  * Orchestrates file processing (PDF extraction and format detection) and
@@ -33,7 +20,7 @@ const uccFromFilename = (name: string): string => {
 export const processFile = async (
   file: File,
   password?: string,
-  brokerId?: 'auto' | 'zerodha' | 'shareindia' | 'integrated' | 'standard' | 'transaction-report'
+  brokerId?: BrokerId
 ): Promise<ContractNoteResult | null> => {
   try {
     const lower = file.name.toLowerCase();
@@ -125,8 +112,4 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
   
   trades.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
   return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate, ucc: mergedUcc, rawText: mergedRawText };
-};
-export const detectFormat = (html: string): "integrated" | "standard" | "zerodha" => {
-  const broker = detectBroker(html, false);
-  return broker.id as "integrated" | "standard" | "zerodha";
 };
