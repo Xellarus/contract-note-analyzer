@@ -212,28 +212,51 @@ export const extractTextFromPDF = async (file: File, password?: string): Promise
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
       
-      // Group items by their vertical position (Y-coordinate)
-      // items.transform[5] is the Y-coordinate
       const items = content.items as any[];
       if (items.length === 0) continue;
 
-      // Sort by Y coordinate descending (top to bottom), then by X coordinate (left to right)
-      items.sort((a, b) => {
-        const yDiff = b.transform[5] - a.transform[5];
-        if (Math.abs(yDiff) > 5) return yDiff; // Use a threshold of 5 points for same line
-        return a.transform[4] - b.transform[4]; // X coordinate
-      });
-
-      let pageText = "";
-      let lastY = items[0].transform[5];
-      
-      for (const item of items) {
-        if (Math.abs(item.transform[5] - lastY) > 5) {
-          pageText += "\n";
-          lastY = item.transform[5];
+      // Group items into lines by Y, THEN order each line left-to-right.
+      //
+      // This used to be a single sort with a threshold comparator:
+      //
+      //   if (Math.abs(b.y - a.y) > 5) return b.y - a.y; else return a.x - b.x;
+      //
+      // which is not a valid total order. Given three items at y = 770 / 766 / 762, the
+      // first pair compares by X and the second pair compares by X, but the outer pair
+      // compares by Y - the comparator is not transitive, so the result was
+      // implementation-defined interleaving. And because no ADJACENT pair ever exceeded
+      // the 5pt gap, the newline never fired either, so a table row whose cells wrap onto
+      // two or three baselines collapsed into ONE scrambled line. Not theoretical: a
+      // Nuvama V3 row came out as
+      //   "INE024001021 AEROFL- 29,29,05- EX 10,000 292.6125 0.2926 292.9051 1.00 ..."
+      // with a Trade Amt fragment sitting between the scrip name's two halves. That
+      // shifted every later cell and turned a 10,000-share BUY at 292.6125 into a
+      // 292.9051-share SELL at 1.00 - which then reconciled against itself and passed.
+      //
+      // Clustering first is a valid total order, and produces identical output wherever
+      // the old comparator happened to be consistent - i.e. every note whose rows sit on
+      // a single baseline. Only the previously-scrambled rows change.
+      const LINE_TOL = 5;
+      const byY = [...items].sort((a, b) => b.transform[5] - a.transform[5]);
+      const rows: any[][] = [];
+      let current: any[] = [];
+      let anchorY = byY[0].transform[5];
+      for (const item of byY) {
+        // Compare against the row's ANCHOR, not the previous item, so a column of
+        // slightly-drifting baselines cannot creep into one ever-growing line.
+        if (current.length > 0 && Math.abs(item.transform[5] - anchorY) > LINE_TOL) {
+          rows.push(current);
+          current = [];
+          anchorY = item.transform[5];
         }
-        pageText += item.str + " ";
+        current.push(item);
       }
+      if (current.length > 0) rows.push(current);
+      for (const row of rows) row.sort((a, b) => a.transform[4] - b.transform[4]);
+
+      const pageText = rows
+        .map((row) => row.map((item) => item.str).join(" ") + " ")
+        .join("\n");
       text += pageText + "\n";
     }
     return text;
@@ -268,7 +291,46 @@ export const calculateReconciliation = (summary: Summary, trades: Trade[]): Reco
   
   const sumGeneratedStt = trades.reduce((sum, t) => sum + t.stt, 0);
   const isSttMismatch = Math.abs(sumGeneratedStt - summary.stt) > 0.10;
-  const isValid = difference <= 0.10 && !isSuspiciousStt && !isSttMismatch;
+
+  // Exchange equity trades in WHOLE shares. A fractional quantity is not a suspicious
+  // value, it is an impossible one - so it can only mean the parser read a rate, an
+  // amount, or a fragment of one into the quantity column. Cheap, broker-agnostic, and
+  // it catches the whole class of column-shift misparses at the door.
+  const isFractionalQuantity = trades.some(
+    (t) => Math.abs(t.quantity - Math.round(t.quantity)) > 1e-6,
+  );
+
+  // The note prints its own Pay In / Pay Out obligation. Compare it to quantity x rate
+  // summed over the trades, which is derived from an entirely different part of the page.
+  //
+  // This is the check that catches a SELF-CONSISTENT misparse. The net-settlement test
+  // above cannot: it recomputes from the same misread cells, so when a Nuvama V3 buy of
+  // 10,000 at 292.6125 was read as a sell of 292.9051 at 1.00, its own arithmetic agreed
+  // to the paise (292.91 - 6,488.14 = -6,195.23) and the audit passed while every figure
+  // on screen was wrong. Compared on magnitude, because the printed obligation is
+  // unsigned gross while calculatedObligation is signed (sells positive, buys negative).
+  // Only asserted when the note actually printed an obligation, and tolerant enough to
+  // ignore rounding: a genuine mismatch here is orders of magnitude, not paise.
+  // Tolerance is bounded by the note's OWN charges, and that is not arbitrary: brokers
+  // disagree on what the obligation line means. Nuvama V3 prints it GROSS (10,000 x
+  // 292.6125 = 29,26,125.00 exactly), while V1/V2 print it NET of brokerage
+  // (9,68,010.00 - 968.00 = 9,67,042.00). Whichever convention a broker uses, the gap can
+  // never exceed what the note actually charged - so charges + 1 rupee accepts every
+  // legitimate convention while still catching a column shift, which misses by orders of
+  // magnitude rather than by a brokerage. Compared on magnitude because the printed figure
+  // is unsigned gross while calculatedObligation is signed (sells +, buys -).
+  const hasPrintedObligation = Math.abs(summary.payinObligation) > 0.005;
+  const obligationGap = Math.abs(
+    Math.abs(calculatedObligation) - Math.abs(summary.payinObligation),
+  );
+  const isObligationMismatch = hasPrintedObligation && obligationGap > totalCharges + 1.0;
+
+  const isValid =
+    difference <= 0.10 &&
+    !isSuspiciousStt &&
+    !isSttMismatch &&
+    !isFractionalQuantity &&
+    !isObligationMismatch;
 
   return {
     isValid,
@@ -280,8 +342,17 @@ export const calculateReconciliation = (summary: Summary, trades: Trade[]): Reco
     calculatedNet: Math.round(calculatedNet * 100) / 100,
     extractedNet,
     difference: Math.round(difference * 100) / 100,
-    statusText: isSuspiciousStt ? 'Suspicious STT' : (isValid ? 'PASSED' : 'Parser uncertain'),
+    // Most specific cause first - "Parser uncertain" tells you nothing actionable.
+    statusText: isFractionalQuantity
+      ? 'Fractional quantity'
+      : isObligationMismatch
+        ? 'Obligation mismatch'
+        : isSuspiciousStt
+          ? 'Suspicious STT'
+          : (isValid ? 'PASSED' : 'Parser uncertain'),
     isSuspiciousStt,
-    isSttMismatch
+    isSttMismatch,
+    isFractionalQuantity,
+    isObligationMismatch
   };
 };

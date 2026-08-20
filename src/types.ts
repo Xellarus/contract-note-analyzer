@@ -56,9 +56,16 @@ export interface ReconciliationStatus {
   calculatedNet: number;        // Sells - Buys - Charges
   extractedNet: number;         // summary.netSettlement
   difference: number;
-  statusText: 'PASSED' | 'Parser uncertain' | 'Suspicious STT';
+  statusText: 'PASSED' | 'Parser uncertain' | 'Suspicious STT' | 'Fractional quantity' | 'Obligation mismatch';
   isSuspiciousStt?: boolean;
   isSttMismatch?: boolean;
+  /** A quantity that is not a whole number. Exchange equity always trades in whole
+   *  shares, so this is a parse error by definition - never a real note. */
+  isFractionalQuantity?: boolean;
+  /** The note's OWN printed Pay In / Pay Out obligation disagrees with quantity x rate
+   *  summed over the trades. Catches a misparse that is internally self-consistent and
+   *  therefore invisible to the net-settlement check. */
+  isObligationMismatch?: boolean;
 }
 
 export interface ContractNoteResult {

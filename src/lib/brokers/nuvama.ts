@@ -506,7 +506,20 @@ const readWapRow = (lines: string[], idx: number): RawRow[] => {
     nameTokens.push(tokens[i]);
     i++;
   }
-  const securityName = nameTokens.join(' ').trim();
+  let securityName = nameTokens.join(' ').trim();
+
+  // A scrip name that wraps inside its narrow column comes out hyphenated across two
+  // baselines - "AEROFL-" here and "EX" as the first token of the next line, or
+  // "INDUST-" / "OWER". Rejoin it, or the name reaches the Scrip Master truncated and
+  // resolves to nothing (or worse, to the wrong scrip). Only an alphabetic fragment
+  // qualifies, so the numeric tail of a wrapped AMOUNT can never be pulled into a name.
+  if (securityName.endsWith('-')) {
+    const frag = (lines[idx + 1] || '').trim().split(/\s+/)[0] || '';
+    if (/^[A-Za-z][A-Za-z&.]*$/.test(frag)) {
+      securityName = securityName.slice(0, -1) + frag.toUpperCase();
+    }
+  }
+
   if (!securityName || EXCHANGE_WORDS.has(securityName.toUpperCase())) return [];
 
   // pdf.js wraps a long amount mid-number and pushes the tail onto the next line —
