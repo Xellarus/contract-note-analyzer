@@ -236,43 +236,71 @@ export default function App() {
         console.warn("Failed to fetch spreadsheet metadata:", metaErr);
       }
 
-      // Check if Raw Entry sheet has protection (locking), and add it if missing
+      // Keep "Raw Entry" warning-protected, so a human editing it by hand gets a confirm
+      // prompt while any authorised member's import still writes cleanly.
+      //
+      // It used to be added with `warningOnly: false` and an EMPTY editors list. Sheets
+      // treats the creator of a protected range as its only implicit editor, so that did
+      // not merely warn people off — it denied everyone else write access to the tab. And
+      // because the app writes as the *signed-in user* rather than a service account, the
+      // first person to import into a portfolio became the only person who could ever
+      // import into it; a second user got a 403 on this very append. Warning-only is the
+      // configuration that actually expresses the intent: per the Sheets API, "every user
+      // can edit data in the protected range, except editing will prompt a warning", and
+      // "if this field is true, then editors is ignored".
+      //
+      // Note this can never stop the app's own writes while allowing nothing else — the
+      // app and the human share one identity. Protection here is a guard-rail, not a
+      // permission boundary; Drive sharing is the boundary.
       const rawEntrySheet = existingSheetsMeta.find((s: any) => s.properties.title === "Raw Entry");
       if (rawEntrySheet) {
         const rawEntrySheetId = rawEntrySheet.properties.sheetId;
-        const hasProtection = rawEntrySheet.protectedRanges && rawEntrySheet.protectedRanges.some((p: any) => {
-          return p.range && p.range.sheetId === rawEntrySheetId;
-        });
-
-        if (!hasProtection) {
-          try {
+        const existingProt = (rawEntrySheet.protectedRanges || []).find(
+          (p: any) => p.range && p.range.sheetId === rawEntrySheetId
+        );
+        try {
+          if (!existingProt) {
             await (gapi.client as any).sheets.spreadsheets.batchUpdate({
-              spreadsheetId: spreadsheetId,
+              spreadsheetId,
               resource: {
-                requests: [
-                  {
-                    addProtectedRange: {
-                      protectedRange: {
-                        range: {
-                          sheetId: rawEntrySheetId
-                        },
-                        description: "Locked Raw Entry Sheet",
-                        warningOnly: false,
-                        editors: {
-                          users: [],
-                          groups: [],
-                          domainUsersCanEdit: false
-                        }
-                      }
-                    }
-                  }
-                ]
-              }
+                requests: [{
+                  addProtectedRange: {
+                    protectedRange: {
+                      range: { sheetId: rawEntrySheetId },
+                      description: "Raw Entry — warn before manual edits",
+                      warningOnly: true,
+                    },
+                  },
+                }],
+              },
             });
-            console.log("Successfully locked 'Raw Entry' sheet tab!");
-          } catch (protectErr) {
-            console.error("Failed to lock 'Raw Entry' sheet tab:", protectErr);
+            console.log("'Raw Entry' is now warning-protected.");
+          } else if (!existingProt.warningOnly) {
+            // Migrate a sheet still carrying the old editor-restricted protection. Only the
+            // range's editor (or the file owner) can change it, so this lands the first time
+            // that person imports; for anyone else it fails harmlessly and is logged.
+            await (gapi.client as any).sheets.spreadsheets.batchUpdate({
+              spreadsheetId,
+              resource: {
+                requests: [{
+                  updateProtectedRange: {
+                    protectedRange: {
+                      protectedRangeId: existingProt.protectedRangeId,
+                      warningOnly: true,
+                    },
+                    fields: "warningOnly",
+                  },
+                }],
+              },
+            });
+            console.log("Converted 'Raw Entry' protection to warning-only (was editor-restricted).");
           }
+        } catch (protectErr) {
+          console.error(
+            "Could not set 'Raw Entry' protection to warning-only. If imports fail for other " +
+            "users, delete the protection on that tab once and the app will re-add it correctly:",
+            protectErr
+          );
         }
       }
 

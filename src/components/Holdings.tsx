@@ -34,6 +34,7 @@ import StockOpeningImportModal from './StockOpeningImportModal';
 import CubeLoader from './ui/CubeLoader';
 import { GainBar } from './ui/HoldingsViz';
 import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
+import { classifySheetsError, sheetsAccessLabel, SheetsErrorKind } from '../lib/sheetsAccess';
 import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
 // Parse a "23 Jun 2026, 02:30 PM"-style IST stamp (as written to the Prices tab)
@@ -523,6 +524,9 @@ export default function Holdings({
   // so each card keeps its own last-synced value — syncing/opening one portfolio
   // never zeroes the others (which happened when all cards read one sheetTotal).
   const [portfolioTotals, setPortfolioTotals] = useState<Record<string, number>>({});
+  // Which portfolios this user cannot read. Sheets sharing is the real boundary, so
+  // this records Google's answer rather than deciding anything itself.
+  const [portfolioAccess, setPortfolioAccess] = useState<Record<string, SheetsErrorKind>>({});
   // Each portfolio's Holding rows (name / ISIN / qty / invested), so EVERY summary card can be
   // valued at the live CMP — not just the one that's open. Stored RAW rather than pre-valued so
   // the cards re-price themselves the moment the Prices tab finishes loading.
@@ -818,7 +822,14 @@ export default function Holdings({
       }
       setPortfolioTotals(prev => ({ ...prev, [pid]: total }));
       setPortfolioRows(prev => ({ ...prev, [pid]: held }));
-    } catch { /* keep any prior value on error — don't zero a good card */ }
+      // A read that succeeds clears any earlier denial (access was just granted, or the
+      // token was simply missing on the first attempt).
+      setPortfolioAccess(prev => (prev[pid] ? (() => { const n = { ...prev }; delete n[pid]; return n; })() : prev));
+    } catch (e) {
+      // Still don't zero a good card — but stop hiding a permission problem behind it.
+      const kind = classifySheetsError(e);
+      if (kind !== 'other') setPortfolioAccess(prev => (prev[pid] === kind ? prev : { ...prev, [pid]: kind }));
+    }
   };
 
   const syncCapitalGainsToSheet = async (pid: string = (activePortfolio === 'local' ? DEFAULT_PORTFOLIO_ID : activePortfolio)) => {
@@ -3690,9 +3701,29 @@ export default function Holdings({
       {!isDetailView ? (
         // Freestanding portfolio cards on the page ground — no wrapping panel/header.
         <div id="portfolio-selection-panel" className="grid grid-cols-1 lg:grid-cols-2 gap-4 animate-fadeIn">
+            {(() => {
+              // Access is granted on the Google Sheet, not in the app, so the only useful
+              // thing to say is which sheets are missing and who can grant them.
+              const blocked = PORTFOLIOS.filter(p => portfolioAccess[p.id]);
+              if (blocked.length === 0) return null;
+              return (
+                <div className="lg:col-span-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+                  <p className="flex items-center gap-2 text-[13px] font-bold text-amber-900">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    {blocked.length} of {PORTFOLIOS.length} portfolios aren't shared with your account
+                  </p>
+                  <p className="mt-1 text-[12px] text-amber-800">
+                    {blocked.map(p => p.code).join(', ')} — these show no data because Google is
+                    refusing the read, not because the books are empty. Ask for access to the
+                    <strong> backoffice</strong> Drive folder; nothing in the app can grant it.
+                  </p>
+                </div>
+              );
+            })()}
             {PORTFOLIOS.map((p) => {
               const id = p.id;
               const summary = getPortfolioSummary(id);
+              const noAccess = portfolioAccess[id];
               const isPositiveGain = summary.unrealisedGain >= 0;
               const isPositiveToday = summary.todaysGain >= 0;
               const cg = capGainsSyncStatus?.pid === id ? capGainsSyncStatus : null;
@@ -3724,10 +3755,18 @@ export default function Holdings({
                   {/* Metrics — compact */}
                   <div className="px-3.5 pt-2 pb-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="font-mono font-black text-slate-900 text-base">{formatValueOnly(summary.currentValue)}</span>
-                      <span className={`text-xs font-bold ${isPositiveGain ? 'text-emerald-700' : 'text-rose-600'}`}>
-                        {isPositiveGain ? '▲' : '▼'} {isPositiveGain ? '+' : ''}{summary.unrealisedGainPct.toFixed(2)}%
-                      </span>
+                      {noAccess ? (
+                        <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-amber-700">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {sheetsAccessLabel(noAccess)}
+                        </span>
+                      ) : (
+                        <>
+                          <span className="font-mono font-black text-slate-900 text-base">{formatValueOnly(summary.currentValue)}</span>
+                          <span className={`text-xs font-bold ${isPositiveGain ? 'text-emerald-700' : 'text-rose-600'}`}>
+                            {isPositiveGain ? '▲' : '▼'} {isPositiveGain ? '+' : ''}{summary.unrealisedGainPct.toFixed(2)}%
+                          </span>
+                        </>
+                      )}
                     </div>
                     <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 mt-0.5">
                       <span>Inv <span className="font-mono text-slate-600">{formatValueOnly(summary.investedValue)}</span></span>
