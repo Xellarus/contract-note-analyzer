@@ -4,7 +4,7 @@ import { ModalShell } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { CorpActionType } from '../lib/corporateActions';
-import { ScripMaster, loadScripMaster, lookupScrip, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { ScripMaster, loadScripMaster, lookupScrip, isPeScrip, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { gapi } from 'gapi-script';
 import ScripCombobox from './ScripCombobox';
 import { hasValidGoogleToken } from '../lib/googleAuth';
@@ -34,7 +34,8 @@ const ACTIONS: { value: ManualAction; label: string; hint: string }[] = [
   { value: 'Rights', label: 'Rights', hint: 'Rights subscription — a buy at the issue price.' },
 ];
 
-const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'date' | 'amount' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>; label: string }[] = [
+type ChargeKey = keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'date' | 'amount' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>;
+const CHARGE_FIELDS: { key: ChargeKey; label: string }[] = [
   { key: 'brokerage', label: 'Brokerage' },
   { key: 'stt', label: 'STT' },
   { key: 'exchangeCharges', label: 'Exchange Turnover' },
@@ -43,6 +44,12 @@ const CHARGE_FIELDS: { key: keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'd
   { key: 'gst', label: 'GST / IGST' },
   { key: 'ipf', label: 'IPF' },
 ];
+
+// An UNLISTED share transfer never goes through an exchange, so STT, exchange turnover
+// charges, SEBI fees and IPF cannot arise on it — offering those boxes invites a figure that
+// makes the cost basis wrong. Stamp duty, GST and any advisory fee booked as brokerage are
+// real, so those stay.
+const PE_CHARGE_KEYS: ChargeKey[] = ['brokerage', 'stampDuty', 'gst'];
 
 interface LineDraft {
   id: number;
@@ -305,22 +312,30 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     const firstBad = filledLines.map((l) => lineError(l)).find((e) => e !== null);
     if (firstBad) { setError(firstBad); return; }
 
-    const toPayload = (l: LineDraft): ManualTradeLine => ({
-      isin: l.isin.trim(),
-      securityName: l.company.trim(),
-      action: l.action,
-      quantity: num(l.qty),
-      price: num(l.price),
-      tradeClass: l.tradeClass,
-      brokerage: num(l.brokerage),
-      stt: num(l.stt),
-      exchangeCharges: num(l.exchangeCharges),
-      sebiFees: num(l.sebiFees),
-      stampDuty: num(l.stampDuty),
-      gst: num(l.gst),
-      ipf: num(l.ipf),
-      notes: l.notes.trim(),
-    });
+    const toPayload = (l: LineDraft): ManualTradeLine => {
+      // Off-market: no exchange leg, so the exchange-only charges are forced to zero and the
+      // class to Delivery. Enforced HERE and not only in the form, because a figure can have
+      // been typed (or an Intraday class chosen) BEFORE the company was picked — the inputs
+      // then disappear but their values would still have reached the ledger, quietly
+      // overstating the cost basis.
+      const pe = isPeScrip(activeMaster, l.isin, l.company);
+      return {
+        isin: l.isin.trim(),
+        securityName: l.company.trim(),
+        action: l.action,
+        quantity: num(l.qty),
+        price: num(l.price),
+        tradeClass: pe ? 'Delivery' : l.tradeClass,
+        brokerage: num(l.brokerage),
+        stt: pe ? 0 : num(l.stt),
+        exchangeCharges: pe ? 0 : num(l.exchangeCharges),
+        sebiFees: pe ? 0 : num(l.sebiFees),
+        stampDuty: num(l.stampDuty),
+        gst: num(l.gst),
+        ipf: pe ? 0 : num(l.ipf),
+        notes: l.notes.trim(),
+      };
+    };
 
     // Lines can each carry their own date (blank = the drawer's default), so group by the
     // effective date — appendManualTrades stamps ONE date across the batch it's given.
@@ -576,7 +591,11 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
               <div className="space-y-3">
                 {lines.map((l, idx) => {
                   const free = isFreeShares(l.action);
-                  const deliveryLocked = isDeliveryLocked(l.action);
+                  // Unlisted company? Then there is no exchange leg: the class is Delivery by
+                  // definition (nothing can be squared off intraday off-market) and only the
+                  // charges that can actually arise are offered.
+                  const isPe = isPeScrip(activeMaster, l.isin, l.company);
+                  const deliveryLocked = isDeliveryLocked(l.action) || isPe;
                   const prev = linePreview(l);
                   const err = lineError(l);
                   const actionHint = ACTIONS.find((a) => a.value === l.action)?.hint;
@@ -741,6 +760,15 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         </div>
                       ) : actionHint ? <p className="text-[10px] text-slate-400">{actionHint}</p> : null}
 
+                      {/* Say why the class is locked and half the charge boxes are gone. */}
+                      {isPe && (
+                        <p className="text-[10px] text-slate-500">
+                          <strong className="text-slate-700">Unlisted company</strong> — off-market, so
+                          Delivery is forced and STT / exchange / SEBI / IPF don't apply. Long-term
+                          after 24 months, not 12.
+                        </p>
+                      )}
+
                       {/* Charges */}
                       {!free && (
                         <div>
@@ -754,7 +782,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                           </button>
                           {l.showCharges && (
                             <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 rounded-xl border border-slate-200 bg-white">
-                              {CHARGE_FIELDS.map((f) => (
+                              {(isPe ? CHARGE_FIELDS.filter((f) => PE_CHARGE_KEYS.includes(f.key)) : CHARGE_FIELDS).map((f) => (
                                 <div key={f.key} className="space-y-1">
                                   <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">{f.label}</label>
                                   <input

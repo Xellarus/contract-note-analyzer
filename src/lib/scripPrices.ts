@@ -1,4 +1,5 @@
 import { gapi } from "gapi-script";
+import { invalidateDashboard } from "./dashboardCache";
 import { ensureSheetTabs } from "./sheetTabs";
 import { lookupScrip, normName, ScripMaster } from "./scripMaster";
 
@@ -101,9 +102,22 @@ export function normalisePriceDate(v: any): string {
 export interface PriceMiss { isin: string; name: string; reason: string; checked: string; }
 
 let _priceCache: { id: string; rows: ScripPrice[]; ts: number } | null = null;
+// Short cooldown after a failed read. Caching the FAILURE as an empty price list was the
+// bug (the whole book got valued at cost); but that bad cache was also the only thing
+// throttling retries. Without a cooldown, every consumer - the Dashboard alone fires five
+// computes - re-attempts twice with a sleep each time, which turns one failing read into a
+// burst and invites the rate limiting that caused it. This throttles without lying.
+let _failUntil = 0;
+const FAIL_COOLDOWN_MS = 10_000;
 const PRICE_TTL_MS = 60_000;
 
-export function invalidatePriceCache(): void { _priceCache = null; }
+export function invalidatePriceCache(): void {
+  _priceCache = null;
+  _failUntil = 0;   // an explicit refresh should retry immediately, not sit out the cooldown
+  // Prices changing changes every market-value figure the Dashboard shows, so its
+  // cached view has to go with them.
+  invalidateDashboard();
+}
 
 const toNum = (s: any): number => { const v = parseFloat((s ?? "").toString().replace(/,/g, "").trim()); return isNaN(v) ? NaN : v; };
 
@@ -182,10 +196,43 @@ export async function loadScripPrices(spreadsheetId: string, opts?: { force?: bo
   if (!opts?.force && _priceCache && _priceCache.id === spreadsheetId && now - _priceCache.ts < PRICE_TTL_MS) {
     return _priceCache.rows;
   }
-  let rows: ScripPrice[] = [];
-  try { rows = await fetchPriceRows(spreadsheetId); } catch { rows = []; }
-  _priceCache = { id: spreadsheetId, rows, ts: now };
-  return rows;
+  // Inside the post-failure cooldown, don't hit the network again: serve stale rows if we
+  // have them, otherwise fail fast so the caller can report it.
+  if (!opts?.force && Date.now() < _failUntil) {
+    if (_priceCache && _priceCache.id === spreadsheetId) return _priceCache.rows;
+    throw new Error('Prices unavailable — the last read failed; retrying shortly.');
+  }
+
+  // One retry on a transient failure (token refresh window, a 5xx, a rate limit). This is
+  // a single request against one spreadsheet, so retrying is cheap - and the cost of not
+  // retrying is the whole book being valued at cost.
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const rows = await fetchPriceRows(spreadsheetId);
+      _priceCache = { id: spreadsheetId, rows, ts: now };
+      _failUntil = 0;
+      return rows;
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 600));
+    }
+  }
+
+  // NEVER cache a failure, and never report one as an empty price list.
+  //
+  // This used to be `catch { rows = []; }` followed by an unconditional cache write, so a
+  // single failed read poisoned the cache for the full 60s TTL and every consumer saw
+  // "there are no prices" rather than "the price read failed". Since each consumer falls
+  // back to average cost per position, the Dashboard then presented the book's COST as its
+  // AUM - roughly 200 crore of invested capital shown as market value, with no warning and
+  // no way to tell it apart from a real number. A quick refresh could not clear it either,
+  // because the poisoned cache answered the retry.
+  //
+  // Stale prices beat invented ones, so serve the last good read if we have one.
+  _failUntil = Date.now() + FAIL_COOLDOWN_MS;
+  if (_priceCache && _priceCache.id === spreadsheetId) return _priceCache.rows;
+  throw lastErr;
 }
 
 /**
@@ -335,8 +382,16 @@ export function makePriceResolver(master: ScripMaster | null, prices: ScripPrice
     if (master) { const e = lookupScrip(master, p.isin, p.name).entry; if (e) m.set('key:' + e.key, p.price); }
   }
   return (isin: string, name: string) => {
-    if (master) { const e = lookupScrip(master, isin, name).entry; if (e) { const v = m.get('key:' + e.key); if (v !== undefined) return v; } }
+    const e = master ? lookupScrip(master, isin, name).entry : null;
+    if (e) { const v = m.get('key:' + e.key); if (v !== undefined) return v; }
     if (isin) { const v = m.get('isin:' + isin.toUpperCase()); if (v !== undefined) return v; }
-    return m.get('name:' + normName(name));
+    const byName = m.get('name:' + normName(name));
+    if (byName !== undefined) return byName;
+    // No fetched price — but an UNLISTED company can carry a hand-entered per-share fair
+    // value in the "Private Equities" tab. Checked LAST so a real market price always wins
+    // (a company that has since listed legitimately has both), and only when it's > 0, so a
+    // blank valuation still means "hold this at cost" rather than "worth nothing".
+    if (e && e.isPe && (e.peValuation ?? 0) > 0) return e.peValuation;
+    return undefined;
   };
 }

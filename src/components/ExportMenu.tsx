@@ -64,6 +64,11 @@ export default function ExportMenu({ doc, disabled = false }: { doc: () => Repor
           <>
             A statement this long runs to roughly <strong>{Math.ceil(d.rows.length / 40).toLocaleString('en-IN')} pages</strong> and
             can take a while to render. The Excel workbook handles this size far better and stays filterable.
+            {/* Last screen before a long statement leaves the machine. Naming what it covers here
+                is what catches "I meant Consolidated" before 12 pages get built and filed. */}
+            {d.titleTag && (
+              <> This one covers <strong>{d.titleTag}</strong> only.</>
+            )}
           </>
         ),
         confirmLabel: 'Build it anyway',

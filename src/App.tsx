@@ -109,6 +109,17 @@ const SummaryCard = ({
 
 const MAX_FILES = 31;
 
+/**
+ * The app's top-level views. There is no router — `currentView` is plain state, persisted to
+ * localStorage so a reload lands where you left off. Listed here as a VALUE, not only a type,
+ * because that persisted string has to be validated on the way back in: a build that removes a
+ * view leaves the old name in storage, and a name matching no branch of the render fell through
+ * to the last `else` (Imports) rather than to the Dashboard. `pe`, from a short-lived separate
+ * Private Equity view, is exactly that case.
+ */
+const APP_VIEWS = ['dashboard', 'holdings', 'imports', 'reports'] as const;
+type AppView = typeof APP_VIEWS[number];
+
 // Best-effort trade date from a contract-note file name (broker files normally
 // carry it: "..._2024-05-03.pdf", "NJW724-03-05-2024.pdf", "20240503.pdf", …).
 // → epoch ms, or 0 when no recognisable date. Used only to order an over-limit
@@ -619,9 +630,13 @@ export default function App() {
     }
   });
 
-  const [currentView, setCurrentView] = useState<'dashboard' | 'holdings' | 'imports' | 'reports'>(() => {
+  const [currentView, setCurrentView] = useState<AppView>(() => {
+    // Validate what came out of storage. It is a plain string written by an older build, and a
+    // value no longer in the union ('pe', from the short-lived separate Private Equity view)
+    // matches no branch in the render - so the page silently fell through to Imports. Anything
+    // unrecognised now lands on the Dashboard.
     const saved = localStorage.getItem('portfolio_current_view');
-    return (saved as any) || 'dashboard';
+    return APP_VIEWS.includes(saved as AppView) ? (saved as AppView) : 'dashboard';
   });
   // When set (via the "Report" button on a stock's detail page), the Reports view
   // opens locked to that stock + account. Cleared when Reports is opened normally.

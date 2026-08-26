@@ -164,6 +164,38 @@ const pdfPath = path.join(OUT, 'verify-report.pdf');
   ok(text.includes('Page 1 of'), 'footer pagination rendered');
   ok(/ASSET NAME/.test(text), 'header row rendered');
 
+// ── 6. Scope labelling (titleTag) ───────────────────────────────────────────
+// A narrowed report must identify itself on EVERY page and in the workbook tab, not only on
+// the letterhead. A capital-gains statement gets printed, split and filed page by page, so an
+// equity-only statement whose pages 2+ look identical to the consolidated one is a filing
+// hazard, not a cosmetic gap.
+console.log('\n6. Scope labelling');
+{
+  const scoped: ReportDoc = { ...doc, titleTag: 'Private Equity' };
+  const sd = buildPdfDocDefinition(scoped, { now: new Date(2026, 7, 12, 16, 20) });
+
+  // Letterhead (page 1).
+  const flat = JSON.stringify(sd.content);
+  ok(flat.includes('Capital Gains Statement \u2014 Private Equity'), 'PDF letterhead carries the scope');
+
+  // Pages 2+ running header — the part that would otherwise be indistinguishable.
+  const hdr2: any = typeof sd.header === 'function' ? sd.header(2) : null;
+  const hdr1: any = typeof sd.header === 'function' ? sd.header(1) : null;
+  ok(hdr1 === null, 'page 1 has no running header (the letterhead is in the content)');
+  ok(JSON.stringify(hdr2 || {}).includes('Private Equity'), 'PDF running header on page 2 carries the scope',
+    JSON.stringify(hdr2));
+
+  // What a document manager indexes.
+  ok((sd.info?.title || '').includes('Private Equity'), 'PDF info.title carries the scope', sd.info?.title);
+  ok((sd.info?.subject || '').includes('Private Equity'), 'PDF info.subject carries the scope', sd.info?.subject);
+
+  // An unnarrowed report must be untouched — no stray separator.
+  const plain = buildPdfDocDefinition(doc, { now: new Date(2026, 7, 12, 16, 20) });
+  const plainHdr: any = typeof plain.header === 'function' ? plain.header(2) : null;
+  ok(!JSON.stringify(plainHdr || {}).includes('\u2014 undefined'), 'consolidated report gains no scope text');
+  ok((plain.info?.subject || '') === 'Capital Gains Statement', 'consolidated subject unchanged', plain.info?.subject);
+}
+
   // ── 5. XLSX ───────────────────────────────────────────────────────────────
   console.log('\n5. XLSX');
   const wb = await buildXlsxWorkbook(doc);
@@ -233,6 +265,20 @@ const pdfPath = path.join(OUT, 'verify-report.pdf');
 
   const unparsed = ws.getCell(first + 4, 4);
   ok(unparsed.value === 'STALE', 'unparseable date stays a string, not a wrong date', String(unparsed.value));
+
+
+  // Scope in the workbook tab name and the print footer. The tab name is capped at 31 chars by
+  // Excel, so the qualifier is placed FIRST — truncation must never be able to eat the one word
+  // that distinguishes two otherwise identical statements.
+  const scopedWb = await buildXlsxWorkbook({ ...doc, titleTag: 'Private Equity' });
+  const sws: any = scopedWb.worksheets[0];
+  ok(sws.name.startsWith('Private Equity'), 'XLSX tab name leads with the scope', sws.name);
+  ok(sws.name.length <= 31, 'XLSX tab name respects Excel\u2019s 31-char cap', `${sws.name.length}: ${sws.name}`);
+  ok(String(sws.headerFooter?.oddFooter || '').includes('Private Equity'),
+    'XLSX print footer carries the scope (the only identity on printed page 2+)',
+    String(sws.headerFooter?.oddFooter));
+  ok(!String(ws.headerFooter?.oddFooter || '').includes('undefined'),
+    'consolidated print footer has no stray qualifier', String(ws.headerFooter?.oddFooter));
 
   console.log(`\n${fails === 0 ? 'ALL CHECKS PASSED' : fails + ' CHECK(S) FAILED'}`);
   console.log(`artifacts: ${pdfPath}`);

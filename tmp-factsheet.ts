@@ -79,7 +79,8 @@ holdings.push({
   invested: -50000, cmp: 12, current: -1_200_000, priced: true, discrepancy: true, lots: [],
 });
 
-const aum: AumResult = { totalCurrent: 20_511_880, totalInvested: 18_416_709.71, perPortfolio: [], fullyPriced: false };
+const aum: AumResult = { totalCurrent: 20_511_880, totalInvested: 18_416_709.71, perPortfolio: [], fullyPriced: false,
+  priceFeedFailed: false, totalPositions: 12, totalPriced: 10, totalExcepted: 0, totalExceptedValue: 0 };
 
 const bySector = new Map<string, { companies: number; invested: number; current: number }>();
 SEED.forEach(([, sec], i) => {

@@ -433,6 +433,17 @@ html:not(.dark) .text-red-600       { color: #d33a2c; }
 html:not(.dark) .text-rose-700,
 html:not(.dark) .text-red-700       { color: #b93226; }
 
+/* Orange = the UNLISTED (private-equity) marker: the PE badge on the holdings grid and on
+   the Dashboard's consolidated table, plus the older PEQ series badge. The dark layer already
+   retints these (see .dark .bg-orange-50 / .border-orange-200 / .text-orange-700); without a
+   light rule the badge kept stock Tailwind orange-50, which is a near-white that all but
+   disappears against the parchment ground — the badge is the only thing distinguishing a
+   valuation from a market price, so it has to read. Terracotta: warm enough to belong on
+   parchment, far enough from the brass accent and the rose error tint to stay its own signal. */
+html:not(.dark) .bg-orange-50       { background-color: #f6e6d2; }
+html:not(.dark) .border-orange-200  { border-color: #d8a86f; }
+html:not(.dark) .text-orange-700    { color: #8f4b16; }
+
 /* Slate neutrals → warm parchment (deeper cream, low glare): warm ink for
    text, cream surfaces, sand borders. The page ground (App.tsx root gradient)
    is parchment too, so nothing on it may stay blue- or cool-gray. */

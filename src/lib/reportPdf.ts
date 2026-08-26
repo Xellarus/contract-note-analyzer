@@ -155,11 +155,17 @@ export function buildPdfDocDefinition(doc: ReportDoc, opts: PdfOptions = {}): an
   };
 
   // ── page-1 letterhead ────────────────────────────────────────────────────────
+  // A narrowed report must identify itself on EVERY page, not only on the letterhead: a
+  // capital-gains statement is printed, split, and filed page by page, and pages 2+ carry
+  // nothing but the running header. Without this, an equity-only statement is indistinguishable
+  // from a consolidated one from page 2 onward.
+  const titled = doc.titleTag ? `${doc.title} — ${doc.titleTag}` : doc.title;
+
   const letterhead: any[] = [
     { canvas: [{ type: 'rect', x: 0, y: 0, w: contentWidth, h: 7, color: BRASS }] },
     { text: doc.holder, color: BRASS_DEEP, bold: true, fontSize: 16, margin: [0, 10, 0, 0] },
     { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 120, y2: 0, lineWidth: 1.6, lineColor: BRASS }], margin: [0, 3, 0, 0] },
-    { text: doc.title, color: INK, bold: true, fontSize: 11.5, margin: [0, 7, 0, 0] },
+    { text: titled, color: INK, bold: true, fontSize: 11.5, margin: [0, 7, 0, 0] },
   ];
 
   if (doc.params.length) {
@@ -198,7 +204,8 @@ export function buildPdfDocDefinition(doc: ReportDoc, opts: PdfOptions = {}): an
     // Top margin leaves room for the running header that pages 2+ carry.
     pageMargins: [MARGIN_X, 34, MARGIN_X, 34],
     defaultStyle: { font: 'Roboto', fontSize, color: INK, lineHeight: 1.12 },
-    info: { title: `${doc.title} — ${doc.holder}`, author: doc.holder, subject: doc.title },
+    // What a document manager indexes, and what survives the file being renamed.
+    info: { title: `${titled} — ${doc.holder}`, author: doc.holder, subject: titled },
     content,
 
     // Page 1 carries the full letterhead in its content, so the running header starts at 2.
@@ -209,7 +216,7 @@ export function buildPdfDocDefinition(doc: ReportDoc, opts: PdfOptions = {}): an
             margin: [MARGIN_X, 14, MARGIN_X, 0],
             columns: [
               { text: doc.holder, bold: true, fontSize: 8, color: BRASS_DEEP },
-              { text: doc.title, fontSize: 8, color: MUTED, alignment: 'right' },
+              { text: titled, fontSize: 8, color: MUTED, alignment: 'right' },
             ],
           },
 

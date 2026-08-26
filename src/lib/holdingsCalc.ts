@@ -2,9 +2,10 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
   normName, loadScripMaster, resolveScrip, lookupScrip, findNameCollisions, ScripMaster, ScripEntry, NameCollision,
-  SCRIP_MASTER_SPREADSHEET_ID,
+  SCRIP_MASTER_SPREADSHEET_ID, isPriceExcepted, ltDaysFor,
 } from "./scripMaster";
-import { loadScripPrices, makePriceResolver } from "./scripPrices";
+import { loadScripPrices, makePriceResolver, makeExceptionResolver, ScripPrice } from "./scripPrices";
+import { invalidateDashboard } from "./dashboardCache";
 import { loadScripIndustries, makeIndustryResolver } from "./scripIndustries";
 import { loadCorporateActions, CorpAction } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
@@ -709,6 +710,12 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   // collisions elsewhere in the shared master don't create noise here.
   const nameCollisions = findNameCollisions(master).filter(c => seenNames.has(c.key));
 
+  // The Dashboard reads this very tab, so anything that rebuilds it makes the cached
+  // Dashboard view stale. One call here covers every write path - import, trade edit,
+  // manual rebuild, opening-basis seeding and an import rewind all funnel through this
+  // function, which is why the invalidation lives here rather than at seven call sites.
+  invalidateDashboard();
+
   return {
     positions: active.length,
     totalInvested: parseFloat(totalInvested.toFixed(2)),
@@ -726,12 +733,30 @@ export interface AumPortfolio {
   investedValue: number;  // Σ invested (cost)
   positions: number;
   priced: number;         // how many positions had a real imported price
+  /** Positions we deliberately never price — unlisted (PE) companies, ETFs / liquid funds
+   *  flagged "Price Exception". Held at cost (or at a hand-entered valuation) BY DESIGN,
+   *  so they are not a gap in the feed and must not be counted as one. */
+  excepted: number;
+  /** Σ current value of the excepted positions — the "not market-priced" part of this
+   *  portfolio's value, so a card can disclose it instead of implying it's all live. */
+  exceptedValue: number;
 }
 export interface AumResult {
   totalCurrent: number;   // the AUM
   totalInvested: number;
   perPortfolio: AumPortfolio[];
-  fullyPriced: boolean;   // false → some positions valued at cost (no imported price)
+  /** False → some positions we EXPECTED a price for are valued at cost. Deliberately
+   *  unpriced positions (PE / price exceptions) don't count against it, or a book holding
+   *  one unlisted company would show the caveat forever and it would stop meaning anything. */
+  fullyPriced: boolean;
+  /** The Prices read itself failed, so NOTHING could be priced. Distinct from
+   *  `fullyPriced: false`, which means some individual scrips have no price on file.
+   *  When true, `totalCurrent` is the book's COST and must not be shown as AUM. */
+  priceFeedFailed: boolean;
+  totalPositions: number;
+  totalPriced: number;
+  totalExcepted: number;
+  totalExceptedValue: number;
 }
 
 /**
@@ -742,15 +767,30 @@ export interface AumResult {
  */
 export async function computeAum(portfolios: { id: string; label: string; sheetId: string }[]): Promise<AumResult> {
   const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null);
-  const prices = await loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).catch(() => []);
+  // Swallowing this into [] is what let a failed price read masquerade as "no prices
+  // exist", so the failure is now carried through to the caller instead.
+  let prices: ScripPrice[] = [];
+  let priceFeedFailed = false;
+  try {
+    prices = await loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID);
+  } catch {
+    priceFeedFailed = true;
+  }
   const cmpOf = makePriceResolver(master, prices);
+  // "We never price this one" — an unlisted (PE) company, or an ETF / liquid fund the user
+  // flagged. Both identities are honoured: the flag may sit on the scrip master entry or in
+  // the Prices tab's exception column, exactly as the "unpriced" button reads it.
+  const exceptedOf = makeExceptionResolver(master, prices);
+  const isExcepted = (isin: string, name: string): boolean =>
+    exceptedOf(isin, name) || (!!master && isPriceExcepted(master, isin, name));
 
   const toN = (v: any) => { const n = parseFloat((v ?? "").toString().replace(/,/g, "").trim()); return isNaN(n) ? NaN : n; };
   const per: AumPortfolio[] = [];
   let totalCurrent = 0, totalInvested = 0, anyUnpriced = false;
+  let totalPositions = 0, totalPriced = 0, totalExcepted = 0, totalExceptedValue = 0;
 
   for (const p of portfolios) {
-    let cur = 0, inv = 0, positions = 0, priced = 0;
+    let cur = 0, inv = 0, positions = 0, priced = 0, excepted = 0, exceptedValue = 0;
     try {
       const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: p.sheetId, range: "Holding!A:E" });
       const rows: any[][] = res?.result?.values || [];
@@ -765,14 +805,22 @@ export async function computeAum(portfolios: { id: string; label: string; sheetI
         if (isNaN(qty) || qty <= 0 || isNaN(avg)) continue;
         positions++;
         const cmp = cmpOf(isin, name);
-        if (cmp !== undefined) priced++;
-        cur += qty * (cmp !== undefined ? cmp : avg);
+        // A PE company's hand-entered valuation arrives through cmpOf too, so it is a real
+        // number here — but it is NOT a market price, so it counts as excepted, not priced.
+        const ex = isExcepted(isin, name);
+        if (ex) excepted++;
+        else if (cmp !== undefined) priced++;
+        const value = qty * (cmp !== undefined ? cmp : avg);
+        if (ex) exceptedValue += value;
+        cur += value;
         inv += isNaN(investedVal) ? qty * avg : investedVal;
       }
     } catch { /* Holding tab missing/unreadable → contributes 0 */ }
-    if (priced < positions) anyUnpriced = true;
-    per.push({ id: p.id, label: p.label, currentValue: cur, investedValue: inv, positions, priced });
+    if (priced + excepted < positions) anyUnpriced = true;
+    per.push({ id: p.id, label: p.label, currentValue: cur, investedValue: inv, positions, priced, excepted, exceptedValue });
     totalCurrent += cur; totalInvested += inv;
+    totalPositions += positions; totalPriced += priced;
+    totalExcepted += excepted; totalExceptedValue += exceptedValue;
   }
 
   return {
@@ -780,6 +828,18 @@ export async function computeAum(portfolios: { id: string; label: string; sheetI
     totalInvested: parseFloat(totalInvested.toFixed(2)),
     perPortfolio: per,
     fullyPriced: !anyUnpriced,
+    // Either the read failed outright, or it succeeded and priced nothing at all - both
+    // mean totalCurrent is the book's cost, not its market value.
+    //
+    // The excepted positions are excluded from that second test: a book made up ENTIRELY of
+    // unlisted companies (or of flagged ETFs) legitimately has zero market-priced positions,
+    // and would otherwise raise the red "prices could not be read" banner over numbers that
+    // are exactly right.
+    priceFeedFailed: priceFeedFailed || (totalPositions - totalExcepted > 0 && totalPriced === 0),
+    totalPositions,
+    totalPriced,
+    totalExcepted,
+    totalExceptedValue: parseFloat(totalExceptedValue.toFixed(2)),
   };
 }
 
@@ -910,6 +970,28 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   // so short codes ("GOODLUCK") and full names ("Goodluck India Ltd") map to the
   // same FIFO bucket. Unresolved/ambiguous names are collected for review.
   const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+
+  // REFUSE to write the tax ledger when we cannot tell listed from unlisted.
+  //
+  // `ltDaysFor` splits every sale at 365 days for listed equity and 730 for an unlisted
+  // company. With the Private Equities tab unreadable, `isPe` is false for everything, so the
+  // 730-day rule silently disappears and any unlisted sale held 12–24 months is written into
+  // LTST as LONG term when it is short. That figure then persists in the sheet: the report
+  // layer filters presentation, it does not re-derive tax treatment, so nothing downstream can
+  // detect or repair it — and a later reader has no way to know the run was degraded.
+  //
+  // A blocked sync is recoverable in one step (fix the tab, re-run); a mis-split capital-gains
+  // ledger is not, because nobody re-checks a number that already looks finished. The read is
+  // retried four times on transient failures before this can fire (see privateEquities.ts), so
+  // reaching here means a real, persistent problem with the tab.
+  if (master.peFailed) {
+    throw new Error(
+      'Capital gains not written: the "Private Equities" tab of the shared scrip master could not be read, '
+      + 'so unlisted companies cannot be identified — and their long-term holding period is 24 months, not 12. '
+      + 'Continuing would classify unlisted sales held 12–24 months as long-term. Fix that tab and run this again.',
+    );
+  }
+
   const unresolvedMap = new Map<string, UnresolvedScrip>();
   const secKey = (isin: string, name: string) => {
     const r = resolveScrip(master, isin, name);
@@ -1092,7 +1174,10 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
         const acqCost = r2(matchQty * lot.purPrice);
         const gain = r2(saleAmt - acqCost);
         const holdingDays = daysBetween(lot.buyDate, sell.dateObj);
-        const isLT = holdingDays >= 365;
+        // 12 months for listed equity, 24 for an UNLISTED company — the concessional
+        // listed-share period doesn't apply to unquoted shares, so a PE holding sold at
+        // 15 months is SHORT term. See ltDaysFor.
+        const isLT = holdingDays >= ltDaysFor(master, sell.isin, sell.stockName);
         allRecords.push({ saleDate: fmtDate(sell.dateObj), saleDateObj: sell.dateObj, assetName: sell.stockName, isin: sell.isin, qtySold: matchQty, salePrice: sell.avgPrice, saleAmt, purDate: fmtDate(lot.buyDate), purPrice: lot.purPrice, acqCost, intradayCg: 0, stcg: isLT ? 0 : gain, ltcg: isLT ? gain : 0 });
         lot.remaining -= matchQty; sellLeft -= matchQty;
       }

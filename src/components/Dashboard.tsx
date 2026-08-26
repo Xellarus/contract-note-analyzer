@@ -5,6 +5,7 @@ import { PortfolioHolding } from '../types';
 import { computeAum, computeIndustryAllocation, AumResult } from '../lib/holdingsCalc';
 import { computeInvestedTimeline, AumTimelinePoint } from '../lib/aumTimeline';
 import { logAumSnapshot, loadAumHistory, AumSnapshot } from '../lib/aumHistory';
+import { readDashboardSnapshot, writeDashboardSnapshot, dashboardSnapshotAge } from '../lib/dashboardCache';
 import { hasValidGoogleToken } from '../lib/googleAuth';
 import { PORTFOLIOS } from '../lib/portfolios';
 import { computeCrossHoldings, CrossHolding } from '../lib/crossHoldings';
@@ -366,6 +367,19 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
     }
   };
 
+  // Everything the Dashboard shows, so a tab switch can restore it instead of
+  // recomputing dozens of Sheets reads for unchanged data.
+  type Snap = {
+    aum: AumResult | null;
+    timeline: AumTimelinePoint[] | null;
+    marketHist: AumSnapshot[];
+    navHist: NavResult | null;
+    holdingRows: CrossHolding[];
+    holdingsFailed: string[];
+    pendingActions: PendingCorpAction[];
+    error: string | null;
+  };
+
   const load = async () => {
     if (!hasValidGoogleToken()) {
       setError('Connect Google Sheets from the Holdings tab to load live AUM.');
@@ -373,6 +387,7 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
     }
     setLoading(true);
     setError(null);
+    let snap: Snap | null = null;
     const list = PORTFOLIOS.map(p => ({ id: p.id, label: p.label, sheetId: p.sheetId }));
     const full = PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label, sheetId: p.sheetId }));
     try {
@@ -393,22 +408,59 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
       // Unrecorded splits/bonuses. Advisory only, so a failure is silent — the tab may not
       // exist yet if the weekly scanCorpActions() hasn't run.
       if (caRes.status === 'fulfilled') setPendingActions(caRes.value);
+
+      // Capture what was actually computed, so a tab switch restores this instead of
+      // re-running the whole sweep. Collected from the settled results rather than from
+      // state, which has not flushed yet at this point.
+      snap = {
+        aum: aumRes.status === 'fulfilled' ? aumRes.value : null,
+        timeline: tlRes.status === 'fulfilled' ? tlRes.value : null,
+        marketHist: [],
+        navHist: navRes.status === 'fulfilled' ? navRes.value : null,
+        holdingRows: chRes.status === 'fulfilled' ? chRes.value.rows : [],
+        holdingsFailed: chRes.status === 'fulfilled' ? chRes.value.failed : [],
+        pendingActions: caRes.status === 'fulfilled' ? caRes.value : [],
+        error: aumRes.status === 'fulfilled'
+          ? null
+          : (aumRes.reason?.result?.error?.message || aumRes.reason?.message || 'Could not compute AUM.'),
+      };
       // Log today's AUM snapshot (once per IST day; same-day reloads refresh
       // the row) and pull the accumulated market-value history for the chart.
       // Best-effort: a failure here never blocks the dashboard.
       try {
-        if (aumRes.status === 'fulfilled') {
-          setMarketHist(await logAumSnapshot(aumRes.value.totalInvested, aumRes.value.totalCurrent));
-        } else {
-          setMarketHist(await loadAumHistory());
-        }
+        const hist = aumRes.status === 'fulfilled'
+          ? await logAumSnapshot(aumRes.value.totalInvested, aumRes.value.totalCurrent)
+          : await loadAumHistory();
+        setMarketHist(hist);
+        if (snap) snap.marketHist = hist;
       } catch { /* snapshot logging is non-critical */ }
     } finally {
       setLoading(false);
+      // Only cache a load that produced an AUM. Caching a failed sweep would pin the
+      // failure in place until the next write, which is the mistake the price cache made.
+      if (snap && snap.aum) writeDashboardSnapshot(snap);
     }
   };
 
+  const [servedFrom, setServedFrom] = useState<number | null>(null);
+
   useEffect(() => {
+    // A tab switch unmounts this component, so without the snapshot every return to the
+    // Dashboard re-ran the full sweep. Restore instead, and recompute only when a write
+    // has invalidated it or the backstop TTL has passed.
+    const cached = readDashboardSnapshot<Snap>();
+    if (cached) {
+      setAum(cached.aum);
+      setTimeline(cached.timeline);
+      setMarketHist(cached.marketHist);
+      setNavHist(cached.navHist);
+      setHoldingRows(cached.holdingRows);
+      setHoldingsFailed(cached.holdingsFailed);
+      setPendingActions(cached.pendingActions);
+      setError(cached.error);
+      setServedFrom(dashboardSnapshotAge());
+      return;
+    }
     load();
     // Token may still be restoring right after a page reload — retry briefly.
     if (!hasValidGoogleToken()) {
@@ -445,11 +497,19 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
               : <><FileText className="w-3.5 h-3.5" /> Factsheet</>}
           </button>
           <button
-            onClick={load} disabled={loading}
+            onClick={() => { setServedFrom(null); load(); }} disabled={loading}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </button>
+          {servedFrom !== null && (
+            <span
+              className="text-[10px] font-bold text-[#756b57] dark:text-[#938b7c] whitespace-nowrap"
+              title="Restored from the last computed view — switching tabs no longer recomputes. Refresh to recompute now."
+            >
+              as of {new Date(servedFrom).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
         </div>
       </div>
 
@@ -470,19 +530,65 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-[13px]">
               <span className="text-[#756b57] dark:text-[#938b7c]">Invested <strong className="font-mono text-[#16130d] dark:text-[#eae5da]">{inr(aum.totalInvested)}</strong></span>
-              <span className={`inline-flex items-center gap-1 font-bold ${up ? 'text-[#0d8a4f] dark:text-[#4fc584]' : 'text-[#d33a2c] dark:text-[#f2705f]'}`}>
-                {up ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                {up ? '+' : ''}{inr(gain)} ({up ? '+' : ''}{gainPct.toFixed(2)}%)
-              </span>
+              {/* With no price feed at all the gain is zero by construction, and a green
+                  "+0.00%" reads as a genuinely flat day rather than as missing data. */}
+              {!aum.priceFeedFailed && (
+                <span className={`inline-flex items-center gap-1 font-bold ${up ? 'text-[#0d8a4f] dark:text-[#4fc584]' : 'text-[#d33a2c] dark:text-[#f2705f]'}`}>
+                  {up ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                  {up ? '+' : ''}{inr(gain)} ({up ? '+' : ''}{gainPct.toFixed(2)}%)
+                </span>
+              )}
             </div>
-            {!aum.fullyPriced && (
-              <p className="mt-3 text-[11px] text-[#756b57] dark:text-[#938b7c]">Some holdings are valued at cost — import current prices (Imports → Securities &amp; Prices) for full live valuation.</p>
+            {aum.priceFeedFailed ? (
+              // The whole book fell back to cost. Saying "some holdings" here would be a
+              // wild understatement: the headline number IS the invested capital.
+              <p className="mt-3 flex items-start gap-1.5 text-[11px] font-bold text-amber-700 dark:text-amber-400">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                <span>
+                  Live prices unavailable — the figure above is the book's <strong>cost</strong>, not
+                  market value. None of {aum.totalPositions - aum.totalExcepted} market-priced
+                  positions could be priced. Try Holdings → Refresh Prices.
+                </span>
+              </p>
+            ) : !aum.fullyPriced ? (
+              // Counted against the positions we EXPECT a price for. Unlisted companies and
+              // flagged ETFs are excluded from both halves of the fraction — they are held at
+              // cost (or at a stated valuation) by design, and folding them in here would leave
+              // a caveat permanently on screen until it meant nothing.
+              <p className="mt-3 text-[11px] text-[#756b57] dark:text-[#938b7c]">
+                {aum.totalPositions - aum.totalPriced - aum.totalExcepted} of {aum.totalPositions - aum.totalExcepted} listed
+                holdings are valued at cost — import current prices (Imports → Securities &amp; Prices) for full live valuation.
+              </p>
+            ) : null}
+            {/* What is deliberately not market-priced, so the headline isn't read as all-live. */}
+            {aum.totalExcepted > 0 && !aum.priceFeedFailed && (
+              <p className="mt-1.5 text-[11px] text-[#756b57] dark:text-[#938b7c]">
+                Includes {aum.totalExcepted} {aum.totalExcepted === 1 ? 'position' : 'positions'} worth{' '}
+                <strong className="font-mono">{inr(aum.totalExceptedValue)}</strong> that are never market-priced
+                — unlisted companies and flagged funds, held at cost or at a stated valuation.
+              </p>
             )}
           </>
         ) : (
           <p className="mt-3 text-sm text-[#756b57] dark:text-[#938b7c]">—</p>
         )}
       </div>
+
+      {/* Every market-value figure on this page - the holdings table, the industry split,
+          the NAV series - resolves against the same Prices tab as the AUM card. If that read
+          failed there is no honest way to show any of them, so say it once, loudly, rather
+          than letting each panel quietly present cost as though it were market value. */}
+      {aum?.priceFeedFailed && (
+        <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-300 bg-amber-50 text-[12px] text-amber-900">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            <strong>Prices could not be read</strong>, so every market value below is the
+            position's <strong>cost</strong> — the holdings table, the industry split and the
+            gain figures included. This is a failed read of the shared Prices tab, not a set of
+            unpriced scrips. Hit Refresh; if it persists, run Refresh Prices from Holdings.
+          </span>
+        </div>
+      )}
 
       {error && (
         <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
@@ -602,6 +708,10 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
           <span>Couldn't read the Holding tab for {holdingsFailed.join(', ')} — those positions are missing from the table below.</span>
         </div>
       )}
+      {/* Every open position, listed and unlisted alike — this table is the consolidated view,
+          so splitting it would just mean a number here that doesn't tie to the AUM above. An
+          unlisted row is marked with a PE badge and shows its valuation (or "at cost") where a
+          listed row shows its CMP. Per-account filtering lives on the portfolio page. */}
       <AllHoldingsTable rows={holdingRows} loading={loading} onOpenStock={onOpenStock} />
     </div>
   );

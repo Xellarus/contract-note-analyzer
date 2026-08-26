@@ -1,4 +1,5 @@
 import { gapi } from "gapi-script";
+import { invalidatePrivateEquityCache, loadPrivateEquities, PrivateEquityRow } from "./privateEquities";
 
 // The single shared scrip master lives in ONE Google Sheet that the user owns
 // and curates directly (NSE/BSE ISIN ↔ name, plus any additions). The app reads
@@ -56,6 +57,17 @@ export interface ScripEntry {
   bse?: string;             // BSE scrip code (from the BSE column), for display
   industry?: string;        // Industry / Sector (from a screener import), for the allocation chart
   priceExcept?: boolean;    // "Price Exception" column truthy → never fetched/priced; hidden from the "unpriced" UI (ETFs/liquid funds)
+  // ── Private equity (from the "Private Equities" tab; see privateEquities.ts) ──
+  /** An UNLISTED company. No exchange price exists, so it is never fetched and never
+   *  counted as "unpriced"; its long-term holding period is 24 months, not 12. */
+  isPe?: boolean;
+  /** Google Drive folder of that company's documents — shown on its page in the same
+   *  slot a listed company's Screener.in link occupies. */
+  driveLink?: string;
+  /** Hand-entered per-share fair value. Undefined/0 ⇒ the holding stays valued at cost. */
+  peValuation?: number;
+  peValuationDate?: string;   // ISO yyyy-mm-dd
+  peNotes?: string;
 }
 
 export interface ScripMaster {
@@ -68,6 +80,13 @@ export interface ScripMaster {
   // "S & T Corporation" collapses to {corporation} and would otherwise grab any name
   // containing "corporation". Computed at load; see resolveScrip step 3.
   genericTokens: Set<string>;
+  /**
+   * The "Private Equities" tab could not be read (a real API error, not an absent tab), so
+   * this master carries NO PE flags even if PE companies exist. Consumers must not read
+   * that as "there is no private equity": a PE holding would then be treated as an ordinary
+   * unpriced equity. Surfaces as a warning rather than a silently different book.
+   */
+  peFailed: boolean;
 }
 
 export type ResolveResult =
@@ -81,6 +100,7 @@ const emptyMaster = (): ScripMaster => ({
   entries: [],
   dirty: false,
   genericTokens: new Set(),
+  peFailed: false,
 });
 
 // A token appearing in at least this many DISTINCT entries is "generic" (a common company
@@ -148,6 +168,9 @@ const CACHE_TTL_MS = 90_000;
  *  the user adds a row in the sheet and wants to re-resolve). */
 export function invalidateScripCache(): void {
   _cache = null;
+  // The PE tab is folded into every master, so a stale PE cache would survive a forced
+  // master reload and the newly-added company still wouldn't appear.
+  invalidatePrivateEquityCache();
 }
 
 /** The title of the sheet's first tab (gid=0), so we read the right range
@@ -293,10 +316,106 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
     }
   }
 
+  // Unlisted companies live in their own tab and are folded in as ordinary entries — see
+  // foldPrivateEquities for why here rather than in a parallel list. A failure to read that
+  // tab is recorded, not thrown: the equity master itself loaded fine, and losing the whole
+  // app because an optional tab 500'd would be the worse outcome. The 90s TTL retries it.
+  try {
+    foldPrivateEquities(master, await loadPrivateEquities(spreadsheetId, opts));
+  } catch (e) {
+    master.peFailed = true;
+    console.warn("Could not read the Private Equities tab — PE holdings will show as ordinary unpriced equities:", e);
+  }
+
   computeGenericTokens(master);   // which single tokens are too common to carry a fuzzy match
   master.dirty = false;
   _cache = { id: spreadsheetId, master, ts: now };   // cache only after a SUCCESSFUL read
   return master;
+}
+
+/**
+ * Fold the "Private Equities" rows into the master as ordinary `ScripEntry`s.
+ *
+ * Done HERE, at the single point every consumer already loads, because a PE company has to
+ * behave like any other security downstream: the trade-entry typeahead lists it, manual
+ * trades resolve their name against it, the FIFO engines and capital gains group on its
+ * key, reports print its canonical name. A separate PE identity map would mean editing
+ * every one of those call sites and keeping two resolvers in agreement forever.
+ *
+ * A company already present in the main tab (one that has since listed, say) is FLAGGED in
+ * place rather than duplicated — a second entry for the same name is exactly the collision
+ * `findNameCollisions` exists to catch, and it splits the position.
+ *
+ * `pendingPersist` is deliberately left false: these rows belong to the PE tab, and
+ * `saveScripMaster` (which appends to the FIRST tab) skips them anyway.
+ */
+export function foldPrivateEquities(master: ScripMaster, rows: PrivateEquityRow[]): void {
+  for (const r of rows) {
+    const name = (r.company || "").trim();
+    if (!name) continue;
+    const isin = (r.isin || "").trim().toUpperCase();
+    const nk = normName(name);
+    let entry = (isin ? master.byIsin.get(isin) : undefined) || (nk ? master.byAliasNorm.get(nk) : undefined) || null;
+    if (!entry) {
+      entry = makeEntry(name, isin, [], "confirmed");
+      indexEntry(master, entry);
+    } else if (isin && !entry.isin) {
+      enrich(master, entry, isin, name);
+    }
+
+    // The Drive folder is safe to attach either way — it's a document link, nothing computes
+    // from it.
+    if (r.driveLink) entry.driveLink = r.driveLink;
+
+    // But the UNLISTED flag is not, and this match can land on a LISTED company: normName
+    // strips "private"/"limited", so "Acme Foods Private Limited" on the PE list resolves to
+    // an existing "Acme Foods Ltd" that trades on the exchange. Marking that entry would stop
+    // the price feed from ever fetching it and swap its LTCG period to 24 months — silently
+    // wrong, on a live holding.
+    //
+    // An entry carrying an NSE symbol or a BSE code is, by definition, listed. Such a row
+    // contributes its Drive link and nothing else. If the collision was accidental (two
+    // different companies whose names normalise alike) `findNameCollisions` reports it; if the
+    // company genuinely listed after we bought it, then treating it as listed is correct.
+    if (entry.nse || entry.bse) continue;
+
+    entry.isPe = true;
+    // Unlisted ⇒ there is no exchange price to fetch, ever. This is what keeps PE out of the
+    // "prices we couldn't fetch" list and out of the "valued at cost" warning count.
+    entry.priceExcept = true;
+    if (r.valuation > 0) entry.peValuation = r.valuation;
+    if (r.valuationDate) entry.peValuationDate = r.valuationDate;
+    if (r.notes) entry.peNotes = r.notes;
+    // So the allocation chart shows these as their own slice instead of "Unclassified".
+    // A real sector set on the row/entry still wins.
+    if (!entry.industry) entry.industry = "Private Equity";
+  }
+  // `dirty` is NOT set: nothing here needs writing back. Marking it would make callers
+  // offer to "save" the scrip master after a plain read.
+}
+
+/** True when this security is an unlisted company from the Private Equities tab. */
+export function isPeScrip(master: ScripMaster | null, isin: string, name: string): boolean {
+  if (!master) return false;
+  const e = lookupScrip(master, isin, name).entry;
+  return !!(e && e.isPe);
+}
+
+/** The PE entry behind a security, or null when it isn't one. Carries the Drive link and
+ *  any hand-entered valuation. */
+export function peEntry(master: ScripMaster | null, isin: string, name: string): ScripEntry | null {
+  if (!master) return null;
+  const e = lookupScrip(master, isin, name).entry;
+  return e && e.isPe ? e : null;
+}
+
+/** Long-term holding period in DAYS for this security. Listed equity qualifies at 12
+ *  months; an UNLISTED company takes 24 (s.2(42A) — a listed-share holding period does
+ *  not apply to unquoted shares). Getting this wrong reports a short-term gain as long-term. */
+export const LT_DAYS_LISTED = 365;
+export const LT_DAYS_UNLISTED = 730;
+export function ltDaysFor(master: ScripMaster | null, isin: string, name: string): number {
+  return isPeScrip(master, isin, name) ? LT_DAYS_UNLISTED : LT_DAYS_LISTED;
 }
 
 /**
@@ -489,7 +608,14 @@ export function seedFromRows(master: ScripMaster, rows: { isin: string; name: st
  * their canonical entry by ISIN/name. Clears each entry's pendingPersist flag.
  */
 export async function saveScripMaster(spreadsheetId: string, master: ScripMaster): Promise<void> {
-  const toAppend = master.entries.filter(e => e.pendingPersist);
+  // A PE entry must NEVER be appended here. It is owned by the "Private Equities" tab, and
+  // this function writes to the FIRST tab — so appending it would create a second entry for
+  // the same company, which is precisely the duplicate-identity split `findNameCollisions`
+  // exists to report (a name in two entries resolves to only one of them, and the position
+  // silently divides between them). Anything that flipped their flag gets it cleared.
+  const pe = master.entries.filter(e => e.pendingPersist && e.isPe);
+  pe.forEach(e => { e.pendingPersist = false; });
+  const toAppend = master.entries.filter(e => e.pendingPersist && !e.isPe);
   if (toAppend.length === 0) { master.dirty = false; return; }
 
   const tab = await firstSheetTitle(spreadsheetId);

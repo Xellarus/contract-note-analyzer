@@ -2,7 +2,7 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
   normName, loadScripMaster, resolveScrip, ScripMaster,
-  SCRIP_MASTER_SPREADSHEET_ID,
+  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor,
 } from "./scripMaster";
 import { loadCorporateActions } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
@@ -229,6 +229,20 @@ export async function generateTrxRegister(
 
   // ── 2. Resolve scrips via the shared master (short code + full name → one key) ──
   const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+
+  // Same refusal as `syncCapitalGains`, for the same reason: this register splits every sale
+  // into short and long term at `ltDaysFor`, which is 730 days for an unlisted company. With
+  // the Private Equities tab unreadable every security reads as listed, so an unlisted sale
+  // held 12-24 months lands in the LONG-term column of a tax register that is then filed.
+  // Blocking is recoverable in one step; a mis-split register that already looks finished is not.
+  if (master.peFailed) {
+    throw new Error(
+      'Register not written: the "Private Equities" tab of the shared scrip master could not be read, '
+      + 'so unlisted companies cannot be identified — and their long-term holding period is 24 months, not 12. '
+      + 'Continuing would classify unlisted sales held 12–24 months as long-term. Fix that tab and run this again.',
+    );
+  }
+
   const unresolvedMap = new Map<string, UnresolvedScrip>();
   const keyOf = (isin: string, name: string): string => {
     const r = resolveScrip(master, isin, name);
@@ -461,8 +475,12 @@ export async function generateTrxRegister(
       }
     } else {
       // SELL — FIFO-consume; split matched parcels into ST and LT buckets (qty + P/L)
-      // by holding days ≥ 365 (turnover basis), so each bucket becomes its own row.
+      // by holding days ≥ the long-term threshold (turnover basis), so each bucket becomes
+      // its own row. That threshold is 365 days for listed equity but 730 for an UNLISTED
+      // (private-equity) company — the concessional listed-share period doesn't apply to
+      // unquoted shares. Resolved once per sale, not per lot.
       const lots = fifo.get(t.key) || [];
+      const ltDays = ltDaysFor(master, t.isin, t.name);
       const salePrice = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
       let left = t.qty, ltQty = 0, ltGain = 0, stQty = 0, stGain = 0;
       for (const l of lots) {
@@ -470,7 +488,7 @@ export async function generateTrxRegister(
         if (l.remaining <= 1e-9) continue;
         const m = Math.min(l.remaining, left);
         const gain = r2(m * salePrice) - r2(m * l.purPrice);
-        if (daysBetween(l.buyTs, t.ts) >= 365) { ltQty += m; ltGain += gain; } else { stQty += m; stGain += gain; }
+        if (daysBetween(l.buyTs, t.ts) >= ltDays) { ltQty += m; ltGain += gain; } else { stQty += m; stGain += gain; }
         l.remaining -= m; left -= m;
       }
       if (inFY) {

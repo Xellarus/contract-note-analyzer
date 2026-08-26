@@ -70,7 +70,12 @@ export async function buildXlsxWorkbook(doc: ReportDoc): Promise<any> {
   const wb = new ExcelJS.Workbook();
   wb.creator = doc.holder || 'Portfolio';
   wb.created = new Date();
-  const ws = wb.addWorksheet(sheetName(doc.title), {
+  const titled = doc.titleTag ? `${doc.title} — ${doc.titleTag}` : doc.title;
+  // Tab name puts the qualifier FIRST, because `sheetName` hard-truncates at Excel's 31-char
+  // limit: "Capital Gains Report — Private Equity" would come back as "Capital Gains Report —
+  // Private " and lose the one word that distinguishes it. Leading, it always survives.
+  const tabTitle = doc.titleTag ? `${doc.titleTag} — ${doc.title}` : doc.title;
+  const ws = wb.addWorksheet(sheetName(tabTitle), {
     views: [{ showGridLines: false }],
     pageSetup: {
       orientation: doc.landscape ? 'landscape' : 'portrait',
@@ -99,7 +104,7 @@ export async function buildXlsxWorkbook(doc: ReportDoc): Promise<any> {
   ws.getRow(r).height = 21;
   r++;
 
-  ws.getCell(r, 1).value = doc.title;
+  ws.getCell(r, 1).value = titled;
   ws.getCell(r, 1).font = { name: 'Calibri', size: 11, bold: true, color: { argb: INK } };
   spanMerge(r);
   r++;
@@ -206,8 +211,10 @@ export async function buildXlsxWorkbook(doc: ReportDoc): Promise<any> {
   ws.pageSetup.printTitlesRow = `${hdrRow}:${hdrRow}`;
   ws.pageSetup.printArea = `A1:${lastColLetter(ncols)}${r - 1}`;
   ws.headerFooter = {
-    oddFooter: `&L&8${doc.holder} — ${doc.title}&R&8Page &P of &N`,
-    evenFooter: `&L&8${doc.holder} — ${doc.title}&R&8Page &P of &N`,
+    // printTitlesRow repeats only the column headers, so on printed page 2+ this footer is the
+    // sheet's only statement of what it is. It must carry the scope.
+    oddFooter: `&L&8${doc.holder} — ${titled}&R&8Page &P of &N`,
+    evenFooter: `&L&8${doc.holder} — ${titled}&R&8Page &P of &N`,
   };
 
   void firstDataRow;                                      // (kept for readability of the layout above)

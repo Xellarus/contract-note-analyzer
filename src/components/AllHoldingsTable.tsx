@@ -89,7 +89,11 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
     { invested: 0, current: 0 },
   ), [visible]);
 
-  const unpricedShown = visible.filter(h => !h.priced).length;
+  // Two different states, deliberately counted apart. A LISTED security with no price is a gap
+  // in the feed — something to chase. An UNLISTED one is never priced by design, so folding it
+  // in here would inflate a number the reader is meant to act on.
+  const unpricedShown = visible.filter(h => !h.priced && !h.pe).length;
+  const peAtCostShown = visible.filter(h => h.pe && !((h.peValuation ?? 0) > 0)).length;
 
   const downloadCsv = () => {
     // Exports exactly what's on screen — same filter, same sort — plus the per-portfolio
@@ -99,7 +103,9 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
       h.name, h.isin, h.qty, h.avgCost.toFixed(6), h.invested.toFixed(2),
       h.cmp !== undefined ? h.cmp : '', h.current.toFixed(2),
       plOf(h).toFixed(2), plPctOf(h).toFixed(2),
-      h.priced ? 'yes' : 'at cost',
+      // An unlisted company's figure is a VALUATION, not a market price. This export leaves the
+      // machine, so "yes" against one would be read as a traded price by whoever opens it.
+      h.pe ? ((h.peValuation ?? 0) > 0 ? 'valuation' : 'at cost') : (h.priced ? 'yes' : 'at cost'),
       h.lots.map(l => `${l.code}:${qtyFmt(l.qty)}`).join(' | '),
     ]);
     body.push(['Total', '', '', '', totals.invested.toFixed(2), '', totals.current.toFixed(2),
@@ -223,6 +229,17 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
                           <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0"
                             aria-label="Negative quantity" />
                         )}
+                        {/* Unlisted. Without this the CMP column reads as a market price. */}
+                        {h.pe && (
+                          <span
+                            className="px-1.5 py-0.5 rounded-md bg-orange-50 border border-orange-200 text-orange-700 text-[9px] font-black shrink-0 select-none"
+                            title={h.peValuation
+                              ? `Unlisted — valued at ${inr(h.peValuation)}/share${h.peValuationDate ? ` as on ${h.peValuationDate}` : ''}`
+                              : 'Unlisted — no valuation entered, carried at cost'}
+                          >
+                            PE
+                          </span>
+                        )}
                         {h.lots.length > 1 && (
                           <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 text-[9px] font-black">
                             {h.lots.length}
@@ -297,9 +314,15 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
         </div>
       )}
 
-      {unpricedShown > 0 && (
+      {(unpricedShown > 0 || peAtCostShown > 0) && (
         <p className="px-4 py-2.5 border-t border-slate-200 text-[11px] text-slate-500">
-          {unpricedShown} {unpricedShown === 1 ? 'security has' : 'securities have'} no imported price and {unpricedShown === 1 ? 'is' : 'are'} valued at cost.
+          {unpricedShown > 0 && (
+            <>{unpricedShown} {unpricedShown === 1 ? 'security has' : 'securities have'} no imported price and {unpricedShown === 1 ? 'is' : 'are'} valued at cost.</>
+          )}
+          {unpricedShown > 0 && peAtCostShown > 0 ? ' ' : ''}
+          {peAtCostShown > 0 && (
+            <>{peAtCostShown} unlisted {peAtCostShown === 1 ? 'company is' : 'companies are'} carried at cost — enter a valuation in the Private Equities tab to mark {peAtCostShown === 1 ? 'it' : 'them'}.</>
+          )}
         </p>
       )}
     </div>

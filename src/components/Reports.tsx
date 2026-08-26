@@ -14,6 +14,75 @@ import { inferCols, rowsFromGrid, fileSafe } from '../lib/reportDoc';
 type Step = 'home' | 'portfolio' | 'config' | 'result';
 type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expenses-detailed';
 
+/**
+ * Which asset class a report covers. Listed equity and unlisted (private-equity) companies
+ * share one ledger, so a report over a portfolio spans both unless it is narrowed here.
+ *
+ * `consolidated` is the DEFAULT and is exactly what these reports have always produced — no
+ * classification is performed for it, so it cannot be affected by the scrip master being
+ * unavailable. The other two are a real restriction on the rows, and every generated file
+ * says which one it is (see buildDoc): an equity-only capital-gains statement and a
+ * consolidated one are different tax documents and must never be mistaken for each other.
+ */
+type ReportScope = 'eq' | 'pe' | 'consolidated';
+
+const SCOPES: { key: ReportScope; label: string; hint: string }[] = [
+  { key: 'eq', label: 'Equity', hint: 'Listed securities only' },
+  { key: 'pe', label: 'Private Equity', hint: 'Unlisted companies only' },
+  { key: 'consolidated', label: 'Consolidated', hint: 'Listed and unlisted together' },
+];
+
+const SCOPE_LABEL: Record<ReportScope, string> = {
+  eq: 'Equity only (listed securities)',
+  pe: 'Private equity only (unlisted companies)',
+  consolidated: 'Consolidated — listed and unlisted',
+};
+
+/** Filename fragment. Consolidated adds nothing, so existing filenames are untouched. */
+const SCOPE_TAG: Record<ReportScope, string> = { eq: 'Equity_', pe: 'PrivateEquity_', consolidated: '' };
+
+/** Short qualifier carried into the PDF's running header, the XLSX tab name and the print
+ *  footer, so a narrowed report identifies itself on every page and not only on page 1. */
+const SCOPE_SLUG: Record<ReportScope, string> = { eq: 'Equity', pe: 'Private Equity', consolidated: '' };
+
+/**
+ * The disclosure printed under a narrowed report. It names the BASIS of the split, because the
+ * reader of an exported file has no other way to know what "Equity" meant here — the split is
+ * not a market fact, it is this book's own Private Equities list.
+ */
+const SCOPE_NOTE: Record<ReportScope, string> = {
+  eq: 'Scope: LISTED securities only. Unlisted companies — those on the “Private Equities” list in the shared scrip master — are excluded from this report.',
+  pe: 'Scope: UNLISTED companies only, as listed in the “Private Equities” tab of the shared scrip master. Listed securities are excluded from this report.',
+  consolidated: '',
+};
+
+/**
+ * Unlisted-security membership as two O(1) sets, built ONCE per report run.
+ *
+ * Not a per-row `isPeScrip`: that calls `lookupScrip`, whose token-subset fallback rescans
+ * every master entry (~5,000) for any name it can't match exactly — which on a multi-thousand
+ * row ledger is a full scan per row. Same reason `makeScripMatcher` above precomputes.
+ *
+ * Keyed on `aliasNorms`, i.e. every name an entry is known by, so a company RENAMED in the
+ * master still matches the rows written under its old name at import time.
+ */
+interface PeMembership { names: Set<string>; isins: Set<string>; }
+const buildPeMembership = (master: ScripMaster): PeMembership => {
+  const names = new Set<string>();
+  const isins = new Set<string>();
+  for (const e of master.entries) {
+    if (!e.isPe) continue;
+    for (const a of e.aliasNorms) names.add(a);
+    if (e.isin) isins.add(e.isin.trim().toUpperCase());
+  }
+  return { names, isins };
+};
+const rowIsPe = (m: PeMembership, name: string, isin: string): boolean => {
+  const i = (isin || '').trim().toUpperCase();
+  if (i && m.isins.has(i)) return true;
+  return m.names.has(normName(name || ''));
+};
+
 // A single stock the report should be scoped to (set when the user clicks "Report"
 // on a stock's detail page). Portfolio is locked; every report is filtered to it.
 export interface StockFocus { portfolioId: string; scripName: string; isin: string; }
@@ -45,12 +114,16 @@ const makeScripMatcher = (master: ScripMaster | null, focus: StockFocus): ScripM
   };
 };
 
-const REPORTS: { type: ReportType; title: string; desc: string; Icon: typeof FileBarChart2; needsDate: boolean }[] = [
-  { type: 'holding', title: 'Historical Holding Report', desc: 'Holdings of a portfolio as they stood on any past date — quantity, average cost and invested value.', Icon: FileBarChart2, needsDate: true },
-  { type: 'capgains', title: 'Capital Gains Report', desc: 'Realised intraday / short-term / long-term gains per sale (FY25-26 onwards), from the LTST ledger.', Icon: TrendingUp, needsDate: false },
-  { type: 'transactions', title: 'Transaction Report', desc: 'Every Buy / Sell recorded in True Entry — the full trade ledger for the portfolio.', Icon: Receipt, needsDate: false },
-  { type: 'expenses', title: 'Expense Report', desc: 'Total of each expense (brokerage, STT, GST, charges…) summed per date over the chosen period.', Icon: Coins, needsDate: false },
-  { type: 'expenses-detailed', title: 'Detailed Expense Report', desc: 'Total of each expense summed per date and per company (scrip) over the chosen period.', Icon: Layers, needsDate: false },
+// `scoped` — offers the Equity / Private Equity / Consolidated choice. The two EXPENSE reports
+// deliberately don't: they aggregate charges per DATE (the detailed one per date and scrip), and
+// a broker's charges are levied on exchange trades, so splitting them by asset class would
+// produce a "private equity" expense report that is structurally empty. Left whole.
+const REPORTS: { type: ReportType; title: string; desc: string; Icon: typeof FileBarChart2; needsDate: boolean; scoped: boolean }[] = [
+  { type: 'holding', title: 'Historical Holding Report', desc: 'Holdings of a portfolio as they stood on any past date — quantity, average cost and invested value.', Icon: FileBarChart2, needsDate: true, scoped: true },
+  { type: 'capgains', title: 'Capital Gains Report', desc: 'Realised intraday / short-term / long-term gains per sale (FY25-26 onwards), from the LTST ledger.', Icon: TrendingUp, needsDate: false, scoped: true },
+  { type: 'transactions', title: 'Transaction Report', desc: 'Every Buy / Sell recorded in True Entry — the full trade ledger for the portfolio.', Icon: Receipt, needsDate: false, scoped: true },
+  { type: 'expenses', title: 'Expense Report', desc: 'Total of each expense (brokerage, STT, GST, charges…) summed per date over the chosen period.', Icon: Coins, needsDate: false, scoped: false },
+  { type: 'expenses-detailed', title: 'Detailed Expense Report', desc: 'Total of each expense summed per date and per company (scrip) over the chosen period.', Icon: Layers, needsDate: false, scoped: false },
 ];
 
 // The expense columns in True Entry, in report order. Each carries the header
@@ -144,6 +217,24 @@ const parseCellDate = (s: string): number | null => {
 export default function Reports({ focus = null, onClearFocus }: { focus?: StockFocus | null; onClearFocus?: () => void }) {
   const [step, setStep] = useState<Step>('home');
   const [reportType, setReportType] = useState<ReportType>('holding');
+  // Asset class the report covers. Defaults to consolidated, which is what every report
+  // produced before this existed — so a run nobody touched behaves identically.
+  const [scope, setScope] = useState<ReportScope>('consolidated');
+  // The scope the CURRENT RESULT was actually generated with. The exported file and the result
+  // heading label themselves from this, never from `scope` — `scope` is a control, and a control
+  // can be moved after a report has been produced. Deriving the label from the picker instead of
+  // from the run is how a file ends up stamped "Equity only" over consolidated rows; there is no
+  // path today that does it, but the cost of depending on that staying true is a mislabelled tax
+  // document, and the cost of not depending on it is this one line.
+  const [ranScope, setRanScope] = useState<ReportScope>('consolidated');
+  // Distinct company names in the source rows that match NO entry in the scrip master. Those
+  // rows cannot be classified, so they fall to "listed" — which is wrong in both directions at
+  // once (added to Equity, missing from Private Equity). It is a bounded unknown rather than a
+  // detectable error, so the report DISCLOSES the count instead of implying certainty.
+  const [unclassified, setUnclassified] = useState(0);
+  // The Private Equities list was empty on the run that produced the current result. Only
+  // meaningful for an Equity-scoped report, where it means nothing was actually excluded.
+  const [emptyPeList, setEmptyPeList] = useState(false);
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [asOf, setAsOf] = useState<string>(todayStr());
   const [fromDate, setFromDate] = useState<string>('');     // capital gains / transactions period
@@ -164,6 +255,11 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
   const genVR = useVirtualRows(genVirtual ? genRows.length : 0, { estimatedRowHeight: 33, overscan: 16 });
 
   const meta = REPORTS.find(r => r.type === reportType)!;
+  // The asset-class choice is offered — and applied — only when it can mean something: a report
+  // type that spans securities, no single-stock focus (one stock is already one class), and a
+  // choice other than Consolidated (which is the unfiltered report and needs no classification).
+  const scopeOffered = meta.scoped && !focus;
+  const scopeActive = scopeOffered && scope !== 'consolidated';
 
   // Scoped-to-a-stock mode: lock the portfolio to the stock's account and start on
   // the report picker (the portfolio-choose step is skipped). Clearing focus (e.g.
@@ -173,6 +269,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     setPortfolio(focus ? (PORTFOLIOS.find(p => p.id === focus.portfolioId) || null) : null);
     setStep('home');
     setError(null);
+    setScope('consolidated');
     setPositions([]); setGenHeader([]); setGenRows([]);
   }, [focus]);
 
@@ -188,20 +285,114 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     setError(null);
     setPositions([]); setGenHeader([]); setGenRows([]);
     try {
-      // For a stock-scoped report, resolve matches through the scrip master so a scrip
-      // that was renamed in the master (old name now an alias) still matches its True
-      // Entry / LTST rows, which were written under the old canonical name at import.
-      let matchScrip: ScripMatcher | null = null;
-      if (focus) {
-        const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).catch(() => null);
-        matchScrip = makeScripMatcher(master, focus);
+      // Both the stock scope and the asset-class scope resolve through the scrip master, so
+      // load it once. For a stock-scoped report the master lets a scrip RENAMED in the master
+      // (old name now an alias) still match its True Entry / LTST rows, which were written
+      // under the old canonical name at import.
+      const needsMaster = !!focus || scopeActive;
+      let master: ScripMaster | null = null;
+      let masterError: string | null = null;
+      if (needsMaster) {
+        try { master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID); }
+        catch (e: any) { masterError = e?.message || 'the shared Scrip Master could not be read'; }
+        // A scoped run cannot proceed on a stale failure, and `loadScripMaster` caches for 90
+        // seconds — including a master whose Private Equities tab failed to load. So telling the
+        // user to "retry" would hand them the identical error for a minute and a half. Re-read
+        // once, forced (which bypasses the PE tab's own cache too), on the failure path ONLY, so
+        // the extra fetch costs something only where it buys something.
+        if (scopeActive && (!master || master.peFailed)) {
+          try {
+            master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true });
+            masterError = null;
+          } catch (e: any) {
+            masterError = e?.message || 'the shared Scrip Master could not be read';
+            // The forced read threw, so whatever `master` still holds is the stale first attempt.
+            // Report the READ failure rather than falling through to the Private Equities branch
+            // and blaming a tab that was never reached.
+            master = null;
+          }
+        }
+      }
+
+      // An asset-class scope is a CLASSIFICATION, and it must not be guessed. Without the
+      // master — or with its Private Equities tab unreadable — `isPe` is false for everything,
+      // which would hand back an "Equity" report quietly containing unlisted holdings, or a
+      // "Private Equity" report quietly empty. Both are mislabelled documents that look
+      // complete, and these get filed. So refuse, and name the way out: Consolidated needs no
+      // classification and is always available.
+      if (scopeActive) {
+        // Both messages name the CONSEQUENCE, not just the cause: the reader of this error is
+        // about to produce a document, and "couldn't read a sheet" doesn't convey that carrying
+        // on would mislabel it. Both also name the way through, because Consolidated genuinely
+        // always works.
+        if (!master) {
+          throw new Error(
+            `Couldn't read the shared Scrip Master (${masterError}), so listed and unlisted securities can't be told apart — and a ${scope === 'pe' ? 'Private Equity' : 'Equity'} report would be mislabelled. A fresh read was already attempted. Check the connection to Google Sheets, or choose Consolidated (which needs no classification).`,
+          );
+        }
+        if (master.peFailed) {
+          throw new Error(
+            scope === 'pe'
+              ? 'Couldn’t read the "Private Equities" tab of the scrip master, so no company can be identified as unlisted — this report would come back empty and read as though the account holds none. Fix the tab, or choose Consolidated.'
+              : 'Couldn’t read the "Private Equities" tab of the scrip master, so every company would be classified as listed — this report would silently include the unlisted holdings it claims to exclude. Fix the tab, or choose Consolidated.',
+          );
+        }
+      }
+
+      const matchScrip: ScripMatcher | null = focus ? makeScripMatcher(master, focus) : null;
+
+      // The asset-class predicate: precomputed sets, one build per run.
+      let inScope: ((name: string, isin: string) => boolean) | null = null;
+      const unknownNames = new Set<string>();
+      let emptyPeList = false;
+      if (scopeActive && master) {
+        const mem = buildPeMembership(master);
+        // An empty list is a FACT here, not a failure: a genuinely absent tab caches as empty
+        // and a failed read already threw above. A stated fact beats an empty statement.
+        if (mem.names.size === 0 && mem.isins.size === 0) {
+          if (scope === 'pe') {
+            throw new Error('The scrip master lists no unlisted companies, so a Private Equity report has nothing to cover. Add them to the Private Equities tab, or choose Equity / Consolidated.');
+          }
+          // Equity scope with an empty list: nothing was excluded. Correct if the list really is
+          // empty, and misleading if the tab was renamed (which reads as "absent", not "failed").
+          // Disclosed rather than guessed at.
+          emptyPeList = true;
+        }
+        const known = master.byAliasNorm;
+        // Memoized per DISTINCT security, not per row. The fast path is the precomputed sets;
+        // only a name they miss falls through to `lookupScrip`, whose token-subset and
+        // truncation-prefix tiers are what catch a broker-truncated or abbreviated spelling —
+        // the same tiers the rest of the app resolves scrips with. Running that per ROW would be
+        // a ~5,000-entry scan on every line of a multi-thousand-row ledger; per distinct name it
+        // runs a few dozen times. `lookupScrip` is read-only, so the shared cached master is not
+        // mutated by generating a report.
+        const memo = new Map<string, boolean>();
+        inScope = (name: string, isin: string) => {
+          const nk = normName(name || '');
+          const key = `${(isin || '').trim().toUpperCase()}|${nk}`;
+          let pe = memo.get(key);
+          if (pe === undefined) {
+            pe = rowIsPe(mem, name, isin);
+            if (!pe && nk && !known.has(nk)) {
+              const e = lookupScrip(master!, isin, name).entry;
+              if (e) pe = !!e.isPe;
+              else unknownNames.add(nk);   // in no master entry at all → treated as listed
+            }
+            memo.set(key, pe);
+          }
+          return scope === 'pe' ? pe : !pe;
+        };
       }
       if (reportType === 'holding') {
         const asOfTs = new Date(`${asOf}T23:59:59`).getTime();
         const res = await computeHoldingsAsOf(portfolio.sheetId, asOfTs);
-        const positions = matchScrip ? res.positions.filter(p => matchScrip!(p.securityName, p.isin)) : res.positions;
+        let positions = res.positions;
+        if (matchScrip) positions = positions.filter(p => matchScrip!(p.securityName, p.isin));
+        if (inScope) positions = positions.filter(p => inScope!(p.securityName, p.isin));
         setPositions(positions);
-        setTotalInvested(matchScrip ? positions.reduce((s, p) => s + p.invested, 0) : res.totalInvested);
+        // Any filter at all → the total must be re-summed from what's left, or the footer would
+        // report the whole portfolio's cost against a subset of its rows.
+        setTotalInvested((matchScrip || inScope) ? positions.reduce((s, p) => s + p.invested, 0) : res.totalInvested);
         setTradeRows(res.tradeRows);
       } else if (reportType === 'expenses' || reportType === 'expenses-detailed') {
         const vals = await readTab(portfolio.sheetId, 'True Entry!A:Z');
@@ -267,17 +458,35 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             return ts === null ? true : (ts >= fromTs && ts <= toTs);  // keep undated rows
           });
         }
+        // Which column names the security. Differs per tab: True Entry uses "Stock Name", the
+        // LTST capital-gains tab uses "Asset Name". Neither carries an ISIN column, which is why
+        // the name is the identity here — and why an unlisted company (usually no ISIN) matches
+        // on name alone. Found once and shared by both filters below.
+        const nameCol = header.findIndex(h => /stock name|security name|asset name|scrip|company|^name$/i.test(h));
+        const isinCol = header.findIndex(h => /isin/i.test(h));
+        const cellName = (r: string[]) => (nameCol >= 0 ? (r[nameCol] ?? '') : '');
+        const cellIsin = (r: string[]) => (isinCol >= 0 ? (r[isinCol] ?? '') : '');
+
         // Scoped to a single stock → keep only its rows (by ISIN or canonical name).
-        // Note the column names differ per tab: True Entry uses "Stock Name", the LTST
-        // capital-gains tab uses "Asset Name".
-        if (matchScrip) {
-          const nameCol = header.findIndex(h => /stock name|security name|asset name|scrip|company|^name$/i.test(h));
-          const isinCol = header.findIndex(h => /isin/i.test(h));
-          if (nameCol >= 0) body = body.filter(r => matchScrip!(r[nameCol] ?? '', isinCol >= 0 ? (r[isinCol] ?? '') : ''));
+        if (matchScrip && nameCol >= 0) {
+          body = body.filter(r => matchScrip!(cellName(r), cellIsin(r)));
+        }
+
+        // Scoped to an asset class → keep only that class's rows. A tab with no recognisable
+        // name column can't be classified at all; failing loudly beats emitting a file labelled
+        // "Equity only" whose contents were never actually filtered.
+        if (inScope) {
+          if (nameCol < 0) {
+            throw new Error(`This report's sheet has no recognisable company-name column, so its rows can't be split into listed and unlisted. Choose Consolidated.`);
+          }
+          body = body.filter(r => inScope!(cellName(r), cellIsin(r)));
         }
         setGenHeader(header);
         setGenRows(body);
       }
+      setRanScope(scopeActive ? scope : 'consolidated');
+      setUnclassified(unknownNames.size);
+      setEmptyPeList(emptyPeList);
       setStep('result');
     } catch (e: any) {
       setError(e?.result?.error?.message || e?.message || 'Could not generate the report.');
@@ -297,13 +506,33 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     const p = portfolio!;
     // Stock-scoped reports lead the filename with the scrip name (sanitised for a filename).
     const stockTag = focus ? `${fileSafe(focus.scripName)}_` : '';
+    // Filename fragment for a narrowed report. Empty for Consolidated, so every filename this
+    // app has ever produced is unchanged — and a narrowed one is impossible to mistake for it.
+    // This matters most for CSV, which is deliberately raw and carries no parameter block, so
+    // the filename is its ONLY statement of scope.
+    const scopeTag = SCOPE_TAG[ranScope];
+    // Bounds the reliability of the split. Only meaningful on a narrowed report — a consolidated
+    // one includes every row whether or not it could be classified.
+    const unclassifiedNote = (ranScope !== 'consolidated' && unclassified > 0)
+      ? `${unclassified} company name${unclassified === 1 ? '' : 's'} in the source ledger matched no entry in the shared scrip master and ${unclassified === 1 ? 'was' : 'were'} therefore treated as listed. Check ${unclassified === 1 ? 'it' : 'them'} before relying on this split.`
+      : '';
+    const emptyListNote = (ranScope === 'eq' && emptyPeList)
+      ? 'The “Private Equities” list in the shared scrip master is empty, so no securities were excluded from this report — it is equivalent to a consolidated one.'
+      : '';
     const params: Array<[string, string]> = [['Portfolio', `${p.code} — ${p.label}`]];
     if (focus) params.push(['Stock', focus.scripName + (focus.isin ? ` · ${focus.isin}` : '')]);
+    // Stated for Consolidated too, not only when narrowed: a report that says what it covers
+    // can't be misread, and one that says nothing has to be trusted.
+    if (scopeOffered) params.push(['Scope', SCOPE_LABEL[ranScope]]);
 
     if (reportType === 'holding') {
       params.push(['As on', formatDMMMY(asOf)]);
       params.push(['Positions', `${positions.length}`]);
-      params.push(['Trades replayed', `${tradeRows}`]);
+      // Relabelled, not refiltered: the replay must span every holding (a corporate action on
+      // one moves another), so the number is right and only its label was misleading. A wrong
+      // figure inside a letterhead is worse than a vague one — the letterhead is the part a
+      // reader does not check.
+      params.push([(ranScope !== 'consolidated' || focus) ? 'Trades replayed (whole portfolio)' : 'Trades replayed', `${tradeRows}`]);
       const cols: ReportCol[] = [
         { key: 'name', label: 'Company Name', type: 'text' },
         { key: 'isin', label: 'ISIN', type: 'text' },
@@ -319,14 +548,22 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
       return {
         holder: p.label,
         title: meta.title,
+        titleTag: focus ? focus.scripName : (SCOPE_SLUG[ranScope] || undefined),
         params,
         cols,
         rows,
         footnotes: [
-          'Positions are replayed from the portfolio’s full trade history as it stood on the date above, including mergers, demergers, splits and bonuses.',
+          // "full trade history" describes the REPLAY, which genuinely does span everything —
+          // but printed above a filtered table it reads as a claim that the table is complete.
+          ranScope === 'consolidated'
+            ? 'Positions are replayed from the portfolio’s full trade history as it stood on the date above, including mergers, demergers, splits and bonuses.'
+            : 'Positions are replayed from the portfolio’s full trade history as it stood on the date above, including mergers, demergers, splits and bonuses. The replay covers the whole portfolio; only the positions in scope are listed below.',
+          SCOPE_NOTE[ranScope],
+          emptyListNote,
+          unclassifiedNote,
           'Amounts in ₹. Cost per share is carried at full precision, not rounded to paise. Negative amounts appear in parentheses; a negative quantity indicates an unreconciled position.',
-        ],
-        filenameBase: `Holding_${stockTag}${p.code}_as_of_${asOf}`,
+        ].filter(Boolean),
+        filenameBase: `Holding_${scopeTag}${stockTag}${p.code}_as_of_${asOf}`,
       };
     }
 
@@ -346,28 +583,38 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     return {
       holder: p.label,
       title: meta.title,
+      titleTag: focus ? focus.scripName : (SCOPE_SLUG[ranScope] || undefined),
       params,
       cols,
       rows,
       footnotes: [
         SOURCE[reportType],
+        SCOPE_NOTE[ranScope],
+        emptyListNote,
+        unclassifiedNote,
+        // The two expense reports are never narrowed, and they get filed alongside ones that
+        // are — same portfolio, same period. Say so, or the pair invites a reconciliation that
+        // cannot balance.
+        meta.scoped ? '' : 'This report always covers the whole portfolio — charges are not split by asset class.',
         'Amounts in ₹. Negative amounts are shown in parentheses.',
       ].filter(Boolean),
       // Wide ledgers need the extra width; the 5-column reports read better upright.
       landscape: cols.length > 6,
-      filenameBase: `${fnMap[reportType]}_${stockTag}${p.code}${range}`,
+      filenameBase: `${fnMap[reportType]}_${scopeTag}${stockTag}${p.code}${range}`,
     };
   };
 
-  const reset = () => { setStep('home'); setPortfolio(null); setError(null); setPositions([]); setGenHeader([]); setGenRows([]); };
+  const reset = () => { setStep('home'); setPortfolio(null); setError(null); setScope('consolidated'); setPositions([]); setGenHeader([]); setGenRows([]); };
   const openReport = (t: ReportType) => {
-    setReportType(t); setError(null); setPositions([]); setGenHeader([]); setGenRows([]);
+    // Scope resets with the report type: carrying "Private Equity" from a Capital Gains run
+    // into a Transaction Report would silently narrow a report the user did not narrow.
+    setReportType(t); setError(null); setScope('consolidated'); setPositions([]); setGenHeader([]); setGenRows([]);
     // Scoped mode: portfolio is already locked to the stock's account → jump straight
     // to date/period config. Otherwise fall through to the portfolio picker.
     if (focus && portfolio) setStep('config');
     else { setPortfolio(null); setStep('portfolio'); }
   };
-  const exitFocus = () => { onClearFocus?.(); setPortfolio(null); setStep('home'); setError(null); setPositions([]); setGenHeader([]); setGenRows([]); };
+  const exitFocus = () => { onClearFocus?.(); setPortfolio(null); setStep('home'); setError(null); setScope('consolidated'); setPositions([]); setGenHeader([]); setGenRows([]); };
 
   const hasResult = reportType === 'holding' ? positions.length > 0 : genRows.length > 0;
 
@@ -430,7 +677,11 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             {PORTFOLIOS.map(p => (
               <button
                 key={p.id}
-                onClick={() => { setPortfolio(p); setError(null); setStep('config'); }}
+                // Scope resets with the account. Private-equity membership is master-wide but
+                // HOLDINGS are per-account, so a "Private Equity" carried over from the previous
+                // portfolio produces an empty report on an account holding none — a narrowing
+                // the user never asked for on this account.
+                onClick={() => { setPortfolio(p); setError(null); setScope('consolidated'); setStep('config'); }}
                 className="text-left p-5 rounded-2xl bg-white border border-slate-200 shadow-sm hover:border-indigo-400 hover:shadow-md transition-all cursor-pointer flex items-center justify-between gap-3 group"
               >
                 <div className="flex items-center gap-3 min-w-0">
@@ -459,6 +710,38 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
               <strong className="text-slate-700">{portfolio.label}</strong> · Portfolio {portfolio.code}
               {focus && <> · <strong className="text-indigo-700">{focus.scripName}</strong></>}
             </p>
+
+            {/* Asset class. Offered for every report except the two expense ones, and not in
+                single-stock mode where the stock is already one class. Consolidated is the
+                default and is exactly the report this screen produced before. */}
+            {scopeOffered && (
+              <>
+                <label className="block mt-5 text-[11px] font-black uppercase tracking-wider text-slate-500">Asset class</label>
+                <div className="inline-flex items-center p-1 mt-1.5 bg-slate-100 border border-slate-200 rounded-xl">
+                  {SCOPES.map((sc) => (
+                    <button
+                      key={sc.key}
+                      type="button"
+                      onClick={() => setScope(sc.key)}
+                      aria-pressed={scope === sc.key}
+                      title={sc.hint}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                        scope === sc.key ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-200'
+                      }`}
+                    >
+                      {sc.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  {scope === 'consolidated'
+                    ? 'Every holding in the portfolio, listed and unlisted together.'
+                    : scope === 'eq'
+                      ? 'Listed securities only — unlisted companies are left out.'
+                      : 'Unlisted companies only, as listed in the Private Equities tab of the scrip master.'}
+                </p>
+              </>
+            )}
 
             {reportType === 'holding' ? (
               <>
@@ -545,18 +828,46 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                 <p className="text-[11px] text-slate-500 font-medium mt-0.5">
                   Portfolio {portfolio.code}
                   {focus && <> · <strong className="text-indigo-700">{focus.scripName}</strong></>}
+                  {/* Named on screen as well as in the exported file — the table itself gives
+                      no clue that rows were withheld. */}
+                  {ranScope !== 'consolidated' && <> · <strong className="text-indigo-700">{ranScope === 'pe' ? 'private equity only' : 'equity only'}</strong></>}
                   {reportType === 'holding'
-                    ? ` · as of ${formatDMY(asOf)} · ${positions.length} position${positions.length === 1 ? '' : 's'} · ${tradeRows} trades replayed`
+                    ? ` · as of ${formatDMY(asOf)} · ${positions.length} position${positions.length === 1 ? '' : 's'} · ${tradeRows} trades replayed${(ranScope !== 'consolidated' || focus) ? ' (whole portfolio)' : ''}`
                     : ` · ${fromDate ? formatDMY(fromDate) : 'inception'} → ${toDate ? formatDMY(toDate) : 'today'} · ${genRows.length} row${genRows.length === 1 ? '' : 's'}`}
                 </p>
               </div>
               {hasResult && <ExportMenu doc={buildDoc} />}
             </div>
 
+            {/* The same caveats the exported file carries as footnotes. Shown here because the
+                person generating the report is the one who can act on them — and until now they
+                appeared only inside a PDF or workbook nobody re-opens. */}
+            {ranScope !== 'consolidated' && (unclassified > 0 || (ranScope === 'eq' && emptyPeList)) && (
+              <div className="flex items-start gap-2 px-5 py-3 border-b border-slate-150 bg-amber-50 text-[11px] text-amber-800">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>
+                  {unclassified > 0 && (
+                    <>
+                      <strong>{unclassified}</strong> company name{unclassified === 1 ? '' : 's'} in this
+                      ledger matched no entry in the scrip master and {unclassified === 1 ? 'was' : 'were'} treated
+                      as listed.{' '}
+                    </>
+                  )}
+                  {ranScope === 'eq' && emptyPeList && (
+                    <>The Private Equities list is empty, so nothing was excluded — this is the same as a consolidated report.</>
+                  )}
+                </span>
+              </div>
+            )}
+
             {/* Holding report — structured table */}
             {reportType === 'holding' && (
               positions.length === 0 ? (
-                <p className="text-center text-sm text-slate-500 italic py-16">No open positions as of {formatDMY(asOf)}.</p>
+                <p className="text-center text-sm text-slate-500 italic py-16">
+                  {ranScope !== 'consolidated'
+                    ? `No ${ranScope === 'pe' ? 'unlisted' : 'listed'} positions in this portfolio as of ${formatDMY(asOf)}.`
+                    : `No open positions as of ${formatDMY(asOf)}.`}
+                </p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm border-collapse">
@@ -594,7 +905,11 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             {/* Capital gains / transactions — generic table straight from the sheet */}
             {reportType !== 'holding' && (
               genRows.length === 0 ? (
-                <p className="text-center text-sm text-slate-500 italic py-16">No rows to show.</p>
+                <p className="text-center text-sm text-slate-500 italic py-16">
+                  {ranScope !== 'consolidated'
+                    ? `No rows for ${ranScope === 'pe' ? 'unlisted companies' : 'listed securities'} in this period.`
+                    : 'No rows to show.'}
+                </p>
               ) : (
                 <div ref={genVR.scrollRef} onScroll={genVirtual ? genVR.onScroll : undefined} className="overflow-auto max-h-[65vh]">
                   <table className="w-full text-left text-[13px] whitespace-nowrap">

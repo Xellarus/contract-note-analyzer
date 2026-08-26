@@ -1,5 +1,5 @@
 import { gapi } from "gapi-script";
-import { loadScripMaster, lookupScrip, normName, SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
+import { loadScripMaster, lookupScrip, normName, peEntry, SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
 import { loadScripPrices, makePriceResolver } from "./scripPrices";
 
 /**
@@ -36,6 +36,17 @@ export interface CrossHolding {
   priced: boolean;
   discrepancy: boolean; // a non-positive total quantity — a ledger error worth surfacing
   lots: CrossHoldingLot[];
+  /** An UNLISTED company (from the "Private Equities" tab). Every row stays in `rows` — one
+   *  source of truth for what the book holds — and consumers decide what to do with the flag:
+   *  the Dashboard's consolidated table shows them inline with a PE badge, and the portfolio
+   *  page's All / Equity / Private Equity toggle narrows on the equivalent per-row flag. */
+  pe?: boolean;
+  /** Its Drive folder of documents, when the PE tab gives one. */
+  driveLink?: string;
+  /** A hand-entered per-share valuation, if any — `cmp` already carries it, this says the
+   *  number is a valuation rather than a market price. */
+  peValuation?: number;
+  peValuationDate?: string;
 }
 
 export interface CrossHoldingsResult {
@@ -138,6 +149,16 @@ export async function computeCrossHoldings(portfolios: CrossHoldingsPortfolio[])
   for (const h of byKey.values()) {
     const cmp = cmpOf(h.isin, h.name);
     h.cmp = cmp;
+    // An unlisted company has no market price to be missing, so it is neither "priced" nor
+    // "unpriced" — counting it as unpriced would put a permanent gap in the Dashboard's
+    // coverage figure. `cmp` may still be a number here (a hand-entered valuation).
+    const pe = peEntry(master, h.isin, h.name);
+    if (pe) {
+      h.pe = true;
+      h.driveLink = pe.driveLink;
+      h.peValuation = pe.peValuation;
+      h.peValuationDate = pe.peValuationDate;
+    }
     h.priced = cmp !== undefined;
     h.discrepancy = h.qty <= 0;
     h.avgCost = h.qty > 0 ? h.invested / h.qty : 0;
@@ -149,7 +170,9 @@ export async function computeCrossHoldings(portfolios: CrossHoldingsPortfolio[])
     // Biggest holding within the security first, so the expansion reads top-down.
     h.lots.sort((a, b) => b.invested - a.invested || a.code.localeCompare(b.code));
 
-    if (h.priced) priced++; else unpriced++;
+    if (h.pe) { /* deliberately unpriced — see above */ }
+    else if (h.priced) priced++;
+    else unpriced++;
     totalInvested += h.invested;
     totalCurrent += h.current;
     rows.push(h);

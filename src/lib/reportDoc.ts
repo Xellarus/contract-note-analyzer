@@ -53,6 +53,17 @@ export interface ReportDoc {
   holder: string;
   /** e.g. "Capital Gains Statement". */
   title: string;
+  /**
+   * Short qualifier that narrows what the report covers — e.g. "Equity", "Private Equity".
+   * Undefined when the report covers everything.
+   *
+   * Deliberately a SEPARATE field rather than something the caller appends to `title`: each
+   * renderer places it where that format's per-page identity lives (a PDF's running header on
+   * pages 2+, an XLSX tab name and print footer), and the XLSX sheet name is hard-capped at 31
+   * characters — appending would truncate mid-word and lose exactly the part that distinguishes
+   * two otherwise identical statements.
+   */
+  titleTag?: string;
   /** Parameter block stating exactly what was computed: [label, value] pairs. */
   params: Array<[string, string]>;
   cols: ReportCol[];
