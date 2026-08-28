@@ -2063,7 +2063,7 @@ export default function App() {
                     setSelectedLogicBroker(null);
                     setIsLogicOpen(false);
                   }}
-                  className="p-1 px-1.5 hover:bg-slate-200 rounded-md transition-colors text-slate-500 hover:text-slate-850"
+                  className="p-1 px-1.5 hover:bg-slate-200 rounded-md transition-colors text-slate-500 hover:text-slate-800"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2087,7 +2087,7 @@ export default function App() {
                           <BookOpen className="w-5 h-5 text-indigo-500" />
                           <div>
                             <p className="text-sm font-bold text-slate-800">Calculation Logic</p>
-                            <p className="text-xs text-slate-450">View formulas, pricing allocations, taxes & STT</p>
+                            <p className="text-xs text-slate-500">View formulas, pricing allocations, taxes & STT</p>
                           </div>
                         </div>
                         <ChevronDown 
@@ -2107,46 +2107,46 @@ export default function App() {
                             <div className="p-2 space-y-1">
                               <button
                                 onClick={() => setSelectedLogicBroker('zerodha')}
-                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-600"
                               >
                                 <span className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-[#12b8f1]" />
                                   Zerodha Logic Model
                                 </span>
-                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                               </button>
                               
                               <button
                                 onClick={() => setSelectedLogicBroker('shareindia')}
-                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-600"
                               >
                                 <span className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                                   Share India Logic Model
                                 </span>
-                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                               </button>
                               
                               <button
                                 onClick={() => setSelectedLogicBroker('integrated')}
-                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-600"
                               >
                                 <span className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
                                   Integrated Logic Model
                                 </span>
-                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                               </button>
 
                               <button
                                 onClick={() => setSelectedLogicBroker('nuvama')}
-                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-605"
+                                className="w-full text-left p-3 px-4 rounded-lg hover:bg-white hover:shadow-xs transition-all flex items-center justify-between text-xs font-bold text-slate-700 hover:text-indigo-600"
                               >
                                 <span className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
                                   Nuvama Logic Model
                                 </span>
-                                <ChevronRight className="w-3.5 h-3.5 text-slate-450" />
+                                <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                               </button>
                             </div>
                           </motion.div>
@@ -2185,8 +2185,8 @@ export default function App() {
                               <span>1. Turnovers & Net Rates</span>
                               <span className="text-[10px] uppercase font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">Core Formula</span>
                             </h4>
-                            <p className="mb-1 text-slate-650">The primary calculation handles raw trades:</p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-indigo-700 leading-normal">
+                            <p className="mb-1 text-slate-600">The primary calculation handles raw trades:</p>
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-indigo-700 leading-normal">
                               Turnover = Quantity × Average Price
                             </code>
                           </div>
@@ -2196,13 +2196,13 @@ export default function App() {
                               <span>2. High-Precision Proration</span>
                               <span className="text-[10px] uppercase font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">Proration</span>
                             </h4>
-                            <p className="mb-1.5 text-slate-655 font-sans">
+                            <p className="mb-1.5 text-slate-600 font-sans">
                               For composite contract fee lines (e.g., total GST, exchange charges, clearing charges), expenses are distributed proportionally based on trade value share:
                             </p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-emerald-800 leading-normal mb-1">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-emerald-800 leading-normal mb-1">
                               Ratio = Trade Turnover / Total Turnover
                             </code>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-emerald-800 leading-normal">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-emerald-800 leading-normal">
                               Allocated Charge = Total Charge × Ratio
                             </code>
                           </div>
@@ -2212,8 +2212,8 @@ export default function App() {
                               <span>3. STT (Securities Transaction Tax)</span>
                               <span className="text-[10px] uppercase font-mono text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Taxation</span>
                             </h4>
-                            <p className="text-slate-655 mb-2">STT is computed programmatically by trade class:</p>
-                            <div className="bg-white rounded border border-slate-250 overflow-hidden text-[10px]">
+                            <p className="text-slate-600 mb-2">STT is computed programmatically by trade class:</p>
+                            <div className="bg-white rounded border border-slate-200 overflow-hidden text-[10px]">
                               <table className="w-full text-left border-collapse">
                                 <thead className="bg-slate-50 border-b border-slate-200">
                                   <tr>
@@ -2224,17 +2224,17 @@ export default function App() {
                                 </thead>
                                 <tbody>
                                   <tr className="border-b border-slate-100">
-                                    <td className="p-1 px-2 font-semibold text-slate-755">Equity Delivery</td>
+                                    <td className="p-1 px-2 font-semibold text-slate-700">Equity Delivery</td>
                                     <td className="p-1 px-2 text-indigo-700 font-mono font-medium">0.10% (0.001)</td>
                                     <td className="p-1 px-2 text-indigo-700 font-mono font-medium">0.10% (0.001)</td>
                                   </tr>
                                   <tr className="border-b border-slate-100">
-                                    <td className="p-1 px-2 font-semibold text-slate-755">Equity Intraday</td>
+                                    <td className="p-1 px-2 font-semibold text-slate-700">Equity Intraday</td>
                                     <td className="p-1 px-2 text-slate-400 font-mono">0.00%</td>
                                     <td className="p-1 px-2 text-indigo-700 font-mono font-medium">0.025% (0.00025)</td>
                                   </tr>
                                   <tr>
-                                    <td className="p-1 px-2 font-semibold text-slate-755">ETFs (All)</td>
+                                    <td className="p-1 px-2 font-semibold text-slate-700">ETFs (All)</td>
                                     <td className="p-1 px-2 text-slate-400 font-mono">0.00%</td>
                                     <td className="p-1 px-2 text-slate-400 font-mono">0.00%</td>
                                   </tr>
@@ -2248,10 +2248,10 @@ export default function App() {
                               <span>4. Stamp Duty Allocation</span>
                               <span className="text-[10px] uppercase font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">Levies</span>
                             </h4>
-                            <p className="mb-1.5 text-slate-655 font-sans">
+                            <p className="mb-1.5 text-slate-600 font-sans">
                               Stamp Duty is legally charged strictly on <strong>BUY</strong> transactions:
                             </p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-purple-800 leading-normal">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-purple-800 leading-normal">
                               Buy_Ratio = Buy Turnover / Total Buy Turnover
                               {"\n"}
                               Stamp_Duty_Alloc = Total Stamp Duty × Buy_Ratio
@@ -2261,12 +2261,12 @@ export default function App() {
                           <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
                             <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
                               <span>5. Goods & Services Tax (GST)</span>
-                              <span className="text-[10px] uppercase font-mono text-blue-605 bg-blue-50 px-1.5 py-0.5 rounded">GST</span>
+                              <span className="text-[10px] uppercase font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">GST</span>
                             </h4>
-                            <p className="mb-1 text-slate-655">
+                            <p className="mb-1 text-slate-600">
                               GST is calculated at 18% of sum of services values:
                             </p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-blue-800 leading-normal">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-blue-800 leading-normal">
                               GST Base = Brokerage + ETC + SEBI Fee + Clearing Charges
                               {"\n"}
                               Calculated GST = GST Base × 18%
@@ -2295,7 +2295,7 @@ export default function App() {
                               <span>1. Taxable Value & Services</span>
                               <span className="text-[10px] uppercase font-mono text-slate-600 bg-slate-200 px-1.5 py-0.5 rounded">Source</span>
                             </h4>
-                            <p className="text-slate-655">
+                            <p className="text-slate-600">
                               Extracts the precise taxable values lines directly from the HTML/PDF summary block. If the CGST/SGST/IGST coordinates are not matching perfectly, the engine triggers a local 18% GST recalculation safety checker.
                             </p>
                           </div>
@@ -2305,10 +2305,10 @@ export default function App() {
                               <span>2. STT Classification & Logic</span>
                               <span className="text-[10px] uppercase font-mono text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Classification</span>
                             </h4>
-                            <p className="mb-2 text-slate-655">
+                            <p className="mb-2 text-slate-600">
                               Classifies trades automatically based on same-day round-tripping or explicit keywords (<em>CNC, MIS, Intraday</em>):
                             </p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-amber-800 leading-normal">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-amber-800 leading-normal">
                               If Intraday Buy: STT = 0% {"\n"}
                               If Intraday Sell: STT = 0.025% × Turnover {"\n"}
                               If Delivery (Buy or Sell): STT = 0.1% × Turnover
@@ -2320,8 +2320,8 @@ export default function App() {
                               <span>3. Allocations Framework</span>
                               <span className="text-[10px] uppercase font-mono text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded font-bold">Proration Math</span>
                             </h4>
-                            <p className="mb-1 text-slate-655">The proration ensures exact totals balance:</p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-rose-800 leading-normal">
+                            <p className="mb-1 text-slate-600">The proration ensures exact totals balance:</p>
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-rose-800 leading-normal">
                               Trade Brokerage = Summary Taxable Value × Ratio{"\n"}
                               Trade ETC = Summary ETC × Ratio{"\n"}
                               GST = (Allocated Brokerage + Allocated ETC) × 18%
@@ -2331,9 +2331,9 @@ export default function App() {
                           <div className="bg-slate-100 p-3 rounded-xl border border-slate-200">
                             <h4 className="font-bold text-slate-800 flex items-center justify-between mb-1">
                               <span>4. Stamp Duty Allocation</span>
-                              <span className="text-[10px] uppercase font-mono text-purple-650 bg-purple-50 px-1.5 py-0.5 rounded">Rules</span>
+                              <span className="text-[10px] uppercase font-mono text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">Rules</span>
                             </h4>
-                            <p className="text-slate-655">
+                            <p className="text-slate-600">
                               Like the Zerodha engine, Share India allocates stamp duty exclusively back to buying actions. Intraday or delivery buys share total stamp duty based on buy share volume metrics.
                             </p>
                           </div>
@@ -2358,7 +2358,7 @@ export default function App() {
                               <span>1. Direct Allocation</span>
                               <span className="text-[10px] uppercase font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">Source</span>
                             </h4>
-                            <p className="text-slate-655">
+                            <p className="text-slate-600">
                               Extracts the values directly per row instead of pro-rating the final total from the summary page like Zerodha and Share India.
                             </p>
                           </div>
@@ -2367,7 +2367,7 @@ export default function App() {
                               <span>2. High-Precision Check</span>
                               <span className="text-[10px] uppercase font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">Summing</span>
                             </h4>
-                            <p className="mb-1.5 text-slate-655 font-sans">
+                            <p className="mb-1.5 text-slate-600 font-sans">
                               Verifies that the sum of the rows equals exactly the grand total shown on the summary page.
                             </p>
                           </div>
@@ -2391,7 +2391,7 @@ export default function App() {
                               <span>1. Brokerage from the amount column</span>
                               <span className="text-[10px] uppercase font-mono text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded">Trap</span>
                             </h4>
-                            <p className="text-slate-655 font-sans">
+                            <p className="text-slate-600 font-sans">
                               V1/V2 print a <b>Brokerage Rate Per Unit</b> that is a rounded display of amount ÷ qty, not an
                               input. One sampled row prints 0.4841 for 200 shares while the real brokerage is ₹96.81
                               (0.484050) — rebuilding it from the rate gives ₹96.82 and the note stops tying out.
@@ -2402,11 +2402,11 @@ export default function App() {
                               <span>2. Settlement sign is inverted</span>
                               <span className="text-[10px] uppercase font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">Core Formula</span>
                             </h4>
-                            <p className="mb-1.5 text-slate-655 font-sans">
+                            <p className="mb-1.5 text-slate-600 font-sans">
                               Nuvama prints <b>(−) credit / (+) debit</b> — the opposite of this app, where money coming to
                               the client is positive. The printed figure is negated on the way in.
                             </p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-indigo-700 leading-normal">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-indigo-700 leading-normal">
                               summary.netSettlement = −(printed net amount)
                             </code>
                           </div>
@@ -2415,11 +2415,11 @@ export default function App() {
                               <span>3. GST base</span>
                               <span className="text-[10px] uppercase font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded font-bold">Verified</span>
                             </h4>
-                            <p className="mb-1.5 text-slate-655 font-sans">
+                            <p className="mb-1.5 text-slate-600 font-sans">
                               The same rule in all three generations. V3 prints it outright as <b>Taxable Value of
                               Supply</b>, which is <i>not</i> the brokerage and is deliberately not read as one.
                             </p>
-                            <code className="block bg-white p-2 rounded border border-slate-250 font-mono text-[10px] text-indigo-700 leading-normal">
+                            <code className="block bg-white p-2 rounded border border-slate-200 font-mono text-[10px] text-indigo-700 leading-normal">
                               GST base = Brokerage + Exchange Txn Charges + SEBI Fees + IPFT
                             </code>
                           </div>
@@ -2428,7 +2428,7 @@ export default function App() {
                               <span>4. STT and exempt instruments</span>
                               <span className="text-[10px] uppercase font-mono text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded font-bold">Shared</span>
                             </h4>
-                            <p className="text-slate-655 font-sans">
+                            <p className="text-slate-600 font-sans">
                               STT uses the shared allocator, anchored on the note's printed total. Units on an
                               <b> INF-series ISIN</b> (ETF / mutual fund) are exempt and book ₹0 — note that such a note
                               trips the audit's <b>Suspicious STT</b> flag, which is expected and does not mean the parse
@@ -2442,8 +2442,8 @@ export default function App() {
                 )}
               </div>
 
-              <div className="p-4 border-t border-slate-150 bg-slate-50 text-[11px] text-slate-450 leading-relaxed font-sans">
-                Need to fine-tune the mathematical ratios or add customized rates? Open a file change request directly in the editor under <code className="bg-slate-200 px-1.5 py-0.5 rounded text-slate-705">/src/lib/brokers</code>.
+              <div className="p-4 border-t border-slate-150 bg-slate-50 text-[11px] text-slate-500 leading-relaxed font-sans">
+                Need to fine-tune the mathematical ratios or add customized rates? Open a file change request directly in the editor under <code className="bg-slate-200 px-1.5 py-0.5 rounded text-slate-700">/src/lib/brokers</code>.
               </div>
             </motion.div>
           </>
@@ -2571,7 +2571,7 @@ export default function App() {
                           id={b.id}
                           type="button"
                           onClick={() => { setBroker(b.key); setNuvamaMenuOpen(false); }}
-                          className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${broker === b.key ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                          className={`flex items-center justify-center gap-2 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${broker === b.key ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'}`}
                         >
                           {b.label}
                         </button>
@@ -2584,7 +2584,7 @@ export default function App() {
                           onClick={() => setNuvamaMenuOpen((v) => !v)}
                           aria-haspopup="menu"
                           aria-expanded={nuvamaMenuOpen}
-                          className={`flex items-center justify-center gap-1.5 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${isNuvama ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-650 hover:text-slate-900 hover:bg-slate-50'}`}
+                          className={`flex items-center justify-center gap-1.5 px-5 py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer whitespace-nowrap ${isNuvama ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'}`}
                         >
                           Nuvama
                           {isNuvama && <span className="opacity-80">· {NUVAMA_VARIANTS.find((v) => v.key === broker)?.short}</span>}
@@ -2696,13 +2696,13 @@ export default function App() {
 
             <AnimatePresence>
               {isPasswordRequired && (
-                <div className="max-w-md mx-auto mb-8 bg-indigo-50 p-6 rounded-2xl border border-indigo-250 shadow-sm animate-fadeIn">
+                <div className="max-w-md mx-auto mb-8 bg-indigo-50 p-6 rounded-2xl border border-indigo-200 shadow-sm animate-fadeIn">
                   <div className="flex gap-2.5 items-center mb-3">
                     <AlertCircle className="w-5 h-5 text-indigo-700" />
                     <p className="text-sm text-indigo-900 font-black uppercase tracking-wide">Enter PDF Password</p>
                   </div>
                   <div className="flex gap-2">
-                    <input type="password" placeholder="e.g. ABCDE1234F" value={pdfPassword} onChange={(e) => setPdfPassword(e.target.value)} className="flex-1 px-4 py-2 text-xs font-mono uppercase rounded-xl border border-indigo-200 outline-none max-w-[200px]" />
+                    <input type="password" placeholder="e.g. ABCDE1234F" value={pdfPassword} onChange={(e) => setPdfPassword(e.target.value)} className="flex-1 px-4 py-2 text-xs font-mono uppercase rounded-xl border border-indigo-200 max-w-[200px]" />
                     <button onClick={() => handleFileUpload(pendingFiles)} className="bg-indigo-600 text-white px-5 py-2 rounded-xl text-xs font-bold shadow shadow-indigo-200">Unlock PDF</button>
                     <button onClick={() => { setIsPasswordRequired(false); setPendingFiles(null); }} className="px-3 py-2 text-slate-500 font-bold text-xs bg-slate-100 rounded-xl">Cancel</button>
                   </div>
@@ -2716,9 +2716,9 @@ export default function App() {
                 
                 {/* RECONCILIATION TEACHER STATUS BAR (Step 4) */}
                 {data.reconciliation && (
-                  <div className={`p-5 rounded-2xl border flex flex-col md:flex-row items-start justify-between gap-6 shadow-sm ${data.reconciliation.isValid ? 'bg-emerald-50/70 border-emerald-250 text-emerald-900' : 'bg-red-55/90 border-rose-300 text-rose-950'}`}>
+                  <div className={`p-5 rounded-2xl border flex flex-col md:flex-row items-start justify-between gap-6 shadow-sm ${data.reconciliation.isValid ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900' : 'bg-red-50/90 border-rose-300 text-rose-950'}`}>
                     <div className="flex items-start gap-4">
-                      <div className={`p-3 rounded-full mt-0.5 ${data.reconciliation.isValid ? 'bg-emerald-100/90 text-emerald-700' : 'bg-rose-100/90 text-red-650'}`}>
+                      <div className={`p-3 rounded-full mt-0.5 ${data.reconciliation.isValid ? 'bg-emerald-100/90 text-emerald-700' : 'bg-rose-100/90 text-red-600'}`}>
                         {data.reconciliation.isValid ? <Check className="w-6 h-6 stroke-[3px]" /> : <ShieldAlert className="w-6 h-6 stroke-[2px]" />}
                       </div>
                       <div className="space-y-1">
@@ -2726,7 +2726,7 @@ export default function App() {
                           <h3 className="text-lg font-black tracking-tight leading-none">
                             {data.reconciliation.isSuspiciousStt ? "Suspicious STT Extraction Detected" : (data.reconciliation.isSttMismatch ? "STT Validation Mismatch" : (data.reconciliation.isValid ? "Reconciliation Audit Passed" : "Parser uncertain"))}
                           </h3>
-                          <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded font-mono ${data.reconciliation.isValid ? 'bg-emerald-200 text-emerald-900' : 'bg-red-250 text-red-900'}`}>
+                          <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded font-mono ${data.reconciliation.isValid ? 'bg-emerald-200 text-emerald-900' : 'bg-red-200 text-red-900'}`}>
                             {data.reconciliation.statusText}
                           </span>
                         </div>
@@ -2766,7 +2766,7 @@ export default function App() {
                         </p>
                       </div>
 
-                      <div className="bg-white/80 p-4 rounded-xl border border-rose-150 space-y-2.5 font-mono shadow-sm">
+                      <div className="bg-white/80 p-4 rounded-xl border border-rose-100 space-y-2.5 font-mono shadow-sm">
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500">Sells Gross</span>
                           <span className="font-bold text-slate-800">₹{data.reconciliation.totalSells.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
@@ -2789,7 +2789,7 @@ export default function App() {
                     </div>
 
                     <div className="flex flex-col justify-between">
-                      <div className="bg-white/80 p-4 rounded-xl border border-rose-150 space-y-2.5 font-mono shadow-sm">
+                      <div className="bg-white/80 p-4 rounded-xl border border-rose-100 space-y-2.5 font-mono shadow-sm">
                         <div className="flex justify-between border-b border-rose-100 pb-1.5">
                           <span className="text-slate-500 font-bold">C) Sum of Charges + Brokerage (Levies)</span>
                           <span className="font-bold text-amber-700">₹{data.reconciliation.totalCharges.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
@@ -2830,7 +2830,7 @@ export default function App() {
                   }}
                 >
                   {/* Subtle top gradient accent */}
-                  <div className="absolute top-0 left-0 right-0 h-[4px] bg-gradient-to-r from-blue-600 via-indigo-650 to-violet-600"></div>
+                  <div className="absolute top-0 left-0 right-0 h-[4px] bg-gradient-to-r from-blue-600 to-violet-600"></div>
                   
                   {/* Subtle glow / noise background effect */}
                   <div className="absolute top-0 left-0 w-full h-full pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle at top left, rgba(59,130,246,0.08), transparent 45%), url("data:image/svg+xml,%3Csvg viewBox=%220 0 200 200%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noiseFilter%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.65%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noiseFilter)%22 opacity=%220.02%22/%3E%3C/svg%3E")' }}></div>
@@ -2911,8 +2911,8 @@ export default function App() {
                       onClick={() => setShowLedgerConfig(!showLedgerConfig)} 
                       className={`px-4 py-2.5 text-xs font-bold rounded-xl flex items-center gap-1.5 border transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] ${
                         showLedgerConfig 
-                          ? 'bg-indigo-50 text-indigo-750 border-indigo-200' 
-                          : 'bg-white hover:bg-slate-50 text-slate-755 border-slate-200'
+                          ? 'bg-indigo-50 text-indigo-700 border-indigo-200' 
+                          : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
                       }`}
                       style={{ boxShadow: '0 1px 2px rgba(15,23,42,0.05)' }}
                       title="Configure ledger names for accounting import"
@@ -3006,11 +3006,11 @@ export default function App() {
                             The parser is mathematically uncertain on this note (Discrepancy: ₹${data.reconciliation?.difference}). Do you still wish to proceed with the import?
                           </p>
                           <div className="flex justify-end gap-2 pt-1">
-                            <button onClick={() => setShowExportConfirmation(false)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-750 font-bold rounded-lg">Cancel</button>
+                            <button onClick={() => setShowExportConfirmation(false)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">Cancel</button>
                             <button 
                               onClick={importToSheets} 
                               disabled={isImportingToSheets}
-                              className="px-3 py-1.5 bg-red-655 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm disabled:opacity-50"
+                              className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm disabled:opacity-50"
                             >
                               {isImportingToSheets ? "Importing..." : "Yes, Import Anyway"}
                             </button>
@@ -3211,11 +3211,11 @@ export default function App() {
                   <table className="w-full text-sm text-left">
                     <thead className={`bg-slate-50 text-slate-600 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200 ${tradesVirtual ? 'sticky top-0 z-10' : ''}`}>
                       <tr>
-                        <SortableHeader label="Date" sortKey="tradeDate" className="text-slate-705" />
-                        <SortableHeader label="Security" sortKey="securityName" className="text-slate-705" />
-                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="text-slate-705" />
-                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="text-slate-710" />
-                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="text-slate-720 border-r border-slate-200" />
+                        <SortableHeader label="Date" sortKey="tradeDate" className="text-slate-700" />
+                        <SortableHeader label="Security" sortKey="securityName" className="text-slate-700" />
+                        <SortableHeader label="Type" sortKey="transactionType" align="center" className="text-slate-700" />
+                        <SortableHeader label="Shares" sortKey="quantity" align="right" className="text-slate-700" />
+                        <SortableHeader label="Price" sortKey="avgPrice" align="right" className="text-slate-700 border-r border-slate-200" />
                         <SortableHeader label="Turnover" sortKey="turnover" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         <SortableHeader label="Brokerage" sortKey="brokerage" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
                         <SortableHeader label="STT" sortKey="stt" align="right" className="text-slate-700 font-bold border-r border-slate-200" />
@@ -3284,7 +3284,7 @@ export default function App() {
                               {t.netTotalBeforeLevies >= 0 ? '+' : ''}{fmt(t.netTotalBeforeLevies)}
                             </td>
                             <td className="px-6 py-4 text-center bg-violet-50/10">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-150 text-indigo-800' : 'bg-amber-150 text-amber-800'}`}>{t.tradeType}</span>
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${t.tradeType === 'Delivery' ? 'bg-indigo-100 text-indigo-800' : 'bg-amber-100 text-amber-800'}`}>{t.tradeType}</span>
                             </td>
                           </tr>
                         );

@@ -2062,7 +2062,7 @@ export default function Holdings({
                     ))}
                     <div className="flex items-center justify-between pt-2 mt-1 border-t border-slate-200 text-[12px]">
                       <span className="font-black uppercase tracking-wider text-slate-600">Total expenses (incl STT)</span>
-                      <span className="font-mono font-black text-slate-850">{formatINR(total)}</span>
+                      <span className="font-mono font-black text-slate-800">{formatINR(total)}</span>
                     </div>
                   </div>
                 )}
@@ -3065,7 +3065,7 @@ export default function Holdings({
                     step="0.01"
                     value={cmpInputVal}
                     onChange={(e) => setCmpInputVal(e.target.value)}
-                    className="w-20 px-1 py-0.5 border border-indigo-400 text-xs font-mono font-bold text-right outline-none rounded bg-white"
+                    className="w-20 px-1 py-0.5 border border-indigo-400 text-xs font-mono font-bold text-right rounded bg-white"
                     autoFocus
                     id="cmp-input-editor"
                   />
@@ -3078,7 +3078,7 @@ export default function Holdings({
                   </button>
                   <button 
                     onClick={() => setIsEditingCmp(false)}
-                    className="bg-slate-200 hover:bg-slate-350 text-slate-600 font-black text-[9px] px-1.5 py-0.5 rounded cursor-pointer"
+                    className="bg-slate-200 hover:bg-slate-300 text-slate-600 font-black text-[9px] px-1.5 py-0.5 rounded cursor-pointer"
                     id="cancel-cmp-btn"
                   >
                     ×
@@ -3090,7 +3090,7 @@ export default function Holdings({
                       the 15:30 bell) — brass on paper, gold on the terminal. Only ever for a real
                       fetched CMP: a manual override or an avg-cost fallback stays default ink. */}
                   <span
-                    className={`text-sm font-black font-mono ${cmpIsSettled ? 'cmp-settled' : cmpIsStale ? 'text-slate-500' : 'text-slate-850'}`}
+                    className={`text-sm font-black font-mono ${cmpIsSettled ? 'cmp-settled' : cmpIsStale ? 'text-slate-500' : 'text-slate-800'}`}
                     id="cmp-display-price"
                     title={cmpIsStale
                       ? `STALE — this is the ${formatDMY(detailStamp?.priceDate)} close. The feed had no price for ${formatDMY(currentSession)}, though we checked at ${formatDMYTime(detailCmpUpdated)} IST.`
@@ -3129,7 +3129,7 @@ export default function Holdings({
           
           {/* Container 1: Position details */}
           <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5 grid grid-cols-3 gap-y-4 divide-x divide-slate-200 relative" id="holding-metrics-panel">
-            <div className="absolute top-3 left-3 bg-indigo-50/70 border border-indigo-100 text-indigo-805 text-[8px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded">
+            <div className="absolute top-3 left-3 bg-indigo-50/70 border border-indigo-100 text-indigo-800 text-[8px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded">
               Position size
             </div>
             
@@ -3196,7 +3196,7 @@ export default function Holdings({
 
           {/* Container 2: Returns details */}
           <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-5 grid grid-cols-3 gap-y-4 divide-x divide-slate-200 relative" id="returns-metrics-panel">
-            <div className="absolute top-3 left-3 bg-emerald-50/70 border border-emerald-100 text-emerald-850 text-[8px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded">
+            <div className="absolute top-3 left-3 bg-emerald-50/70 border border-emerald-100 text-emerald-800 text-[8px] font-black tracking-widest uppercase px-1.5 py-0.5 rounded">
               Performance & Yield
             </div>
 
@@ -3208,7 +3208,7 @@ export default function Holdings({
                 </span>
               </div>
               <div className="space-y-1 border-t border-slate-100 pt-3">
-                <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider block">Unrealized Gain</span>
+                <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider block">Unrealised Gain</span>
                 <span className={`text-sm font-black font-mono truncate block ${unrealizedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`} id="detail-unrealized-gain">
                   {unrealizedGain >= 0 ? '+' : ''}{formatINR(unrealizedGain)}
                 </span>
@@ -3263,8 +3263,8 @@ export default function Holdings({
               onClick={() => setActiveDetailTab('trade_book')}
               className={`px-4 py-3 text-xs font-black tracking-tight border-b-2 cursor-pointer transition-all ${
                 activeDetailTab === 'trade_book' 
-                  ? 'border-indigo-650 text-indigo-700 font-bold' 
-                  : 'border-transparent text-slate-500 hover:text-slate-805'
+                  ? 'border-indigo-600 text-indigo-700 font-bold' 
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
               id="tab-trade-book"
             >
@@ -3274,8 +3274,8 @@ export default function Holdings({
               onClick={() => setActiveDetailTab('inventory')}
               className={`px-4 py-3 text-xs font-black tracking-tight border-b-2 cursor-pointer transition-all ${
                 activeDetailTab === 'inventory' 
-                  ? 'border-indigo-650 text-indigo-700 font-bold' 
-                  : 'border-transparent text-slate-500 hover:text-slate-805'
+                  ? 'border-indigo-600 text-indigo-700 font-bold' 
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
               id="tab-inventory"
             >
@@ -3285,8 +3285,8 @@ export default function Holdings({
               onClick={() => setActiveDetailTab('realised_inventory')}
               className={`px-4 py-3 text-xs font-black tracking-tight border-b-2 cursor-pointer transition-all ${
                 activeDetailTab === 'realised_inventory' 
-                  ? 'border-indigo-650 text-indigo-700 font-bold' 
-                  : 'border-transparent text-slate-500 hover:text-slate-805'
+                  ? 'border-indigo-600 text-indigo-700 font-bold' 
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
               id="tab-realised-inventory"
             >
@@ -3532,10 +3532,10 @@ export default function Holdings({
                                   : t.openingAction ? (t.price > 0 ? formatINR(t.price) : '—')
                                   : formatINR(t.price)}
                               </td>
-                              <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-850">
+                              <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-800">
                                 {t.openingAction ? '—' : formatINR(t.amount)}
                               </td>
-                              <td className={`px-6 py-3.5 text-right font-mono ${t.balanceQuantity !== undefined && t.balanceQuantity < -1e-9 ? 'text-rose-600 font-bold' : 'text-slate-450'}`}
+                              <td className={`px-6 py-3.5 text-right font-mono ${t.balanceQuantity !== undefined && t.balanceQuantity < -1e-9 ? 'text-rose-600 font-bold' : 'text-slate-500'}`}
                                 title={t.balanceQuantity !== undefined && t.balanceQuantity < -1e-9 ? 'Negative balance — more shares sold than held at this point in the ledger' : undefined}>
                                 {t.balanceQuantity !== undefined ? formatNum(t.balanceQuantity) : '—'}
                               </td>
@@ -3631,7 +3631,7 @@ export default function Holdings({
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">
                                 {formatINR(lot.price)}
                               </td>
-                              <td className="px-6 py-3.5 text-right font-mono text-slate-705">
+                              <td className="px-6 py-3.5 text-right font-mono text-slate-700">
                                 {formatINR(lotCost)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-800">
@@ -3640,7 +3640,7 @@ export default function Holdings({
                               <td className={`px-6 py-3.5 text-right font-mono font-black ${isPos ? 'text-emerald-700' : 'text-rose-700'}`}>
                                 {isPos ? '+' : ''}{formatINR(lotGain)}
                               </td>
-                              <td className="px-6 py-3.5 text-right font-mono text-slate-550">
+                              <td className="px-6 py-3.5 text-right font-mono text-slate-500">
                                 {ageDays > 365 ? `${(ageDays/365).toFixed(1)}y` : `${ageDays} d`}
                               </td>
                             </tr>
@@ -3675,7 +3675,7 @@ export default function Holdings({
                           const isPos = r.gain >= 0;
                           return (
                             <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
-                              <td className="px-6 py-3.5 font-medium text-slate-650">{formatDMY(r.sellDate)}</td>
+                              <td className="px-6 py-3.5 font-medium text-slate-600">{formatDMY(r.sellDate)}</td>
                               <td className="px-6 py-3.5 text-slate-500 font-medium">{formatDMY(r.buyDate)}</td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">{formatNum(r.qtySold)}</td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">{formatINR(r.buyPrice)}</td>
@@ -4042,7 +4042,7 @@ export default function Holdings({
                 <h2 className="text-lg font-black text-slate-800 tracking-tight uppercase flex items-center gap-2">
                   {getPortfolioSummary(activePortfolio).name}
                 </h2>
-                <p className="text-xs text-slate-450 font-medium">
+                <p className="text-xs text-slate-500 font-medium">
                   {getPortfolioSummary(activePortfolio).subtext}
                 </p>
               </div>
@@ -4055,7 +4055,7 @@ export default function Holdings({
                     href={portfolioSheetUrl(activePortfolio as string)}
                     target="_blank" rel="noopener noreferrer"
                     title="Open this portfolio's Google Sheet in a new tab"
-                    className="px-4 py-2 bg-indigo-55 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+                    className="px-4 py-2 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
                   >
                     <ExternalLink className="w-3.5 h-3.5" /> Open Google Sheet
                   </a>
@@ -4067,9 +4067,9 @@ export default function Holdings({
                   <span className="text-[10px] text-slate-400 font-medium">Sync / Rebuild / Download moved to the Holdings summary page</span>
                 </>
               ) : (
-                <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-110 px-3 py-1.5 rounded-full">
+                <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full">
                   <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-450 opacity-75"></span>
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                   </span>
                   <span className="text-[9px] font-black tracking-wider text-emerald-800 uppercase">Sandbox Environment</span>
@@ -4082,7 +4082,7 @@ export default function Holdings({
             {activePortfolio !== 'local' && !hasAuthorizedGoogle() && (
               <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-xs select-none animate-scaleIn">
                 <div className="flex items-start gap-3">
-                  <div className="p-2.5 bg-amber-105 text-amber-800 rounded-xl mt-0.5 shrink-0">
+                  <div className="p-2.5 bg-amber-100 text-amber-800 rounded-xl mt-0.5 shrink-0">
                     <AlertTriangle className="w-5 h-5 animate-pulse" />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -4094,7 +4094,7 @@ export default function Holdings({
                 </div>
                 <button
                   onClick={() => login()}
-                  className="px-4 py-2 bg-indigo-650 hover:bg-slate-900 text-white font-black text-xs rounded-xl shadow-xs uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 select-none cursor-pointer"
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs rounded-xl shadow-xs uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shrink-0 select-none cursor-pointer"
                 >
                   <Globe className="w-4 h-4" /> Sync Google Sheet
                 </button>
@@ -4112,14 +4112,14 @@ export default function Holdings({
                   <span className="text-xl font-bold font-mono text-slate-800 mt-1">₹{getPortfolioSummary(activePortfolio).investedValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                 </div>
                 <div className={`p-4 rounded-xl border shadow-sm flex flex-col justify-between min-h-[90px] ${getPortfolioSummary(activePortfolio).unrealisedGain >= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}`}>
-                  <span className={`text-[10px] font-black uppercase tracking-widest ${getPortfolioSummary(activePortfolio).unrealisedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>Unrealized profit/gain</span>
+                  <span className={`text-[10px] font-black uppercase tracking-widest ${getPortfolioSummary(activePortfolio).unrealisedGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>Unrealised Gain</span>
                   <span className={`text-xl font-bold font-mono mt-1 ${getPortfolioSummary(activePortfolio).unrealisedGain >= 0 ? 'text-emerald-800' : 'text-rose-800'}`}>
                     {getPortfolioSummary(activePortfolio).unrealisedGain >= 0 ? '+' : ''}₹{getPortfolioSummary(activePortfolio).unrealisedGain.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
                 <div className={`p-4 rounded-xl border shadow-sm flex flex-col justify-between min-h-[90px] ${getPortfolioSummary(activePortfolio).todaysGain >= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}`}>
-                  <span className={`text-[10px] font-black uppercase tracking-widest ${getPortfolioSummary(activePortfolio).todaysGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>Today's yield / gain</span>
-                  <span className={`text-xl font-bold font-mono mt-1 ${getPortfolioSummary(activePortfolio).todaysGain >= 0 ? 'text-emerald-850' : 'text-rose-850'}`}>
+                  <span className={`text-[10px] font-black uppercase tracking-widest ${getPortfolioSummary(activePortfolio).todaysGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>Today's Gain</span>
+                  <span className={`text-xl font-bold font-mono mt-1 ${getPortfolioSummary(activePortfolio).todaysGain >= 0 ? 'text-emerald-800' : 'text-rose-800'}`}>
                     {getPortfolioSummary(activePortfolio).todaysGain >= 0 ? '+' : ''}₹{getPortfolioSummary(activePortfolio).todaysGain.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
@@ -4385,8 +4385,8 @@ export default function Holdings({
                     <p className="text-xs font-black text-slate-500 animate-pulse">Loading holdings ledger values...</p>
                   </div>
                 ) : sheetError ? (
-                  <div className="p-8 bg-rose-50 border border-rose-150 rounded-2xl text-center space-y-4 max-w-md mx-auto my-4 animate-scaleIn">
-                    <AlertTriangle className="w-10 h-10 text-rose-650 mx-auto" />
+                  <div className="p-8 bg-rose-50 border border-rose-100 rounded-2xl text-center space-y-4 max-w-md mx-auto my-4 animate-scaleIn">
+                    <AlertTriangle className="w-10 h-10 text-rose-600 mx-auto" />
                     <div>
                       <h5 className="font-bold text-rose-900 text-sm">Synchronisation Interrupted</h5>
                       <p className="text-xs text-rose-700 mt-1">{sheetError}</p>
@@ -4418,7 +4418,7 @@ export default function Holdings({
                       <colgroup>
                         {holdingColKeys.map((k) => <col key={k} style={{ width: (colWidths[k] ?? HOLDINGS_COL_DEFAULTS[k] ?? 120) + 'px' }} />)}
                       </colgroup>
-                      <thead className="bg-[#f8fafc] border-b border-slate-200 font-extrabold text-slate-650 uppercase tracking-wider select-none">
+                      <thead className="bg-[#f8fafc] border-b border-slate-200 font-extrabold text-slate-600 uppercase tracking-wider select-none">
                         <tr>
                           {headCell('name', 'Security Name', 'left', 'symbol')}
                           {headCell('quantity', 'Shares Qty', 'right', 'quantity')}
@@ -4499,7 +4499,7 @@ export default function Holdings({
                                 {formatNum(h.quantity)}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right font-mono text-slate-505 border-r border-slate-100 last:border-r-0">
+                              <td className="px-3 py-2.5 text-right font-mono text-slate-500 border-r border-slate-100 last:border-r-0">
                                 {formatINR(h.avgCost)}
                               </td>
 
@@ -4511,7 +4511,7 @@ export default function Holdings({
                                       step="0.01"
                                       value={editingPriceValue}
                                       onChange={(e) => setEditingPriceValue(e.target.value)}
-                                      className="w-20 px-1 py-0.5 rounded outline-none border border-indigo-400 text-xs text-right font-mono bg-white"
+                                      className="w-20 px-1 py-0.5 rounded border border-indigo-400 text-xs text-right font-mono bg-white"
                                       autoFocus
                                     />
                                     <button
@@ -4567,7 +4567,7 @@ export default function Holdings({
                                 <td className="px-3 py-2.5 text-center">
                                   <button
                                     onClick={() => handleDeleteHolding(h.id, h.name)}
-                                    className="p-1 px-1.5 hover:bg-rose-55 text-slate-400 hover:text-rose-600 border border-transparent rounded transition-colors cursor-pointer"
+                                    className="p-1 px-1.5 hover:bg-rose-50 text-slate-400 hover:text-rose-600 border border-transparent rounded transition-colors cursor-pointer"
                                   >
                                     <Trash2 className="w-4 h-4" />
                                   </button>
