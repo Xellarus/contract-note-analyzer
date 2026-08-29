@@ -576,7 +576,7 @@ export default function App() {
       // Record the import: Date | Time | Contract Note Name | Broker | User.
       const brokerLabel = ({
         zerodha: 'Zerodha', integrated: 'Integrated', shareindia: 'ShareIndia',
-        'transaction-report': 'Transaction Report', nuvama: 'Nuvama',
+        'transaction-report': 'Transaction Report', nuvama: 'Nuvama', axis: 'Axis Securities',
         // All three Nuvama variants report brokerName 'nuvama' on purpose, so the
         // Import Log's broker filter stays one option rather than fragmenting into
         // three (filterImportLogRows matches exactly, case-sensitively).
@@ -1075,10 +1075,11 @@ export default function App() {
 
     // The `accept` attribute on the file input is bypassable by drag-and-drop, which
     // calls this directly — so PDF-only brokers are re-checked here with a real message.
-    if (broker === 'zerodha' || isNuvama) {
+    if (broker === 'zerodha' || broker === 'axis' || isNuvama) {
       const allowedFiles = fileArray.filter(file => file.name.toLowerCase().endsWith('.pdf'));
       if (allowedFiles.length === 0) {
-        setError(`Only PDF contract notes are allowed for ${broker === 'zerodha' ? 'Zerodha' : 'Nuvama'}.`);
+        const who = broker === 'zerodha' ? 'Zerodha' : broker === 'axis' ? 'Axis Securities' : 'Nuvama';
+        setError(`Only PDF contract notes are allowed for ${who}.`);
         setIsLoading(false);
         return;
       }
@@ -2565,6 +2566,7 @@ export default function App() {
                         { id: 'btn-broker-zerodha', key: 'zerodha', label: 'Zerodha' },
                         { id: 'btn-broker-shareindia', key: 'shareindia', label: 'Share India' },
                         { id: 'btn-broker-integrated', key: 'integrated', label: 'Integrated' },
+                        { id: 'btn-broker-axis', key: 'axis', label: 'Axis' },
                       ] as const).map((b) => (
                         <button
                           key={b.key}
@@ -2654,7 +2656,7 @@ export default function App() {
                     type="file" 
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
                     onChange={(e) => e.target.files && handleFileUpload(e.target.files)} 
-                    accept={broker === 'transaction-report' ? '.csv,.pdf' : broker === 'zerodha' || isNuvama ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'}
+                    accept={broker === 'transaction-report' ? '.csv,.pdf' : broker === 'zerodha' || broker === 'axis' || isNuvama ? '.pdf' : broker === 'integrated' ? '.htm,.html' : '.pdf,.html,.htm'}
                     multiple 
                     disabled={isLoading} 
                   />
@@ -2870,12 +2872,24 @@ export default function App() {
                   </div>
                   
                   <div className="relative z-10 p-6 sm:p-10 w-full md:w-auto flex flex-col sm:flex-row gap-4 items-center justify-start md:justify-end">
-                    {(data.brokerName === 'shareindia' || data.brokerName === 'integrated' || data.brokerName === 'nuvama') && data.ucc && (
+                    {(data.brokerName === 'shareindia' || data.brokerName === 'integrated' || data.brokerName === 'nuvama' || data.brokerName === 'axis') && data.ucc && (
                       <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 hover:shadow-2xl transition-all relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
                         {/* Subtle highlight in the UCC card */}
                         <div className="absolute inset-x-0 top-0 h-px bg-slate-600 opacity-40"></div>
                         <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-0.5 leading-none">UCC</span>
                         <span className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white leading-none mt-1">{data.ucc}</span>
+                      </div>
+                    )}
+                    {(data.noteCount || 1) > 1 && (
+                      <div className="bg-[#0f172a] text-white rounded-[12px] px-6 py-5 flex flex-col justify-center min-w-[170px] shadow-[0_4px_20px_rgba(15,23,42,0.15)] border border-slate-800 relative overflow-hidden w-full sm:w-auto text-center sm:text-right">
+                        <div className="absolute inset-x-0 top-0 h-px bg-slate-600 opacity-40"></div>
+                        <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 mb-0.5 leading-none">Contract Notes</span>
+                        <span className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white leading-none mt-1">{data.noteCount}</span>
+                        {data.dateRange && (
+                          <span className="text-[10px] font-bold text-slate-400 mt-1.5 leading-none whitespace-nowrap">
+                            {data.dateRange.from} &rarr; {data.dateRange.to}
+                          </span>
+                        )}
                       </div>
                     )}
                     {data.tradeDate && (

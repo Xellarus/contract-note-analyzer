@@ -6,7 +6,7 @@
  *   id      internal key (lowercase, stable — usually the UCC lowercased)
  *   code    UCC / client code shown as a badge
  *   label   display name (disambiguated with the broker where a name repeats)
- *   broker  'integrated' | 'shareindia' | 'zerodha' | 'nuvama' (which broker the
+ *   broker  'integrated' | 'shareindia' | 'zerodha' | 'nuvama' | 'axis' (which broker the
  *           account is with — documentation only; nothing branches on it)
  *   sheetId Google Sheet ID backing this portfolio
  *   ucc     UCC code(s) that route an imported contract note to this sheet
@@ -35,6 +35,10 @@ export const PORTFOLIOS: Portfolio[] = [
   // Nuvama UCCs are numeric ("Trading/ Back Office Code" on the note), not letter+digits
   // like the other brokers — so the code badge reads as a number here.
   { id: '60072941', code: '60072941', label: 'Uma Agarawal', broker: 'nuvama', sheetId: '1LSfd2WVg0-Q_95lgsCZNI93ULZKqBi9PPdvT5Jo4qGs', ucc: ['60072941'] },
+  // Axis prints "Unique Client Code 6150725" - numeric, like Nuvama. The ucc[] entry is
+  // what routes an imported note here (portfolioByUcc); get it wrong and the note lands
+  // silently in whichever portfolio the picker happened to have selected.
+  { id: '6150725', code: '6150725', label: 'Saket Agarwal (Axis)', broker: 'axis', sheetId: '1dTbR5th50YQRzONe_4ybAlX4okKAqfTXhrpQKgg8U_s', ucc: ['6150725'] },
 ];
 
 /** Where blank/unknown routing falls back to. */

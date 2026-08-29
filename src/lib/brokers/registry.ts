@@ -4,6 +4,7 @@ import { ShareIndiaBrokerStrategy } from './shareindia';
 import { IntegratedBrokerStrategy } from './integrated';
 import { TransactionReportBrokerStrategy } from './transactionReport';
 import { NuvamaBrokerStrategy } from './nuvama';
+import { AxisBrokerStrategy } from './axis';
 
 // Instances of all available brokers. ORDER IS LOAD-BEARING for auto-detection,
 // which is first-match-wins:
@@ -30,6 +31,12 @@ const brokersList: BrokerStrategy[] = [
   new TransactionReportBrokerStrategy(),
   new ZerodhaBrokerStrategy(),
   new ShareIndiaBrokerStrategy(),
+  // Axis BEFORE Integrated. Integrated claims any note containing "security/contract"
+  // AND "buy/sell"; an Axis note contains the first (its Scrip Wise Summary header
+  // wraps to "Security/Contract Description") and escapes only because its side column
+  // reads "Buy(B) / Sell(S)" rather than "Buy/Sell". That is a one-term margin on a
+  // format Axis controls, so Axis gets first refusal on its own letterhead.
+  new AxisBrokerStrategy(),
   new IntegratedBrokerStrategy(),
   new NuvamaBrokerStrategy('v3'),
   new NuvamaBrokerStrategy('v2'),

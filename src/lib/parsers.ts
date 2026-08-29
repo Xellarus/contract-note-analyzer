@@ -1,4 +1,4 @@
-import { ContractNoteResult, Summary, Trade } from '../types';
+import { ContractNoteResult, ReconciliationStatus, Summary, Trade } from '../types';
 import { extractTextFromPDF, calculateReconciliation } from './brokers/utils';
 import { getBroker, detectBroker } from './brokers/registry';
 import { BrokerId } from './brokers/types';
@@ -111,5 +111,49 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
   const mergedRawText = results.map(r => r.rawText).filter(Boolean).join("\n\n=== NEXT FILE ===\n\n");
   
   trades.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
-  return { summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate, ucc: mergedUcc, rawText: mergedRawText };
+
+  // Carry the AUDIT through. It used to be dropped here, and because `setData(merged)`
+  // is the only path that puts a parse into state, `data.reconciliation` was
+  // permanently undefined - the audit banner, the failure trail, the STT-mismatch badge
+  // and the "Import Anyway" gate were all dead code. Worse, the summary cards on that
+  // screen are recomputed FROM THE TRADES, so they stay self-consistent and look
+  // perfect on a misparse. One file passes its own verdict straight through; several
+  // fold to "every file must pass", since a single bad note in a batch must not
+  // disappear into a total that still adds up.
+  const recs = results.map((r) => r.reconciliation).filter(Boolean) as ReconciliationStatus[];
+  let reconciliation: ReconciliationStatus | undefined;
+  if (recs.length === 1) {
+    reconciliation = recs[0];
+  } else if (recs.length > 1) {
+    const bad = recs.filter((r) => !r.isValid);
+    const first = bad[0] || recs[0];
+    reconciliation = {
+      ...first,
+      isValid: bad.length === 0,
+      totalBuys: recs.reduce((a, r) => a + r.totalBuys, 0),
+      totalSells: recs.reduce((a, r) => a + r.totalSells, 0),
+      totalCharges: recs.reduce((a, r) => a + r.totalCharges, 0),
+      statusText: bad.length === 0 ? 'PASSED' : first.statusText,
+      notes: bad.length === 0
+        ? `${recs.length} file(s) each passed their own audit.`
+        : `${bad.length} of ${recs.length} file(s) failed their own audit.`,
+    };
+  }
+
+  const noteCount = results.reduce((a, r) => a + (r.noteCount || 1), 0);
+  const ranges = results.map((r) => r.dateRange).filter(Boolean) as { from: string; to: string }[];
+  const iso = (d: string) => d.split('/').reverse().join('-');
+  const allDates = ranges.flatMap((r) => [r.from, r.to])
+    .concat(results.map((r) => r.tradeDate || '').filter(Boolean))
+    .filter(Boolean)
+    .sort((a, b) => iso(a).localeCompare(iso(b)));
+
+  return {
+    summary, trades, brokerName: mergedBrokerName, tradeDate: mergedTradeDate,
+    ucc: mergedUcc, rawText: mergedRawText, reconciliation,
+    noteCount,
+    dateRange: allDates.length > 1 && allDates[0] !== allDates[allDates.length - 1]
+      ? { from: allDates[0], to: allDates[allDates.length - 1] }
+      : undefined,
+  };
 };

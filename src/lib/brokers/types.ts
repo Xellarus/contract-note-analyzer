@@ -22,7 +22,8 @@ export type BrokerId =
   | 'transaction-report'
   | 'nuvama-v1'
   | 'nuvama-v2'
-  | 'nuvama-v3';
+  | 'nuvama-v3'
+  | 'axis';
 
 export interface BrokerStrategy {
   id: string;

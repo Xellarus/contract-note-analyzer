@@ -66,6 +66,9 @@ export interface ReconciliationStatus {
    *  summed over the trades. Catches a misparse that is internally self-consistent and
    *  therefore invisible to the net-settlement check. */
   isObligationMismatch?: boolean;
+  /** Free text explaining a verdict that a single boolean cannot carry - e.g. which
+   *  sub-note of a multi-note Axis PDF failed its own audit. Display only. */
+  notes?: string;
 }
 
 export interface ContractNoteResult {
@@ -76,6 +79,11 @@ export interface ContractNoteResult {
   ucc?: string;
   reconciliation?: ReconciliationStatus;
   rawText?: string;
+  /** >1 when ONE file held several contract notes (Axis ships them concatenated).
+   *  `tradeDate` is then only the latest of them, so the UI must show the range
+   *  instead of letting a single date stand in for all of them. */
+  noteCount?: number;
+  dateRange?: { from: string; to: string };
 }
 
 export interface PortfolioHolding {

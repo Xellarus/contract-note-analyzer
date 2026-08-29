@@ -1,6 +1,8 @@
 // Temporary diagnostic. Dumps the REAL pdf.js text of a contract note, using the
-// exact same grouping the app uses (extractTextFromPDF in src/lib/brokers/utils.ts:201)
+// exact same grouping the app uses (extractTextFromPDF in src/lib/brokers/utils.ts)
 // so what lands in the file is byte-for-byte what the parser actually receives.
+// If that function changes, CHANGE THIS TOO - it drifted once already and produced
+// fixtures the app could never generate.
 //
 //   node tmp-extract.mjs "C:\path\to\note.pdf" [password]
 //
@@ -31,22 +33,36 @@ for (let i = 1; i <= pdf.numPages; i++) {
   const items = content.items;
   if (items.length === 0) continue;
 
-  // Identical to the app: Y descending with a 5pt same-line threshold, then X ascending.
-  items.sort((a, b) => {
-    const yDiff = b.transform[5] - a.transform[5];
-    if (Math.abs(yDiff) > 5) return yDiff;
-    return a.transform[4] - b.transform[4];
-  });
-
-  let pageText = '';
-  let lastY = items[0].transform[5];
-  for (const item of items) {
-    if (Math.abs(item.transform[5] - lastY) > 5) {
-      pageText += '\n';
-      lastY = item.transform[5];
+  // MUST mirror extractTextFromPDF (src/lib/brokers/utils.ts) EXACTLY, or the fixture
+  // is not what the parser receives and a test can pass on text the app never produces.
+  //
+  // This file used to carry the app's OLD comparator - a single sort of the form
+  //   if (|dy| > 5) return dy; else return dx;
+  // which is not a valid total order (not transitive), so rows whose cells wrap onto
+  // two baselines came out scrambled. The app replaced it with cluster-by-Y-then-sort-X
+  // and this harness was not updated, so it silently drifted out of sync. Keep the two
+  // in lockstep.
+  const LINE_TOL = 5;
+  const byY = [...items].sort((a, b) => b.transform[5] - a.transform[5]);
+  const rows = [];
+  let current = [];
+  let anchorY = byY[0].transform[5];
+  for (const item of byY) {
+    // Compare against the row's ANCHOR, not the previous item, so a column of
+    // slightly-drifting baselines cannot creep into one ever-growing line.
+    if (current.length > 0 && Math.abs(item.transform[5] - anchorY) > LINE_TOL) {
+      rows.push(current);
+      current = [];
+      anchorY = item.transform[5];
     }
-    pageText += item.str + ' ';
+    current.push(item);
   }
+  if (current.length > 0) rows.push(current);
+  for (const row of rows) row.sort((a, b) => a.transform[4] - b.transform[4]);
+
+  const pageText = rows
+    .map((row) => row.map((item) => item.str).join(' ') + ' ')
+    .join('\n');
   text += pageText + '\n';
 }
 
