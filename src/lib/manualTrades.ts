@@ -112,7 +112,10 @@ function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMast
   };
 }
 
-async function appendRecordsToTab(spreadsheetId: string, tab: string, records: RowRecord[]): Promise<void> {
+/** Exported for transferHolding.ts, which builds its own records (a transfer must control
+ *  the two cost columns independently and must not go through buildRecord's free-share
+ *  zeroing) but wants this header-aware append. */
+export async function appendRecordsToTab(spreadsheetId: string, tab: string, records: Record<string, any>[]): Promise<void> {
   // Align to the tab's existing header so rows land in the right columns no
   // matter which broker schema (IGST vs Total GST, with/without IPF) created it.
   let header: string[] = [];

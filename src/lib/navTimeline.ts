@@ -9,6 +9,7 @@ import {
   COVERAGE_OK, BENCH_SMALLCAP250, type PriceGrid, type FilledColumn,
 } from "./priceHistory";
 import { applyTwr, rebaseToIndex, NAV_START_TS, type NavPoint } from "./navMath";
+import { isTransferType, isTransferOut } from "./tradeRowSchema";
 
 /**
  * Real market-value history: for every trading session, the value of the positions actually held
@@ -122,11 +123,18 @@ async function trueEntryEvents(spreadsheetId: string, keyOf: (isin: string, name
     const r = rows[i];
     if (!r || r.length === 0) continue;
     const rawType = (r[typeIdx] || "").toString();
-    const isSell = /sell/i.test(rawType);
+    // A cross-portfolio transfer moves quantity, so it must not be skipped here - these
+    // classifiers return null for an unrecognised label and NAV/AUM would then never see
+    // the movement at all (the source keeps showing the shares forever, the destination
+    // never gains them). Deliberately NOT switched to ledgerSide: that would also change
+    // how "Buyback" is classified here (ledgerSide says SELL, the /buy/ test below says
+    // BUY), which is a real pre-existing divergence but not this feature's to change.
+    const isSell = /sell/i.test(rawType) || isTransferOut(rawType);
     // Bonus / Split / IPO / Rights are buy-side. Bonus and Split carry ₹0 cost, and additionally
     // mark a price boundary so a carried-forward close can't straddle them.
     const isCorp = /bonus|split/i.test(rawType);
-    const side: Side | null = isSell ? "SELL" : /buy|bonus|split|ipo|right/i.test(rawType) ? "BUY" : null;
+    const side: Side | null = isSell ? "SELL"
+      : (/buy|bonus|split|ipo|right/i.test(rawType) || isTransferType(rawType)) ? "BUY" : null;
     if (!side) continue;
     const name = (r[nameIdx] || "").toString().trim();
     const qty = toNum(r[qtyIdx]);

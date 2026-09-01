@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
   HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
   Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
   ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save, Upload, StickyNote,
-  ArrowUp, ArrowDown, Lock, FolderOpen
+  ArrowUp, ArrowDown, Lock, FolderOpen, ArrowRightLeft, ChevronDown, MoreHorizontal,
 } from 'lucide-react';
 import { PortfolioHolding, ContractNoteResult } from '../types';
 import { useGoogleLogin } from '@react-oauth/google';
@@ -27,7 +28,8 @@ import {
 } from '../lib/openingCorpActions';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
-import { ledgerSide, isSplitType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
+import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
+import { TransferHoldingModal } from './TransferHoldingModal';
 import { formatDMY, formatDMYTime } from '../lib/dates';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
@@ -611,9 +613,59 @@ export default function Holdings({
   const [showAddTrade, setShowAddTrade] = useState(false);
   // Temporary per-stock opening-basis CSV import (detail page → Trade Book toolbar).
   const [showOpeningImport, setShowOpeningImport] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
+  // The detail page's single "Actions" menu (Add Trade / Edit Entry / Import / Transfer).
+  // One control in the Trade Book tab bar instead of four competing buttons.
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const actionsMenuRef = useRef<HTMLDivElement>(null);
+  const actionsBtnRef = useRef<HTMLButtonElement>(null);
+  // The panel is PORTALLED to <body>, so it needs viewport coordinates rather than
+  // `absolute right-0 top-full`. See the placement effect for why it cannot stay in flow.
+  const actionsPanelRef = useRef<HTMLDivElement>(null);
+  const [actionsPos, setActionsPos] = useState<{ top: number; right: number } | null>(null);
   // "Edit Trade" mode — reveals inline row editing in the Trade Book (replaces the
   // always-on per-row Edit button). Toggled from the detail page's Position card.
   const [editMode, setEditMode] = useState(false);
+  // Anchor the portalled Actions panel under its trigger, and keep it there while the page
+  // scrolls. `true` on the scroll listener is load-bearing: scroll does not bubble, and the
+  // trigger sits inside the ledger's own scrolling containers.
+  useLayoutEffect(() => {
+    if (!actionsOpen) return;
+    const place = () => {
+      const r = actionsBtnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      // clientWidth, not innerWidth - innerWidth includes the scrollbar and would push the
+      // right-anchored panel off by its width.
+      setActionsPos({ top: r.bottom + 6, right: Math.max(8, document.documentElement.clientWidth - r.right) });
+    };
+    place();
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [actionsOpen]);
+  // Close the Actions menu on an outside click or Escape - same pattern as ExportMenu and
+  // the Nuvama variant menu in App.tsx. No focus trap: the menu owns no modal surface.
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      // The panel is NOT a DOM descendant of the wrapper any more (it is portalled), so it
+      // has to be spared explicitly. Miss this and mousedown unmounts the item before its
+      // own click can fire - every entry in the menu would silently do nothing.
+      if (actionsMenuRef.current?.contains(t) || actionsPanelRef.current?.contains(t)) return;
+      setActionsOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setActionsOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [actionsOpen]);
   // Multi-select delete (edit mode): selected row keys `${editSource}:${sheetRow}`.
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -1406,6 +1458,22 @@ export default function Holdings({
     const setCol = (h: string, val: any) => { const i = idx(h); if (i !== -1) row[i] = val; };
 
     const type = (editForm.transactionType || t.transactionType || '').trim();
+
+    // A TRANSFER row is one half of a pair written into two DIFFERENT spreadsheets, and it
+    // deliberately carries a cost basis that is NOT turnover +/- expenses: turnover holds the
+    // charge-free basis the capital-gains engines read, while Total Amount with Expense holds
+    // the all-in cost the Holding tab reads. The derived-totals block below would recompute
+    // that column as turnover +/- expenses (expenses being zero on a transfer), silently
+    // flattening the carried all-in cost - and editing one leg would desynchronise it from
+    // its counterpart in the other portfolio's book with nothing to detect the drift.
+    // Refuse, rather than rewrite it and look like it worked.
+    if (isTransferType(type)) {
+      toast.error('This row is one leg of a cross-portfolio transfer and cannot be edited here - '
+        + 'its cost basis is carried from the source lot, and the matching row lives in the other '
+        + 'portfolio. Reverse the transfer and redo it instead.');
+      return;
+    }
+
     const qty = numCell(editForm.quantity);
     const price = numCell(editForm.price);
     const turnover = numCell(editForm.turnover);
@@ -2634,6 +2702,10 @@ export default function Holdings({
       quantity: number;
       remainingQty: number;
       price: number;
+      /** ALL-IN cost per share (charges capitalised). `price` is the charge-free Avg Price,
+       *  which is the capital-gains basis; a transfer needs both so the destination shows the
+       *  same invested value while inheriting the same tax basis. */
+      inclPrice?: number;
       isOpening?: boolean;
       longTerm?: boolean;
     }
@@ -2722,11 +2794,17 @@ export default function Holdings({
       const side = ledgerSide(t.transactionType);   // Buy/IPO/Bonus/Rights → BUY (Bonus at ₹0)
       if (side === "BUY") {
         totalBuyAmount += actionAmt;
+        // All-in cost/share for a transfer: read the incl-STT column off the raw ledger row.
+        // Transaction.amount is only the charge-free turnover, so it cannot serve here. An
+        // opening lot has no rawRow and falls back to its carried cost per share.
+        const inclIdx = trueEntryHeaders.indexOf("Total Amount with Expense (Incl STT)");
+        const inclAmt = t.rawRow && inclIdx >= 0 ? Number(t.rawRow[inclIdx]) : NaN;
         activeInventory.push({
           date: t.tradeDate,
           quantity: t.quantity,
           remainingQty: t.quantity,
           price: t.price,
+          inclPrice: t.quantity > 0 && isFinite(inclAmt) && inclAmt > 0 ? inclAmt / t.quantity : t.price,
           isOpening: t.isOpening,
           longTerm: t.longTerm
         });
@@ -3294,25 +3372,10 @@ export default function Holdings({
             </button>
             {activePortfolio !== 'local' && (
               <div className="ml-auto flex items-center gap-1.5 py-1.5">
-                {/* Add a trade for THIS security — the company is pre-filled since we're inside it. */}
-                <button
-                  id="detail-add-trade"
-                  onClick={() => setShowAddTrade(true)}
-                  title={`Add a trade for ${name}`}
-                  className="btn-press inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add Trade
-                </button>
-                {/* Import THIS stock's pre-FY26 trades from a broker CSV → rebuilds its opening basis. */}
-                <button
-                  id="detail-import-opening"
-                  onClick={() => setShowOpeningImport(true)}
-                  title={`Import ${name}'s trades (through 31-Mar-2025) from a CSV`}
-                  className="btn-press inline-flex items-center gap-1 px-2.5 py-1.5 border border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-700 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer"
-                >
-                  <Upload className="w-3 h-3" /> Import
-                </button>
-                {/* Delete the checkbox-selected rows in one go (edit mode only). */}
+                {/* Delete the checkbox-selected rows in one go (edit mode only). Deliberately
+                    NOT folded into the Actions menu: it is destructive, its label carries the
+                    count, and it exists only while rows are selected. Putting an irreversible
+                    "Delete 3" one click further away makes the bar tidier, not safer. */}
                 {editMode && selectedRows.size > 0 && (
                   <button
                     onClick={deleteSelectedEntries}
@@ -3323,16 +3386,94 @@ export default function Holdings({
                     {bulkDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />} Delete {selectedRows.size}
                   </button>
                 )}
-                {/* Toggle inline editing of the Trade Book ledger rows. */}
-                <button
-                  id="detail-edit-trade"
-                  aria-pressed={editMode}
-                  onClick={() => setEditMode(m => { const next = !m; if (next) setActiveDetailTab('trade_book'); else { setEditingTx(null); setSelectedRows(new Set()); } return next; })}
-                  title="Edit the Trade Book rows inline"
-                  className={`btn-press inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer border ${editMode ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
-                >
-                  <Edit2 className="w-3 h-3" /> {editMode ? 'Editing' : 'Edit Trade'}
-                </button>
+
+                {/* One control for the four things you can do to this stock's book. Three of
+                    them are alike — they open a modal. "Edit Entry" is NOT: it is a MODE that
+                    rewrites the Trade Book underneath you (row checkboxes, per-row EDIT, the
+                    Delete N button above). So the trigger itself carries that state, going
+                    indigo and reading "Editing" exactly as the old standalone button did —
+                    otherwise the mode is invisible and there is no obvious way back out. */}
+                <div ref={actionsMenuRef} className="relative">
+                  <button
+                    id="detail-actions"
+                    ref={actionsBtnRef}
+                    type="button"
+                    onClick={() => setActionsOpen(o => !o)}
+                    aria-haspopup="menu"
+                    aria-expanded={actionsOpen}
+                    title={editMode ? 'Editing the Trade Book inline — open for more actions' : `Actions for ${name}`}
+                    className={`btn-press inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider rounded-md cursor-pointer border ${editMode ? 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-500' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'}`}
+                  >
+                    {editMode ? <Edit2 className="w-3 h-3" /> : <MoreHorizontal className="w-3 h-3" />}
+                    {editMode ? 'Editing' : 'Actions'}
+                    <ChevronDown className={`w-3 h-3 transition-transform ${actionsOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {/* PORTALLED to <body> on purpose. The panel's ancestor
+                      #detail-granular-tabs-container is `overflow-hidden` for its rounded
+                      corners, which clips absolutely-positioned children no matter what
+                      z-index they carry - on a stock with an empty ledger there is only
+                      ~214px below the tab bar and the last entry would be cut off. A portal
+                      also survives the other trap this file is full of: any ancestor that
+                      grows a `transform` becomes the containing block, which would break
+                      plain `position: fixed` too. overlay.tsx portals for the same reason. */}
+                  {actionsOpen && actionsPos && createPortal((
+                    <div
+                      ref={actionsPanelRef}
+                      role="menu"
+                      style={{ position: 'fixed', top: actionsPos.top, right: actionsPos.right }}
+                      className="w-72 max-h-[70vh] overflow-y-auto z-50 rounded-xl bg-white border border-slate-200 shadow-lg animate-fadeIn text-left"
+                    >
+                      {[
+                        {
+                          id: 'detail-add-trade', Icon: Plus, label: 'Add Trade',
+                          hint: 'Record a buy, sell or corporate action — the company is pre-filled',
+                          pressed: false,
+                          run: () => setShowAddTrade(true),
+                        },
+                        {
+                          id: 'detail-edit-trade', Icon: Edit2,
+                          label: editMode ? 'Stop Editing' : 'Edit Entry',
+                          hint: editMode
+                            ? 'Leave inline editing and clear the row selection'
+                            : 'Edit or delete Trade Book rows in place',
+                          pressed: editMode,
+                          // Verbatim from the old button, side effects and all — relocating a
+                          // control is not the moment to change what it does.
+                          run: () => setEditMode(m => { const next = !m; if (next) setActiveDetailTab('trade_book'); else { setEditingTx(null); setSelectedRows(new Set()); } return next; }),
+                        },
+                        {
+                          id: 'detail-import-opening', Icon: Upload, label: 'Import',
+                          hint: `Rebuild ${name}'s opening basis from a CSV of trades through 31-Mar-2025`,
+                          pressed: false,
+                          run: () => setShowOpeningImport(true),
+                        },
+                        {
+                          id: 'detail-transfer', Icon: ArrowRightLeft, label: 'Transfer',
+                          hint: 'Move shares to another account FIFO, carrying the cost basis and purchase dates',
+                          pressed: false,
+                          run: () => setShowTransfer(true),
+                        },
+                      ].map(({ id, Icon, label, hint, pressed, run }) => (
+                        <button
+                          key={id}
+                          id={id}
+                          type="button"
+                          role="menuitem"
+                          aria-pressed={pressed}
+                          onClick={() => { setActionsOpen(false); run(); }}
+                          className={`w-full flex items-start gap-2.5 px-3 py-2.5 text-left border-b border-slate-100 last:border-b-0 cursor-pointer transition-colors ${pressed ? 'bg-indigo-50' : 'hover:bg-indigo-50'}`}
+                        >
+                          <Icon className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+                          <span className="min-w-0">
+                            <span className="block text-xs font-black text-slate-800">{label}</span>
+                            <span className="block text-[10px] font-semibold text-slate-500 leading-snug mt-0.5">{hint}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ), document.body)}
+                </div>
               </div>
             )}
           </div>
@@ -3697,6 +3838,32 @@ export default function Holdings({
         {editEntryModal}
         {expenseModal}
         {corpActionEditModal}
+        {/* Transfer dialog. Mounted HERE because `activeInventory` — this scrip's surviving
+            FIFO lots, oldest first — only exists inside the detail render. */}
+        {activePortfolio !== 'local' && (
+          <TransferHoldingModal
+            open={showTransfer}
+            onClose={() => setShowTransfer(false)}
+            fromPortfolioId={activePortfolio}
+            securityName={name}
+            isin={displayIsin || isin}
+            lots={activeInventory
+              .filter((l) => l.remainingQty > 1e-9)
+              .map((l) => ({
+                acquiredDMY: formatDMY(l.date),
+                remaining: l.remainingQty,
+                purPrice: l.price,
+                inclPrice: l.inclPrice,
+              }))}
+            onDone={() => {
+              // Same refresh path Add Trade uses: reload the portfolio's holdings and this
+              // scrip's trade book, so the moved lots disappear from the view immediately.
+              setShowTransfer(false);
+              fetchSheetHoldings(activePortfolio, true);
+              if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
+            }}
+          />
+        )}
         {/* Add Trade drawer, pre-filled with THIS security. Mounted here too because the
             detail view early-returns before the main return's copy would render. */}
         <AddTradeModal

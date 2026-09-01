@@ -2716,8 +2716,15 @@ export default function App() {
             {data && (
               <div className="space-y-6">
                 
-                {/* RECONCILIATION TEACHER STATUS BAR (Step 4) */}
-                {data.reconciliation && (
+                {/* RECONCILIATION STATUS BAR - shown ONLY when the audit FAILS.
+                    A full-width green "everything is fine" panel is noise on the screen you
+                    see every single import; the check still runs on every note and still
+                    blocks the export via the "Import Anyway" confirmation. Silence here
+                    means it passed. Do NOT widen this back to `data.reconciliation &&`
+                    without a reason - the red state is the only visible signal of a
+                    misparse, because the summary cards below are recomputed FROM the trades
+                    and so stay self-consistent even when the parse is wrong. */}
+                {data.reconciliation && !data.reconciliation.isValid && (
                   <div className={`p-5 rounded-2xl border flex flex-col md:flex-row items-start justify-between gap-6 shadow-sm ${data.reconciliation.isValid ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900' : 'bg-red-50/90 border-rose-300 text-rose-950'}`}>
                     <div className="flex items-start gap-4">
                       <div className={`p-3 rounded-full mt-0.5 ${data.reconciliation.isValid ? 'bg-emerald-100/90 text-emerald-700' : 'bg-rose-100/90 text-red-600'}`}>

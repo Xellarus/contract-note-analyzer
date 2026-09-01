@@ -6,8 +6,8 @@ import {
 } from "./scripMaster";
 import { loadCorporateActions } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
-import { UnresolvedScrip } from "./holdingsCalc";
-import { ledgerSide, isSplitType } from "./tradeRowSchema";
+import { UnresolvedScrip, insertLotByTs } from "./holdingsCalc";
+import { ledgerSide, isSplitType, isTransferType } from "./tradeRowSchema";
 
 /**
  * Financial-year, scrip-wise TRANSACTION LEDGER — a replica of the accountant's
@@ -105,6 +105,12 @@ interface Trade {
   qty: number; avgPrice: number; turnover: number; inclSTT: number;
   charges: Charges;
   isIntraday: boolean;
+  /** A cross-portfolio transfer leg. It carries a normal BUY/SELL side so the lot queue
+   *  moves, but realises NO gain: the replay consumes/adds the lots and records a note
+   *  instead of a sale or purchase row - the same treatment as a merger. */
+  xfer?: boolean;
+  /** Free text from the row's Notes column, used to name the counterparty account. */
+  note?: string;
 }
 
 // A dated cost lot. purPrice = turnover/qty; inclPrice = Incl-STT/qty. Both bases
@@ -214,6 +220,8 @@ export async function generateTrxRegister(
   const turnoverIdx = findCol(hdrs, "Total Amount (Turnover)");
   const inclIdx = findCol(hdrs, "Total Amount with Expense (Incl STT)");
   const classIdx = findCol(hdrs, "Trade Class", "Trade Type");
+  // Notes carries the counterparty account for a transfer leg ("Transferred to X").
+  const notesIdx = findCol(hdrs, "Notes", "Note", "Remarks");
   const isinIdx = findCol(hdrs, "ISIN");
   // charge columns (Dmat + Exchange-Clearing intentionally absent from the ledger)
   const brokIdx = findCol(hdrs, "Total Brokerage", "Brokerage");
@@ -270,6 +278,8 @@ export async function generateTrxRegister(
     // Everything else → a buy/sell SIDE (Bonus/IPO/Rights are buy-side, ₹0/priced add).
     const type = ledgerSide(rawType);
     if (!type) continue;
+    const xfer = isTransferType(rawType);
+    const note = notesIdx >= 0 ? (r[notesIdx] || "").toString().trim() : "";
     const tradeClass = (classIdx >= 0 ? (r[classIdx] || "").toString() : "").toLowerCase();
     const isIntraday = tradeClass.includes("intraday");
     const avgPrice = toNum(r[priceIdx]) || 0;
@@ -277,7 +287,7 @@ export async function generateTrxRegister(
     const inclSTT = inclIdx >= 0 ? (toNum(r[inclIdx]) || 0) : 0;
     trades.push({
       ts: parseDateTs(r[dateIdx]), idx: i, key: keyOf(isin, name), name, isin,
-      type: type as "BUY" | "SELL", qty, avgPrice, turnover, inclSTT, isIntraday,
+      type: type as "BUY" | "SELL", qty, avgPrice, turnover, inclSTT, isIntraday, xfer, note,
       charges: {
         brok: num(r, brokIdx), stt: num(r, sttIdx), gst: num(r, gstIdx), et: num(r, etIdx),
         stamp: num(r, stampIdx), sebi: num(r, sebiIdx), ipf: num(r, ipfIdx), dmat: num(r, dmatIdx),
@@ -467,11 +477,21 @@ export async function generateTrxRegister(
       const purPrice = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
       const inclPrice = t.qty > 0 && t.inclSTT > 0 ? t.inclSTT / t.qty : purPrice;
       const arr = fifo.get(t.key) || [];
-      arr.push({ buyTs: t.ts, qty: t.qty, remaining: t.qty, purPrice, inclPrice, charges: t.charges });
+      insertLotByTs(arr, { buyTs: t.ts, qty: t.qty, remaining: t.qty, purPrice, inclPrice, charges: t.charges }, (l) => l.buyTs);
       fifo.set(t.key, arr);
       if (inFY) {
         touch(t.key, t.ts);
-        block(t.key).purchases.push({ ts: t.ts, qty: t.qty, avgPrice: t.avgPrice, turnover: t.turnover, charges: t.charges });
+        if (t.xfer) {
+          // A transfer IN is not a purchase - no money changed hands and no consideration
+          // was paid. Record it the way a merger is recorded, so the register explains the
+          // quantity appearing without inventing a purchase for the year.
+          block(t.key).corpNotes.push({
+            ts: t.ts,
+            text: `TRANSFER IN ${t.qty} ${t.note ? `from ${t.note}` : "from another account"} (${fmtDate(t.ts)})`,
+          });
+        } else {
+          block(t.key).purchases.push({ ts: t.ts, qty: t.qty, avgPrice: t.avgPrice, turnover: t.turnover, charges: t.charges });
+        }
       }
     } else {
       // SELL — FIFO-consume; split matched parcels into ST and LT buckets (qty + P/L)
@@ -480,6 +500,26 @@ export async function generateTrxRegister(
       // (private-equity) company — the concessional listed-share period doesn't apply to
       // unquoted shares. Resolved once per sale, not per lot.
       const lots = fifo.get(t.key) || [];
+      if (t.xfer) {
+        // TRANSFER OUT — consume the lots FIFO so the shares genuinely leave this book,
+        // but emit NO sale row: a transfer realises no capital gain, so it must never
+        // reach the register's sales section or the tax computation. Only a note.
+        let leftX = t.qty;
+        for (const l of lots) {
+          if (leftX <= 1e-9) break;
+          if (l.remaining <= 1e-9) continue;
+          const m = Math.min(l.remaining, leftX);
+          l.remaining -= m; leftX -= m;
+        }
+        if (inFY) {
+          touch(t.key, t.ts);
+          block(t.key).corpNotes.push({
+            ts: t.ts,
+            text: `TRANSFER OUT ${t.qty} ${t.note ? `\u2192 ${t.note}` : "to another account"} (${fmtDate(t.ts)})`,
+          });
+        }
+        continue;
+      }
       const ltDays = ltDaysFor(master, t.isin, t.name);
       const salePrice = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
       let left = t.qty, ltQty = 0, ltGain = 0, stQty = 0, stGain = 0;

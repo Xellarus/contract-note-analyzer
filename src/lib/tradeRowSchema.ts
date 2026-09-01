@@ -20,12 +20,52 @@
  * Buyback is tested before Buy (it contains "buy"). Existing rows are only ever
  * "Buy"/"Sell", so this maps them identically — no change to historical data.
  */
+/**
+ * The EXACT Transaction Type strings a cross-portfolio transfer writes. The UI writes these
+ * and the engines classify them, so they are a data contract - renaming one is a migration
+ * of every historical row, not a cosmetic change.
+ */
+export const XFER_OUT_TYPE = "Transfer Out";
+export const XFER_IN_TYPE = "Transfer In";
+
+/**
+ * Transfer labels, matched BEFORE the buy/sell keyword tests below. Order is load-bearing:
+ * "Transfer In (Rights)" would otherwise be dragged buy-side by RIGHT, and "Transfer Sale"
+ * sell-side by SALE, both of which would book a capital gain on a movement that realises
+ * none. Anchored on word boundaries so "TRANSFER INTO" cannot satisfy the IN form.
+ */
+const XFER_OUT_RE = /\bTRANSFER\s*(?:OUT|DEBIT)\b|\bXFER\s*OUT\b/;
+const XFER_IN_RE = /\bTRANSFER\s*(?:IN|CREDIT)\b|\bXFER\s*IN\b/;
+
 export function ledgerSide(type: string): "BUY" | "SELL" | "" {
   const t = (type || "").toUpperCase();
+  // A transfer MOVES shares between portfolios but realises no gain. It is given a normal
+  // SIDE here so every holdings / NAV / AUM consumer shifts the quantity without needing to
+  // know the concept; the capital-gains engines additionally consult isTransferType() and
+  // emit no gain record. Before this, "Transfer Out" matched neither test, returned "", and
+  // all eleven consumers silently skipped the row - the shares stayed in the source account
+  // AND arrived in the destination, with nothing raised anywhere.
+  if (XFER_OUT_RE.test(t)) return "SELL";
+  if (XFER_IN_RE.test(t)) return "BUY";
   if (/SELL|SALE|BUY\s*-?\s*BACK|BUYBACK|REDEEM|REDEM/.test(t)) return "SELL";
   if (/BUY|BONUS|SPLIT|IPO|RIGHT|PURCHASE|ALLOT|SUBSCRIB|PAID/.test(t)) return "BUY";
   return "";
 }
+
+/**
+ * True for EXACTLY the labels `ledgerSide` recognised as a transfer - deliberately not a
+ * loose /transfer/i test. An ambiguous "Transfer Sale" stays a plain taxable sale rather
+ * than silently escaping capital gains, and the two functions can never disagree about
+ * which rows are transfers.
+ */
+export const isTransferType = (type: string | null | undefined): boolean => {
+  const t = (type || "").toUpperCase();
+  return XFER_OUT_RE.test(t) || XFER_IN_RE.test(t);
+};
+
+/** True for the OUT leg specifically (shares leaving this portfolio). */
+export const isTransferOut = (type: string | null | undefined): boolean =>
+  XFER_OUT_RE.test((type || "").toUpperCase());
 
 /** True for the ₹0 free-share corporate actions (bonus / split). */
 export const isFreeShareType = (type: string): boolean => /BONUS|SPLIT/i.test(type || "");

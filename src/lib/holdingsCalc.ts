@@ -12,7 +12,7 @@ import { loadOpeningHoldings } from "./openingHoldings";
 import { loadOpeningTxns } from "./openingTxns";
 import { loadOpeningCorpActions } from "./openingCorpActions";
 import { replayOpeningTxnsAsOf, classifyTxn, TxnStatementRow, ActionResolution } from "./openingBasis";
-import { ledgerSide, isSplitType } from "./tradeRowSchema";
+import { ledgerSide, isSplitType, isTransferType } from "./tradeRowSchema";
 
 export interface UnresolvedScrip {
   name: string;
@@ -73,7 +73,13 @@ const parseDateTs = (s: any): number => {
   return isNaN(ts) ? 0 : ts;
 };
 
-interface ReplayTrade { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; }
+interface ReplayTrade {
+  ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number;
+  /** A cross-portfolio transfer leg. Carries a normal BUY/SELL `type` so the FIFO
+   *  replay moves the shares, but is flagged so the same-day square-off leaves it
+   *  alone - a transfer is not a round-trip leg. */
+  xfer?: boolean;
+}
 
 /**
  * Collapse same-scrip, same-day trades into a single net trade so that intraday
@@ -87,11 +93,21 @@ interface ReplayTrade { ts: number; idx: number; isin: string; name: string; typ
  * for weighted-average purposes and removes any intra-day ordering ambiguity.
  * Rows with an unparseable date (ts <= 0) pass through untouched.
  */
-function squareOffIntraday(trades: ReplayTrade[], keyOf: (t: ReplayTrade) => string): ReplayTrade[] {
+/** Exported for tmp-transfer.ts: the transfer exemption below is invisible to tsc and to
+ *  the build, and getting it wrong books a disposal that never happened as speculative
+ *  business income. Not intended for use outside this module. */
+export function squareOffIntraday(trades: ReplayTrade[], keyOf: (t: ReplayTrade) => string): ReplayTrade[] {
   const groups = new Map<string, ReplayTrade[]>();
   const out: ReplayTrade[] = [];
   for (const t of trades) {
     if (t.type === "SPLIT") { out.push(t); continue; }  // a split rescales lots — never a round-trip leg, never netted
+    // A transfer is not a round-trip leg either. Without this, "buy 100 today,
+    // transfer out 100 today" nets to ZERO: the transfer vanishes from the holding AND
+    // the matched quantity is emitted as an intraday round-trip into LTST / PnL Summary
+    // - speculative business income for a disposal that never happened. The bare
+    // `else sellQty += t.qty` below catches everything not literally "BUY", which is
+    // exactly why an explicit flag is needed rather than a type check.
+    if (t.xfer) { out.push(t); continue; }
     if (t.ts <= 0) { out.push(t); continue; }       // undated row — leave as-is
     const gk = keyOf(t) + "@" + t.ts;
     const g = groups.get(gk);
@@ -140,6 +156,32 @@ export type FifoHoldingEvent =
   | { kind: "DEMERGER"; ts: number; fromKey: string; toKey: string; sharesIn: number; cost: number };
 export interface FifoHoldingOut { netQty: number; invested: number; }
 
+/**
+ * Insert `lot` into `arr` keeping it ordered OLDEST-FIRST by `ts(lot)`.
+ *
+ * Every FIFO engine here seeds its lot queue from Opening Holdings, sorts it ONCE, and then
+ * `push`es each later buy onto the end. That is only correct while every pushed lot is newer
+ * than every seeded one - which held for as long as True Entry was strictly FY26 and Opening
+ * Holdings was strictly pre-FY26. A BACK-DATED buy row breaks it: the queue becomes
+ * [2024-seed, 2019-buy] and the next sale consumes the 2024 lot, giving the wrong cost basis
+ * AND the wrong holding period in a filed capital-gains register. Sorting the events by date
+ * does not help - the ORDER OF INSERTION is what decides the queue.
+ *
+ * Appending is the fast path (rows normally do arrive in date order), so this is O(1) for
+ * every existing ledger and only pays a binary search when something genuinely arrives late.
+ * It is a no-op for all current data.
+ */
+export function insertLotByTs<T>(arr: T[], lot: T, ts: (l: T) => number): void {
+  const t = ts(lot);
+  if (arr.length === 0 || ts(arr[arr.length - 1]) <= t) { arr.push(lot); return; }
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ts(arr[mid]) <= t) lo = mid + 1; else hi = mid;
+  }
+  arr.splice(lo, 0, lot);
+}
+
 export function replayFifoHoldings(
   seed: Map<string, FifoSeedLot[]>,
   events: FifoHoldingEvent[],
@@ -170,7 +212,7 @@ export function replayFifoHoldings(
       // weighted-avg path, which reset cost to the buy price when a buy crossed back above 0.)
       const cur = netQty.get(e.key) || 0;
       const rem = cur < 0 ? Math.max(0, e.qty + cur) : e.qty;
-      getLots(e.key).push({ remaining: rem, price: e.price, ts: e.ts });
+      insertLotByTs(getLots(e.key), { remaining: rem, price: e.price, ts: e.ts }, (l) => l.ts);
       bump(e.key, e.qty);
     } else if (e.kind === "SELL") {
       let left = e.qty;
@@ -375,6 +417,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
       // rescales the held lots (kept a distinct type so it's excluded from the intraday
       // square-off and isn't a ₹0 add); Bonus/IPO/Rights are buy-side.
       const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
+      const xfer = isTransferType(r[typeIdx]);
       if (!type) continue;
       const name = (r[nameIdx] || "").toString().trim();
       const qty = toNum(r[qtyIdx]);
@@ -389,7 +432,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
         ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
         : avgPrice;
       if (type === "BUY" && isNaN(price)) continue;
-      trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price });
+      trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price, xfer });
     }
     trades.sort((a, b) => (a.ts - b.ts) || (a.idx - b.idx));
 
@@ -533,7 +576,9 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   const turnoverIdx = col("Total Amount (Turnover)", 6);
   const inclIdx = col("Total Amount with Expense (Incl STT)", 15);
 
-  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; }
+  // Mirrors ReplayTrade (this reader feeds the same squareOffIntraday); `xfer` marks a
+  // cross-portfolio transfer leg so the same-day square-off never nets it against a trade.
+  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; xfer?: boolean; }
   const trades: TradeRow[] = [];
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
@@ -541,6 +586,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     // Classify the stored action. A SPLIT rescales held lots (distinct type → excluded from
     // the intraday square-off, not a ₹0 add); Bonus/IPO/Rights are buy-side.
     const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
+    const xfer = isTransferType(r[typeIdx]);
     if (!type) continue;
     const name = (r[nameIdx] || "").toString().trim();
     const qty = toNum(r[qtyIdx]);
@@ -563,6 +609,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
       type,
       qty,
       price: isNaN(price) ? 0 : price,
+      xfer,
     });
   }
   if (trades.length === 0) throw new Error("True Entry has no parseable Buy/Sell rows.");
@@ -1030,7 +1077,12 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     // A Split RESCALES the held lots (keeps their acquisition dates), so it's kept
     // distinct from BUY; Bonus/IPO/Rights stay BUY (₹0 or priced add). Dividend etc.
     // keep their raw type and are dropped by the BUY/SELL/SPLIT steps below.
-    const txType = isSplitType(rawType) ? "SPLIT" : (ledgerSide(rawType) || rawType);
+    // A transfer gets its OWN txType rather than the BUY/SELL that ledgerSide reports.
+    // If it stayed "SELL" it would flow into deliverySells and be booked as a taxable
+    // disposal in LTST - the single most damaging outcome this feature can produce.
+    const txType = isSplitType(rawType) ? "SPLIT"
+      : isTransferType(rawType) ? (ledgerSide(rawType) === "SELL" ? "XFER_OUT" : "XFER_IN")
+      : (ledgerSide(rawType) || rawType);
     const qty = num((r[qtyIdx >= 0 ? qtyIdx : 4] || "0").toString());
     const rawAvg = num((r[avgPriceIdx >= 0 ? avgPriceIdx : 5] || "0").toString());
     const turnover = num((r[turnoverIdx >= 0 ? turnoverIdx : 6] || "0").toString());
@@ -1104,6 +1156,15 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
       if (resSell > 0) deliverySells.push({ ...proto, txType: "SELL", tradeClass: "Delivery", qty: resSell, avgPrice: avgSell, turnover: r2(avgSell * resSell) });
     }
   }
+  // Transfer legs deliberately bypass the same-day square-off above (a transfer is not a
+  // round-trip leg - netting it against a same-day trade would erase the movement and book
+  // it as intraday speculative income). They are appended directly: an IN leg is an
+  // acquisition at the carried cost, an OUT leg consumes lots and produces NO gain record.
+  const xfersOut: TERow[] = [];
+  for (const t of teData) {
+    if (t.txType === "XFER_IN") deliveryBuys.push(t);
+    else if (t.txType === "XFER_OUT") xfersOut.push(t);
+  }
   deliveryBuys.sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
   deliverySells.sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
 
@@ -1144,24 +1205,46 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
 
   // One date-ordered pass: BUY adds a lot, split/corporate action transforms queues,
   // SELL consumes lots FIFO. Same-date order: buys, then splits/actions, then sells.
-  type DEv = { ts: number; ord: number; buy?: TERow; sell?: TERow; ca?: CorpAction; split?: TERow };
+  type DEv = { ts: number; ord: number; buy?: TERow; sell?: TERow; ca?: CorpAction; split?: TERow; xferOut?: TERow };
   const devents: DEv[] = [];
   for (const b of deliveryBuys) devents.push({ ts: b.dateObj.getTime(), ord: 0, buy: b });
   for (const sp of splits) devents.push({ ts: sp.dateObj.getTime(), ord: 1, split: sp });
   for (const ca of corpActions) { const d = parseDate(ca.dateStr); devents.push({ ts: d ? d.getTime() : 0, ord: 1, ca }); }
   for (const s of deliverySells) devents.push({ ts: s.dateObj.getTime(), ord: 2, sell: s });
+  // ord 2 = alongside sells: an outgoing transfer consumes lots after the day's buys
+  // and corporate actions have been applied, exactly as a sale would.
+  for (const x of xfersOut) devents.push({ ts: x.dateObj.getTime(), ord: 2, xferOut: x });
   devents.sort((a, b) => (a.ts - b.ts) || (a.ord - b.ord));
 
   for (const ev of devents) {
     if (ev.buy) {
       const buy = ev.buy;
       const key = secKey(buy.isin, buy.stockName); if (!fifo[key]) fifo[key] = [];
-      fifo[key].push({ stockName: buy.stockName, isin: buy.isin, buyDate: buy.dateObj, buyDateStr: buy.tradeDate, qty: buy.qty, remaining: buy.qty, purPrice: buy.avgPrice, isOpening: false });
+      insertLotByTs(fifo[key],
+        { stockName: buy.stockName, isin: buy.isin, buyDate: buy.dateObj, buyDateStr: buy.tradeDate, qty: buy.qty, remaining: buy.qty, purPrice: buy.avgPrice, isOpening: false },
+        (l) => l.buyDate.getTime());
     } else if (ev.split) {
       applySplitFifo(ev.split);
     } else if (ev.ca) {
       const when = parseDate(ev.ca.dateStr) || OPEN_DATE;
       ev.ca.type === "Merger" ? applyMergerFifo(ev.ca, when) : applyDemergerFifo(ev.ca, when);
+    } else if (ev.xferOut) {
+      // TRANSFER OUT — consume the lots FIFO so the shares leave this book, and push
+      // NOTHING into allRecords. That omission IS the "no capital gain" mechanism: the
+      // sell branch below computes a gain and pushes an LTST row unconditionally, so a
+      // transfer must never reach it. The register (trxRegister) carries the explanatory
+      // note; LTST stays a pure tax computation with no non-taxable events in it.
+      const x = ev.xferOut;
+      const lots = fifo[secKey(x.isin, x.stockName)];
+      if (lots) {
+        let left = x.qty;
+        for (const lot of lots) {
+          if (left <= 1e-9) break;
+          if (lot.remaining <= 1e-9) continue;
+          const m = Math.min(lot.remaining, left);
+          lot.remaining -= m; left -= m;
+        }
+      }
     } else {
       const sell = ev.sell!;
       const key = secKey(sell.isin, sell.stockName);
