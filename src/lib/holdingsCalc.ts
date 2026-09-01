@@ -1184,7 +1184,10 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     const lots = fifo[secKey("", ca.from)] || [];
     const remCost = lots.reduce((s, l) => s + l.remaining * l.purPrice, 0);
     const factor = remCost > 0 ? Math.max(0, (remCost - ca.cost) / remCost) : 1;
-    for (const l of lots) l.purPrice = r2(l.purPrice * factor);
+    // r6, not r2 — see the matching note in trxRegister's demerger branch. Rounding a
+    // cost-per-share to paise loses basis in proportion to the quantity. These two must
+    // change together or the register and the LTST tab stop agreeing.
+    for (const l of lots) l.purPrice = r6(l.purPrice * factor);
     const nk = secKey("", ca.to); if (!fifo[nk]) fifo[nk] = [];
     const px = ca.sharesIn > 0 ? ca.cost / ca.sharesIn : 0;
     fifo[nk].push({ stockName: ca.to, isin: "", buyDate: when, buyDateStr: ca.dateStr, qty: ca.sharesIn, remaining: ca.sharesIn, purPrice: px, isOpening: false });

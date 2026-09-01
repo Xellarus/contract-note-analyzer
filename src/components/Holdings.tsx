@@ -4172,7 +4172,7 @@ export default function Holdings({
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={rb.error}>✗ Rebuild failed</span>
                     ))}
                     {trx && (trx.result ? (
-                      <span className="text-[10px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-1 rounded-lg" title={`Wrote "${trx.result.tabName}" + "${trx.result.holdingTabName}" — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
+                      <span className="text-[10px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-1 rounded-lg" title={`Wrote "${trx.result.tabName}" + "${trx.result.intradayTabName}" + "${trx.result.holdingTabName}" — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
                       </span>
                     ) : (
