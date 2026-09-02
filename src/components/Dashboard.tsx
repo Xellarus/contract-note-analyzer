@@ -14,6 +14,7 @@ import { computeNavTimeline, type NavResult } from '../lib/navTimeline';
 import PortfolioCharts from './PortfolioCharts';
 import ReturnsPanel from './ReturnsPanel';
 import { toast } from './ui/overlay';
+import { handleStaleChunk } from './ui/lazyImport';
 import CubeLoader from './ui/CubeLoader';
 import PriceStatusButton from './PriceStatusButton';
 import AllHoldingsTable from './AllHoldingsTable';
@@ -361,6 +362,9 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
       await downloadFactsheetPdf(sheet);
     } catch (e: any) {
       console.error('Factsheet failed', e);
+      // A chunk deployed out from under this tab is not a factsheet fault, and saying so would
+      // send the user looking for bad data. handleStaleChunk reloads and owns the message.
+      if (handleStaleChunk(e)) return;
       toast.error(`Could not build the factsheet — ${e?.message || 'unknown error'}`);
     } finally {
       setFactsheetBusy(false);

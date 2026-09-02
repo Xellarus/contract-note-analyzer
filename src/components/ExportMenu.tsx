@@ -13,6 +13,7 @@ import { Download, ChevronDown, FileText, FileSpreadsheet, FileType2, Loader2 } 
 import type { ReportDoc } from '../lib/reportDoc';
 import { downloadCsv } from '../lib/reportDoc';
 import { toast, confirmDialog } from './ui/overlay';
+import { handleStaleChunk } from './ui/lazyImport';
 
 type Fmt = 'csv' | 'xlsx' | 'pdf';
 
@@ -90,6 +91,9 @@ export default function ExportMenu({ doc, disabled = false }: { doc: () => Repor
       }
     } catch (e: any) {
       console.error(`${fmt.toUpperCase()} export failed`, e);
+      // The XLSX/PDF renderers and their ExcelJS/pdfmake chunks are all lazily loaded, so a
+      // redeploy mid-session lands here. That is not an export fault — see handleStaleChunk.
+      if (handleStaleChunk(e)) return;
       toast.error(`Could not build the ${fmt.toUpperCase()} — ${e?.message || 'unknown error'}`);
     } finally {
       setBusy(null);
