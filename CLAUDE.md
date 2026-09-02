@@ -20,12 +20,15 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 
 ## Test suites
 
-17 `tmp-*` files at the repo root are the de-facto test suite. No npm script runs them.
+28 `tmp-*` files at the repo root are the de-facto test suite. No npm script runs them.
 
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API (27) |
+| `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (78) |
+| `node tmp-trx-run.mjs` | Capital Gains register: both tabs, demerger restatement, asset-class refusal (61; 62 with `TRX_BASELINE` set) |
+| `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
 | `node tmp-xverify.mjs` | Cross-broker PDF extraction comparison |
@@ -63,6 +66,18 @@ no ISIN column, so an unlisted holding's identity is its name. When a classifica
 made (e.g. the Private Equities tab failed to load), **refuse to write rather than guess** — an
 unlisted sale held 12–24 months would otherwise land in the tax ledger as long-term, and nothing
 downstream can detect it. Roughly 40 Sheets read sites still swallow their errors.
+
+**Asset classes.** Three hand-maintained tabs of the shared scrip master name the non-listed
+holdings — `Private Equities`, `AIF`, `Mutual Fund` — and `ASSET_CLASSES` in
+`src/lib/privateEquities.ts` is the single registry of what each one means. PE and AIF are
+off-market and long-term at 730 days; **Mutual Fund has `ltDays: null` on purpose**, because
+equity-oriented is 12 months with STT, post-Apr-2023 debt is always short-term at slab, and
+other/specified is 24. `ltDaysFor` therefore returns `number | null` and **with no
+`strictNullChecks` a `days >= null` comparison compiles and coerces to `>= 0`, filing every such
+sale as LONG TERM under a green build** — every caller needs an explicit null branch. The
+capital-gains engines refuse those sales and report them in `unclassified`; the register's
+charge-conservation guard must exclude their charges too, or it fires and no register writes at
+all.
 
 **Scrip resolution.** `extractIsin` (`src/lib/brokers/utils.ts`) is shared by every parser and its
 regex **must** keep the trailing check digit (`IN[A-Z0-9]{9}[0-9]`) — without it, "INfrastructu"

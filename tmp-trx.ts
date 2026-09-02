@@ -73,7 +73,8 @@ const SCRIP_ROWS = [
   ['INE004A01012', 'DELTA POWER LIMITED', '500004', 'DELTA', ''],
 ];
 
-function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = []) {
+function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = [],
+                 aif: any[][] = [], mf: any[][] = []) {
   g.__ranges = {
     [`${PORTFOLIO}::True Entry!A:Z`]: trueEntry,
     [`${PORTFOLIO}::Corporate Actions!A:Z`]: corp.length ? corp : undefined,
@@ -83,6 +84,12 @@ function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = []) 
     // missing the master sets peFailed and the register refuses to write at all — which is
     // itself correct behaviour and is asserted separately below.
     [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`]: [['Name', 'ISIN']],
+    // The AIF and Mutual Fund tabs are read on every master load too. Left ABSENT by default
+    // (the stub throws "Unable to parse range", which the loader treats as a legitimate empty
+    // answer) so every existing fixture behaves exactly as before; the asset-class fixture
+    // below installs them explicitly.
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::AIF!A1:J5000`]: aif.length ? aif : undefined,
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Mutual Fund!A1:J5000`]: mf.length ? mf : undefined,
   };
   g.__firstTab = { [PORTFOLIO]: 'True Entry', [SCRIP_MASTER_SPREADSHEET_ID]: MASTER_TAB };
   g.__sheetTabs = { [PORTFOLIO]: ['True Entry', 'Opening Holdings', 'Corporate Actions'] };
@@ -419,6 +426,54 @@ export async function run() {
       pl.some((v: number) => Math.abs(v - (9690054.41 - 10916400)) < 0.02), `P/L seen: ${JSON.stringify(pl)}`);
     ok('C: BETA short-term gain is the sale less the cost carried in',
       pl.some((v: number) => Math.abs(v - (7777695 - 4941600)) < 0.02), `P/L seen: ${JSON.stringify(pl)}`);
+  }
+
+  // ── FIXTURE D — asset classes: AIF is PE-like, a MUTUAL FUND has no rule ──
+  //
+  // The point of this fixture is a NEGATIVE: a mutual-fund sale must appear in NEITHER P/L
+  // column. `ltDaysFor` returns null for MF, and with no strictNullChecks `days >= null`
+  // compiles and coerces to `>= 0`, which would file every one of them as LONG TERM under a
+  // green build. Only an explicit test can see that.
+  {
+    const AIF_ROWS = [['Company', 'ISIN'], ['HELION VENTURES FUND II', 'INE500A01019']];
+    const MF_ROWS = [['Company', 'ISIN'], ['PARAG PARIKH FLEXI CAP FUND', 'INF879O01027']];
+    const FIXTURE_D: any[][] = [
+      TE_HEADER,
+      // AIF: bought pre-FY, sold 20 months later -> SHORT term at 730 days, like PE.
+      te([2024, 6, 1], 'HELION VENTURES FUND II', 'INE500A01019', 'Buy', 100, 1000),
+      te([2025, 12, 1], 'HELION VENTURES FUND II', 'INE500A01019', 'Sell', 100, 1500),
+      // Mutual fund: held 20 months. Long at 12, short at 24, slab if debt - no answer.
+      te([2024, 6, 1], 'PARAG PARIKH FLEXI CAP FUND', 'INF879O01027', 'Buy', 200, 50),
+      te([2025, 12, 1], 'PARAG PARIKH FLEXI CAP FUND', 'INF879O01027', 'Sell', 200, 80),
+    ];
+
+    install(FIXTURE_D, [], [], AIF_ROWS, MF_ROWS);
+    const res = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const d = written(CG_TAB);
+    ok('D: delivery tab written', !!d);
+
+    eq('D: exactly one sale refused classification', res.unclassified.length, 1);
+    eq('D: and it is the MUTUAL FUND, not the AIF',
+      res.unclassified[0]?.name, 'PARAG PARIKH FLEXI CAP FUND');
+    eq('D: the whole quantity is reported, not a remnant', res.unclassified[0]?.qty, 200);
+
+    if (d) {
+      const flat = d.map(r => r.join('|')).join('\n');
+      ok('D: the AIF appears on the register', /HELION VENTURES/.test(flat));
+      // THE assertion. A ₹6,000 gain (200 x (80-50)) must not be sitting in a P/L column.
+      ok('D: the mutual fund is NOT on the register at all', !/PARAG PARIKH/.test(flat),
+        'an MF sale reached a tax tab');
+
+      const H = d[2];
+      const st = H.indexOf('P/L'), lt = H.indexOf('P/L', H.indexOf('P/L') + 1);
+      const pls = d.flatMap(r => [r[st], r[lt]]).filter(v => typeof v === 'number') as number[];
+      // The AIF gain is 100 x (1500-1000) = 50,000 less charges, and 20 months < 730 days,
+      // so it must be SHORT term - the concessional 12-month period does not apply.
+      ok('D: the AIF sale is short-term at 20 months (730-day rule, as PE)',
+        pls.some(v => Math.abs(v - 49990) < 30), `P/L seen: ${JSON.stringify(pls)}`);
+      ok('D: no 6,000 mutual-fund gain leaked into either P/L column',
+        !pls.some(v => Math.abs(v - 6000) < 30), `P/L seen: ${JSON.stringify(pls)}`);
+    }
   }
 
   // ── golden capture / comparison ───────────────────────────────────────────

@@ -234,6 +234,9 @@ export interface TrxRegisterResult {
   intradayTabName: string;
   holdingTabName: string;
   fyLabel: string;
+  /** FY sales omitted from BOTH P/L columns because their asset class has no decided
+   *  holding-period rule (currently: mutual funds). Reported so the gap is stated. */
+  unclassified: { name: string; isin: string; qty: number; ts: number }[];
   scrips: number;
   buyRows: number;
   sellRows: number;
@@ -473,6 +476,9 @@ export async function generateTrxRegister(
   events.sort((a, b) => (a.ts - b.ts) || (a.ord - b.ord) || (a.idx - b.idx));
 
   const fifo = new Map<string, Lot[]>();
+  // FY sales left out of both P/L columns because their class has no decided holding-period
+  // rule. Surfaced on the result so the gap is stated rather than discovered.
+  const unclassifiedSales: { name: string; isin: string; qty: number; ts: number }[] = [];
   const blocks = new Map<string, Block>();
   const block = (key: string): Block => {
     let b = blocks.get(key);
@@ -650,7 +656,23 @@ export async function generateTrxRegister(
         }
         continue;
       }
-      const ltDays = ltDaysFor(master, t.isin, t.name);
+      // Null = no decided holding-period rule (a mutual fund). The lots must still be
+      // consumed - the position moved - but the sale cannot be filed as short or long, so it is
+      // recorded as unclassified and left out of both P/L columns. Without this the `>= null`
+      // comparison coerces to `>= 0` and every such sale prints as LONG TERM in a tax document.
+      const ltDaysOrNull = ltDaysFor(master, t.isin, t.name);
+      if (ltDaysOrNull === null) {
+        let rem = t.qty;
+        for (const l of lots) {
+          if (rem <= 1e-9) break;
+          if (l.remaining <= 1e-9) continue;
+          const m = Math.min(l.remaining, rem);
+          l.remaining -= m; rem -= m;
+        }
+        if (inFY) unclassifiedSales.push({ name: t.name, isin: t.isin, qty: t.qty, ts: t.ts });
+        continue;
+      }
+      const ltDays = ltDaysOrNull;
       const salePrice = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
       let left = t.qty, ltQty = 0, ltGain = 0, stQty = 0, stGain = 0;
       for (const l of lots) {
@@ -1122,11 +1144,22 @@ export async function generateTrxRegister(
       expect.stamp += c.stamp; expect.sebi += c.sebi; expect.ipf += c.ipf; expect.dmat += c.dmat;
     };
     const inFy = (ts: number) => ts >= fyStartTs && ts < fyEndExclTs;
+    /**
+     * A sale whose asset class has no decided holding-period rule is deliberately not emitted,
+     * so its charges must not be EXPECTED either.
+     *
+     * Without this the guard fires on any portfolio holding a mutual fund and the whole register
+     * refuses to write - the check doing exactly its job, reporting a scrip whose charges went
+     * missing, because one had. Keyed on the same (isin|name) identity the sale carries.
+     */
+    const noRule = new Set(unclassifiedSales.map(u => `${(u.isin || '').toUpperCase()}|${normName(u.name)}`));
+    const hasRule = (isin: string, name: string) =>
+      !noRule.has(`${(isin || '').toUpperCase()}|${normName(name)}`);
     // Same three sources the emission draws from: unpaired trades, the residual legs of a
     // partial round trip, and the round trips themselves. Transfers realise nothing and
     // never reach a purchase or sale row, so their charges are not expected on either tab.
-    for (const t of trades) if (!pairedIdx.has(t.idx) && inFy(t.ts) && !t.xfer) add(t.charges);
-    for (const t of residualTrades) if (inFy(t.ts)) add(t.charges);
+    for (const t of trades) if (!pairedIdx.has(t.idx) && inFy(t.ts) && !t.xfer && hasRule(t.isin, t.name)) add(t.charges);
+    for (const t of residualTrades) if (inFy(t.ts) && hasRule(t.isin, t.name)) add(t.charges);
     for (const rt of intradayRTs) if (inFy(rt.ts)) { add(rt.buyCharges); add(rt.sellCharges); }
 
     const keys: (keyof Charges)[] = ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf", "dmat"];
@@ -1296,5 +1329,6 @@ export async function generateTrxRegister(
     buyRows: delivery.buyRows + intraday.buyRows,
     sellRows: delivery.sellRows + intraday.sellRows,
     unresolved: [...unresolvedMap.values()], master,
+    unclassified: unclassifiedSales,
   };
 }

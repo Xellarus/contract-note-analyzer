@@ -32,8 +32,56 @@ import { parseDMY } from "./dates";
  * stays one-way and cycle-free.
  */
 const PE_TAB = "Private Equities";
+const AIF_TAB = "AIF";
+const MF_TAB = "Mutual Fund";
+
+/**
+ * The NON-LISTED asset classes, each on its own hand-maintained tab of the shared scrip master.
+ * All three tabs share the identical column shape and reader; what differs is the POLICY the
+ * fold-in applies, which is why that lives here as data rather than as branches.
+ */
+export type AssetClassId = "PE" | "AIF" | "MF";
+
+export interface AssetClassPolicy {
+  id: AssetClassId;
+  /** The sheet tab this class is read from. */
+  tab: string;
+  /** Full name, for prose and report scopes. */
+  label: string;
+  /** Short badge text for a table cell. */
+  badge: string;
+  /**
+   * Long-term threshold in days, or NULL when the rule is deliberately not decided yet - the
+   * capital-gains engines must then REFUSE to classify a sale rather than pick a number.
+   *
+   * PE and AIF: 730. Unlisted securities, and AIF Cat I/II units are unlisted units.
+   *
+   * MF: null, on purpose. There is no single answer - an equity-oriented fund is long-term at
+   * 12 months WITH STT on redemption, a debt fund bought after 1-Apr-2023 is ALWAYS short-term
+   * at slab with no holding-period benefit at all, and other/specified funds sit at 24 months
+   * post-Jul-2024. Picking one would file the other two wrongly with nothing downstream able to
+   * detect it, so the classification is refused until the sheet says which kind each row is.
+   */
+  ltDays: number | null;
+  /**
+   * Off-market: no exchange leg, so Delivery is forced and STT / exchange turnover / SEBI / IPF
+   * cannot arise. True for PE and AIF. FALSE for MF - an equity-oriented redemption really does
+   * bear STT, and hiding the box would silently drop it from the cost basis.
+   */
+  offMarket: boolean;
+}
+
+export const ASSET_CLASSES: Record<AssetClassId, AssetClassPolicy> = {
+  PE: { id: "PE", tab: PE_TAB, label: "Private Equity", badge: "PE", ltDays: 730, offMarket: true },
+  AIF: { id: "AIF", tab: AIF_TAB, label: "AIF", badge: "AIF", ltDays: 730, offMarket: true },
+  MF: { id: "MF", tab: MF_TAB, label: "Mutual Fund", badge: "MF", ltDays: null, offMarket: false },
+};
+
+export const ASSET_CLASS_IDS: AssetClassId[] = ["PE", "AIF", "MF"];
 
 export interface PrivateEquityRow {
+  /** Which tab this row came from, so the fold-in knows which policy to apply. */
+  assetClass: AssetClassId;
   company: string;
   driveLink: string;
   isin: string;
@@ -44,7 +92,9 @@ export interface PrivateEquityRow {
   notes: string;
 }
 
-let _cache: { id: string; rows: PrivateEquityRow[]; ts: number } | null = null;
+// Keyed by `${spreadsheetId}::${assetClass}` - three tabs are read per master load and a
+// single-slot cache would have each one evict the last, turning a 60s cache into none.
+let _cache = new Map<string, { rows: PrivateEquityRow[]; ts: number }>();
 const TTL_MS = 60_000;
 
 /**
@@ -70,7 +120,7 @@ async function peBackoff<T>(fn: () => Promise<T>, tries = 4): Promise<T> {
   throw last;
 }
 
-export function invalidatePrivateEquityCache(): void { _cache = null; }
+export function invalidatePrivateEquityCache(): void { _cache = new Map(); }
 
 const toNum = (v: any): number => {
   if (typeof v === "number") return isFinite(v) ? v : 0;
@@ -95,21 +145,38 @@ const isoDate = (v: any): string => {
   return p ? `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}` : "";
 };
 
-export function parsePrivateEquityVals(vals: any[][]): PrivateEquityRow[] {
-  if (!vals || vals.length === 0) return [];
+/** Which column holds what. -1 = the sheet has no such column. */
+export interface PeColumns {
+  company: number;
+  driveLink: number;
+  isin: number;
+  valuation: number;
+  valuationDate: number;
+  notes: number;
+}
 
-  // Column order is read from the header. Detection order matters: "Valuation Date"
-  // contains "valuation", so the date test has to run first or the date column would be
-  // read as the price. Same shape of trap the scrip master's "Tally Name" hit.
-  const row0 = vals[0] || [];
+/**
+ * Work out the tab's column layout from its header row.
+ *
+ * Exported because the WRITER (`privateEquityWrite.ts`) has to place a new company in the same
+ * column this reader will look in. A second copy of these regexes would drift, and the failure
+ * mode is silent: a company name appended into the Drive column simply never appears as a
+ * company, so an unlisted holding stays classified as listed equity.
+ *
+ * Detection order matters: "Valuation Date" contains "valuation", so the date test has to run
+ * first or the date column would be read as the price. Same shape of trap the scrip master's
+ * "Tally Name" hit.
+ */
+export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColumns; width: number } {
+  const row0 = (vals && vals[0]) || [];
   const header = row0.map((h: any) => (h ?? "").toString().toLowerCase().trim());
   // Row 0 is a HEADER only if it reads like LABELS: a recognised keyword, and nothing that is
   // plainly a value. Keyword alone isn't enough — a Drive URL contains the word "drive", so a
   // headerless sheet's first company row would be swallowed as the header and vanish.
-  const hasKeyword = header.some((h) => /company|name|drive|link|folder|url|isin|valuation|value|note|remark|sector/.test(h));
+  const hasKeyword = header.some((h) => /company|name|drive|link|folder|url|isin|valuation|value|cmp|price|note|remark|sector/.test(h));
   const hasValueCell = row0.some((c: any) => typeof c === "number" || /^https?:\/\//i.test((c ?? "").toString().trim()));
   const hasHeader = hasKeyword && !hasValueCell;
-  const ci = { company: 0, driveLink: 1, isin: -1, valuation: -1, valuationDate: -1, notes: -1 };
+  const ci: PeColumns = { company: 0, driveLink: 1, isin: -1, valuation: -1, valuationDate: -1, notes: -1 };
   if (hasHeader) {
     let companySet = false, driveSet = false;
     header.forEach((h, idx) => {
@@ -117,15 +184,35 @@ export function parsePrivateEquityVals(vals: any[][]): PrivateEquityRow[] {
       if (/valuation date|value date|val date|as on|as at|as of/.test(h)) ci.valuationDate = idx;
       else if (/drive|folder|link|url|docs/.test(h)) { if (!driveSet) { ci.driveLink = idx; driveSet = true; } }
       else if (/isin/.test(h)) ci.isin = idx;
-      else if (/valuation|fair value|value per|price per|per share/.test(h)) ci.valuation = idx;
+      // "CMP" is the header the sheet actually uses for this. It matched none of the earlier
+      // words, so the whole column was being ignored and every unlisted holding read as
+      // unvalued - the column was there, filled in, and invisible.
+      else if (/valuation|fair value|value per|price per|per share|cmp|market price|current price|mkt/.test(h)) ci.valuation = idx;
       else if (/note|remark|comment/.test(h)) ci.notes = idx;
       else if (!companySet && /company|name|scrip|security|entity/.test(h)) { ci.company = idx; companySet = true; }
     });
-    // A header with no name-like column at all → fall back to column A, which is where
-    // the user was told to put the company.
-    if (!companySet) ci.company = 0;
+    // Clear the unmatched Drive default BEFORE the company fallback below. Leaving it at its
+    // initial 1 made the fallback treat column B as already spoken for, so a tab headed
+    // ISIN | Particulars | CMP found no free column and fell back onto the ISIN anyway.
     if (!driveSet) ci.driveLink = -1;
+
+    // A header with no name-like column at all → fall back to column A, which is where the
+    // user was told to put the company. But NOT if column A is some other column we already
+    // identified: the tab now leads with ISIN, and reading an ISIN as the company name gives
+    // every row a garbage identity while the real names go unread.
+    if (!companySet) {
+      const taken = new Set([ci.driveLink, ci.isin, ci.valuation, ci.valuationDate, ci.notes].filter(i => i >= 0));
+      ci.company = taken.has(0) ? header.findIndex((_, i) => !taken.has(i)) : 0;
+      if (ci.company < 0) ci.company = 0;   // nothing else to choose - A is all there is
+    }
   }
+  return { hasHeader, ci, width: row0.length };
+}
+
+export function parsePrivateEquityVals(vals: any[][], assetClass: AssetClassId = "PE"): PrivateEquityRow[] {
+  if (!vals || vals.length === 0) return [];
+
+  const { hasHeader, ci } = detectPeColumns(vals);
 
   const rows: PrivateEquityRow[] = [];
   const seen = new Set<string>();
@@ -138,6 +225,7 @@ export function parsePrivateEquityVals(vals: any[][]): PrivateEquityRow[] {
     if (seen.has(dedup)) continue;                       // first row wins, like the scrip master
     seen.add(dedup);
     rows.push({
+      assetClass,
       company,
       driveLink: ci.driveLink >= 0 ? cleanUrl(r[ci.driveLink]) : "",
       isin: ci.isin >= 0 ? (r[ci.isin] ?? "").toString().trim().toUpperCase() : "",
@@ -162,30 +250,43 @@ export function parsePrivateEquityVals(vals: any[][]): PrivateEquityRow[] {
  * Read UNFORMATTED so a valuation arrives as a number and a date as a serial, rather
  * than as whatever string the sheet's locale renders (see [[date-serials]]).
  */
-export async function loadPrivateEquities(spreadsheetId: string, opts?: { force?: boolean }): Promise<PrivateEquityRow[]> {
+export async function loadAssetClass(
+  spreadsheetId: string,
+  assetClass: AssetClassId,
+  opts?: { force?: boolean },
+): Promise<PrivateEquityRow[]> {
+  const tab = ASSET_CLASSES[assetClass].tab;
+  const key = `${spreadsheetId}::${assetClass}`;
   const now = Date.now();
-  if (!opts?.force && _cache && _cache.id === spreadsheetId && now - _cache.ts < TTL_MS) return _cache.rows;
+  const hit = _cache.get(key);
+  if (!opts?.force && hit && now - hit.ts < TTL_MS) return hit.rows;
 
   let res: any;
   try {
     res = await peBackoff(() => (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${PE_TAB}!A1:J5000`,
+      range: `${tab}!A1:J5000`,
       valueRenderOption: "UNFORMATTED_VALUE",
     }));
   } catch (e: any) {
     const msg = e?.result?.error?.message || e?.message || "";
     if (/unable to parse range/i.test(msg)) {
-      _cache = { id: spreadsheetId, rows: [], ts: now };   // tab absent — a real, cacheable answer
+      // Tab absent - a real, cacheable answer. An AIF or Mutual Fund tab that does not exist
+      // yet simply means the book holds none, which is the normal state for most portfolios.
+      _cache.set(key, { rows: [], ts: now });
       return [];
     }
     throw e;
   }
 
-  const rows = parsePrivateEquityVals(res?.result?.values || []);
-  _cache = { id: spreadsheetId, rows, ts: now };
+  const rows = parsePrivateEquityVals(res?.result?.values || [], assetClass);
+  _cache.set(key, { rows, ts: now });
   return rows;
 }
+
+/** Back-compat alias: the Private Equities tab specifically. */
+export const loadPrivateEquities = (spreadsheetId: string, opts?: { force?: boolean }) =>
+  loadAssetClass(spreadsheetId, "PE", opts);
 
 /** The tab's name, for messages that tell the user where to add a company. */
 export const PRIVATE_EQUITIES_TAB = PE_TAB;

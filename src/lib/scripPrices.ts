@@ -373,7 +373,7 @@ export function makeExceptionResolver(master: ScripMaster | null, prices: ScripP
  * ISIN still matches by name), then raw ISIN, then normalized name. Returns
  * undefined when there's no imported price for that security.
  */
-export function makePriceResolver(master: ScripMaster | null, prices: ScripPrice[]): (isin: string, name: string) => number | undefined {
+export function makePriceResolver(master: ScripMaster | null, prices: ScripPrice[]): (isin: string, name: string, lastTradePrice?: number) => number | undefined {
   const m = new Map<string, number>();
   for (const p of prices) {
     if (!(p.price > 0)) continue;
@@ -381,17 +381,31 @@ export function makePriceResolver(master: ScripMaster | null, prices: ScripPrice
     if (p.name) m.set('name:' + normName(p.name), p.price);
     if (master) { const e = lookupScrip(master, p.isin, p.name).entry; if (e) m.set('key:' + e.key, p.price); }
   }
-  return (isin: string, name: string) => {
+  return (isin: string, name: string, lastTradePrice?: number) => {
     const e = master ? lookupScrip(master, isin, name).entry : null;
     if (e) { const v = m.get('key:' + e.key); if (v !== undefined) return v; }
     if (isin) { const v = m.get('isin:' + isin.toUpperCase()); if (v !== undefined) return v; }
     const byName = m.get('name:' + normName(name));
     if (byName !== undefined) return byName;
-    // No fetched price — but an UNLISTED company can carry a hand-entered per-share fair
-    // value in the "Private Equities" tab. Checked LAST so a real market price always wins
-    // (a company that has since listed legitimately has both), and only when it's > 0, so a
-    // blank valuation still means "hold this at cost" rather than "worth nothing".
-    if (e && e.isPe && (e.peValuation ?? 0) > 0) return e.peValuation;
+    // No fetched price. An UNLISTED company has two fallbacks, in this order:
+    //
+    //  1. a hand-entered per-share fair value on the "Private Equities" tab - a deliberate act,
+    //     so it outranks anything derived;
+    //  2. the price it LAST ACTUALLY TRANSACTED at (column F of the Holding tab, passed in by
+    //     the caller). For a company no feed quotes, that is the only price evidence there is.
+    //     Without it the position is valued at its own average cost, which makes its unrealised
+    //     gain exactly zero by construction - a tautology, not a valuation.
+    //
+    // Both are checked LAST so a real market price always wins (a company that has since listed
+    // legitimately has both), and both only when > 0, so a blank still means "hold this at cost"
+    // rather than "worth nothing".
+    //
+    // Deliberately PE-ONLY: a listed security with no imported price stays at cost. Its price is
+    // the feed's job, and quietly substituting a months-old trade would hide a broken import.
+    if (e && e.assetClass) {
+      if ((e.peValuation ?? 0) > 0) return e.peValuation;
+      if (lastTradePrice !== undefined && lastTradePrice > 0) return lastTradePrice;
+    }
     return undefined;
   };
 }

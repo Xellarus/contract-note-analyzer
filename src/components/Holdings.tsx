@@ -13,8 +13,9 @@ import { gapi } from "gapi-script";
 import { persistGoogleToken, hasValidGoogleToken } from '../lib/googleAuth';
 import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedScrip } from '../lib/holdingsCalc';
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
-import { loadScripMaster, lookupScrip, normName, isPeScrip, peEntry, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
-import { PRIVATE_EQUITIES_TAB } from '../lib/privateEquities';
+import { loadScripMaster, lookupScrip, normName, isPeScrip, assetClassOf, peEntry, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { PRIVATE_EQUITIES_TAB, ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
+import { setPrivateEquityCmp } from '../lib/privateEquityWrite';
 import { loadScripPrices, invalidatePriceCache, ScripPrice, PriceSource } from '../lib/scripPrices';
 import { refreshYahooPrices, hasYahooWebApp } from '../lib/yahooPrices';
 import PriceStatusButton from './PriceStatusButton';
@@ -117,6 +118,13 @@ interface SheetHolding {
   quantity: number;
   avgBuyPrice: number;
   investedValue: number;
+  /** Column F: the price this scrip last actually transacted at. 0 when it never has (a
+   *  position carried in from Opening Holdings and never traded since), or when the Holding
+   *  tab predates the column - in which case an unlisted position still shows at cost until
+   *  the next rebuild, which is the safe way round. */
+  lastTradePrice?: number;
+  /** Column G: Sheets serial of that trade. `formatDMY` reads a bare serial directly. */
+  lastTradeDate?: number;
 }
 
 interface Transaction {
@@ -246,6 +254,10 @@ interface DisplayHolding {
   // which is a different question, and the one that decides between a figure and "at cost".
   peValuation?: number;
   peValuationDate?: string;
+  /** The price this unlisted company last transacted at, and when (Sheets serial). Used when
+   *  no valuation was entered - it is real evidence, where the average cost is none. */
+  lastTradePrice?: number;
+  lastTradeDate?: number;
   driveLink?: string;
   original: any;
 }
@@ -284,6 +296,8 @@ export default function Holdings({
   onReopenHandled
 }: HoldingsProps) {
   const [sheetCmpOverrides, setSheetCmpOverrides] = useState<Record<string, number>>({});
+  /** Which unlisted holding's CMP is being written to the Private Equities tab right now. */
+  const [savingPeCmp, setSavingPeCmp] = useState<string | null>(null);
 
   // Drilldown states
   const [selectedStock, setSelectedStock] = useState<SheetHolding | PortfolioHolding | null>(null);
@@ -386,15 +400,22 @@ export default function Holdings({
   // Real current price for a holding (undefined when we have no imported price for it).
   // Mirrors makePriceResolver in scripPrices.ts, including its private-equity fallback —
   // the two must agree or a stock's page would value a position differently from the AUM.
-  const getRealCmp = (isin: string, name: string): number | undefined => {
+  const getRealCmp = (isin: string, name: string, lastTradePrice?: number): number | undefined => {
     const e = scrip ? lookupScrip(scrip, isin, name).entry : null;
     if (e) { const v = priceMap.get('key:' + e.key); if (v !== undefined) return v; }
     if (isin) { const v = priceMap.get('isin:' + isin.toUpperCase()); if (v !== undefined) return v; }
     const byName = priceMap.get('name:' + normName(name));
     if (byName !== undefined) return byName;
-    // An unlisted company has no fetched price, but may carry a hand-entered per-share
-    // valuation in the Private Equities tab. Checked last, so a real price always wins.
-    if (e && e.isPe && (e.peValuation ?? 0) > 0) return e.peValuation;
+    // An unlisted company has no fetched price. Two fallbacks, most authoritative first: a
+    // hand-entered per-share valuation from the Private Equities tab, then the price it last
+    // actually transacted at. Both checked last, so a real market price always wins. PE only -
+    // substituting a stale trade for a LISTED stock would hide a broken price import.
+    // Must stay in step with makePriceResolver (scripPrices.ts) or a stock's page would value
+    // its position differently from the AUM.
+    if (e && e.assetClass) {
+      if ((e.peValuation ?? 0) > 0) return e.peValuation;
+      if (lastTradePrice !== undefined && lastTradePrice > 0) return lastTradePrice;
+    }
     return undefined;
   };
 
@@ -499,7 +520,9 @@ export default function Holdings({
   // ledger and both count toward this account's totals; this only narrows the list. Deliberately
   // not persisted (like showSold) — a filter silently restored on a later visit would show an
   // account at a fraction of its real value with nothing on screen explaining why.
-  const [assetClass, setAssetClass] = useState<'all' | 'eq' | 'pe'>('all');
+  // 'all' | 'eq' | one per non-listed class. Derived from the registry so a new tab needs no
+  // change here.
+  const [assetClass, setAssetClass] = useState<'all' | 'eq' | AssetClassId>('all');
   const [soldHoldings, setSoldHoldings] = useState<SheetHolding[]>([]);
   const [isLoadingSold, setIsLoadingSold] = useState(false);
   const [rebuildingHoldings, setRebuildingHoldings] = useState(false);
@@ -563,7 +586,6 @@ export default function Holdings({
   const [portfolioRows, setPortfolioRows] = useState<Record<string, { name: string; isin: string; qty: number; invested: number }[]>>({});
   const [isLoadingSheet, setIsLoadingSheet] = useState(false);
   const [sheetError, setSheetError] = useState<string | null>(null);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
 
   // original local portfolios state
   const [searchTerm, setSearchTerm] = useState('');
@@ -730,7 +752,9 @@ export default function Holdings({
     try {
       const response = await (gapi.client as any).sheets.spreadsheets.values.get({
         spreadsheetId: spreadsheetId,
-        range: `Holding!A:E`,
+        // A:G - F is Last Trade Price, G its date. Both appended by rebuildHoldingTab, so a
+        // tab written before they existed simply returns short rows.
+        range: `Holding!A:G`,
       });
 
       const rows = response?.result?.values || [];
@@ -756,6 +780,8 @@ export default function Holdings({
         const qty = parseFloat((row[2] || "").toString().replace(/,/g, "").trim());
         const avgPrice = parseFloat((row[3] || "").toString().replace(/,/g, "").trim());
         const investedVal = parseFloat((row[4] || "").toString().replace(/,/g, "").trim());
+        const lastPx = parseFloat((row[5] || "").toString().replace(/,/g, "").trim());
+        const lastDt = parseFloat((row[6] || "").toString().replace(/,/g, "").trim());
 
         if (!companyName) continue;
 
@@ -771,6 +797,8 @@ export default function Holdings({
         parsed.push({
           companyName,
           isin,
+          lastTradePrice: isNaN(lastPx) ? undefined : lastPx,
+          lastTradeDate: isNaN(lastDt) ? undefined : lastDt,
           quantity: qty,
           avgBuyPrice: avgPrice,
           investedValue: actualInvested
@@ -786,9 +814,14 @@ export default function Holdings({
       // navigate away (the card falls back to this list once it's no longer the active one).
       setPortfolioRows(prev => ({
         ...prev,
-        [portfolio]: parsed.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity, invested: h.investedValue })),
+        // `lastPx` matters here as much as in the card-only loader: without it the ACTIVE
+        // portfolio's card values an unlisted holding at cost while its own grid values it at
+        // the last traded price, and the same account reads two different totals on one screen.
+        [portfolio]: parsed.map(h => ({
+          name: h.companyName, isin: h.isin, qty: h.quantity, invested: h.investedValue,
+          lastPx: h.lastTradePrice,
+        })),
       }));
-      setLastSyncedAt(new Date());
     } catch (err: any) {
       console.error("Fetch holdings error:", err);
       if (!silent) {
@@ -881,11 +914,12 @@ export default function Holdings({
     if (!token || !token.access_token) return;
     try {
       const res = await (gapi.client as any).sheets.spreadsheets.values.get({
-        spreadsheetId, range: `Holding!A:E`,
+        // A:G so an unlisted position on a card is valued the same way the grid values it.
+        spreadsheetId, range: `Holding!A:G`,
       });
       const rows = res?.result?.values || [];
       let total = 0;
-      const held: { name: string; isin: string; qty: number; invested: number }[] = [];
+      const held: { name: string; isin: string; qty: number; invested: number; lastPx?: number }[] = [];
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row || row.length === 0) continue;
@@ -895,10 +929,11 @@ export default function Holdings({
         const qty = parseFloat((row[2] || "").toString().replace(/,/g, "").trim());
         const avg = parseFloat((row[3] || "").toString().replace(/,/g, "").trim());
         const inv = parseFloat((row[4] || "").toString().replace(/,/g, "").trim());
+        const lastPx = parseFloat((row[5] || "").toString().replace(/,/g, "").trim());
         if (isNaN(qty) || isNaN(avg)) continue;
         const invested = isNaN(inv) ? qty * avg : inv;
         total += invested;
-        held.push({ name, isin, qty, invested });
+        held.push({ name, isin, qty, invested, lastPx: isNaN(lastPx) ? undefined : lastPx });
       }
       setPortfolioTotals(prev => ({ ...prev, [pid]: total }));
       setPortfolioRows(prev => ({ ...prev, [pid]: held }));
@@ -951,6 +986,16 @@ export default function Holdings({
       const result = await rebuildHoldingTab(spreadsheetId);
       setHoldingRebuildStatus({ pid, result });
       setScripReview(result.unresolved.length > 0 ? { pid, master: result.master, unresolved: result.unresolved } : null);
+      // The rebuild also refreshes unlisted CMPs on the shared Private Equities tab. Reported
+      // out loud both ways: a silent write to a shared sheet is not something to discover later,
+      // and a silent FAILURE would leave a stale price looking authoritative.
+      if (result.peCmpError) {
+        toast.error(`Holding rebuilt, but unlisted CMPs were not updated — ${result.peCmpError}`);
+      } else if (result.peCmpWritten.length > 0) {
+        const names = result.peCmpWritten.slice(0, 4).map(w => w.company).join(', ');
+        toast.info(`Updated the CMP of ${result.peCmpWritten.length} unlisted ${result.peCmpWritten.length === 1 ? 'company' : 'companies'} on the ${PRIVATE_EQUITIES_TAB} tab: ${names}${result.peCmpWritten.length > 4 ? '…' : ''}`);
+        loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).then(setScrip).catch(() => {});
+      }
       if (result.nameCollisions.length > 0) {
         const names = result.nameCollisions.slice(0, 6).map(c => `"${c.name}"`).join(', ');
         toast.info(`⚠ ${result.nameCollisions.length} name(s) map to 2+ scrip-master entries — those trades may split instead of merging into one holding: ${names}${result.nameCollisions.length > 6 ? '…' : ''}. Keep ONE master entry per stock (old name as an alias, same ISIN).`);
@@ -1943,8 +1988,10 @@ export default function Holdings({
       type = "PEQ";
       cleanName = name.replace(/PEQ/gi, "").replace(/PRE-EQUITY/gi, "").trim();
     }
-    // An unlisted company on the Private Equities list wins over any name-derived guess.
-    if (isPeScrip(scrip, isin, name)) type = "PE";
+    // A row on ANY non-listed tab wins over the name-derived guess, and carries which tab it
+    // came from ("PE" / "AIF" / "MF") - the segment toggle and every badge read this.
+    const cls = assetClassOf(scrip, isin, name);
+    if (cls) type = cls;
 
     cleanName = cleanName.replace(/\s+/g, ' ').replace(/"/g, '');
     return { type, cleanName };
@@ -2304,23 +2351,57 @@ export default function Holdings({
     setEditingPriceValue(currentVal.toString());
   };
 
-  const handleSavePriceEdit = (id: string) => {
+  /**
+   * Save an edited CMP.
+   *
+   * For an UNLISTED company this is now PERSISTED to the "Private Equities" tab, because that
+   * tab is where its price actually lives - the previous behaviour put it in React state, so it
+   * vanished on reload and never reached the Dashboard or any report. For a listed security it
+   * stays a local override on purpose: its price belongs to the feed, and writing a typed number
+   * into the shared Prices tab would be overwritten by the next refresh anyway.
+   */
+  const handleSavePriceEdit = async (id: string) => {
     const val = parseFloat(editingPriceValue);
-    if (!isNaN(val) && val >= 0) {
-      if (activePortfolio === 'local') {
-        setHoldings(prev => prev.map(h => h.id === id ? { ...h, currentPrice: val } : h));
-      } else {
-        const matched = displayHoldings.find(item => item.id === id);
-        if (matched) {
-          const key = matched.isin || matched.name;
-          setSheetCmpOverrides(prev => ({
-            ...prev,
-            [key]: val
-          }));
-        }
-      }
-    }
     setEditingPriceId(null);
+    if (isNaN(val) || val < 0) return;
+
+    if (activePortfolio === 'local') {
+      setHoldings(prev => prev.map(h => h.id === id ? { ...h, currentPrice: val } : h));
+      return;
+    }
+
+    const matched = displayHoldings.find(item => item.id === id);
+    if (!matched) return;
+    const key = matched.isin || matched.name;
+    // Applied locally first either way, so the grid reflects the edit immediately rather than
+    // after a round trip to Sheets.
+    setSheetCmpOverrides(prev => ({ ...prev, [key]: val }));
+
+    if (matched.type !== 'PE') return;                      // listed → local override only
+
+    setSavingPeCmp(key);
+    try {
+      const r = await setPrivateEquityCmp(
+        SCRIP_MASTER_SPREADSHEET_ID, matched.isin || '', matched.name, val, Date.now(),
+      );
+      if (r.noCmpColumn) {
+        toast.error(`Add a "CMP" column to the ${PRIVATE_EQUITIES_TAB} tab — there is nowhere to save this.`);
+      } else if (r.written.length === 0) {
+        const why = r.skipped[0]?.reason;
+        toast.error(why === 'no-row'
+          ? `${matched.name} isn’t on the ${PRIVATE_EQUITIES_TAB} tab, so its CMP can’t be saved there.`
+          : `Couldn’t save the CMP for ${matched.name}.`);
+      } else {
+        toast.success(`${matched.name} CMP saved to the ${PRIVATE_EQUITIES_TAB} tab.`);
+        // The write invalidated the master's cache; reload so every other view (Dashboard, AUM,
+        // reports) reads the new figure instead of this page's local override.
+        loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).then(setScrip).catch(() => {});
+      }
+    } catch (e: any) {
+      toast.error(`Couldn’t save the CMP — ${e?.result?.error?.message || e?.message || 'unknown error'}`);
+    } finally {
+      setSavingPeCmp(null);
+    }
   };
 
   const getCompanySymbolAndSector = (name: string, isin: string) => {
@@ -2427,7 +2508,7 @@ export default function Holdings({
         const overrideKey = h.isin || h.companyName;
         let cmp = sheetCmpOverrides[overrideKey];
         if (cmp === undefined) {
-          const real = getRealCmp(h.isin, h.companyName);
+          const real = getRealCmp(h.isin, h.companyName, h.lastTradePrice);
           if (real !== undefined) {
             cmp = real;                          // imported screener price
           } else {
@@ -2474,6 +2555,8 @@ export default function Holdings({
           discrepancy,
           peValuation: peInfo?.peValuation,
           peValuationDate: peInfo?.peValuationDate,
+          lastTradePrice: h.lastTradePrice,
+          lastTradeDate: h.lastTradeDate,
           driveLink: peInfo?.driveLink,
           original: h
         };
@@ -2490,18 +2573,26 @@ export default function Holdings({
   // is selected, or the same portfolio would read differently here than on the picker page and
   // on the Dashboard. The segment's own subtotal is shown beside the toggle instead.
   //
-  // `peCount` is the account CENSUS — every unlisted row, including a negative-quantity one,
-  // since those are ledger errors that must stay visible and flagged as a discrepancy
-  // [[holdings-edit-discrepancy]]. It answers "does this account hold private equity at all",
-  // which is what gates the toggle, so it must NOT move with the search box.
+  // The account CENSUS per class is `classCensus` below - every row of that class, including a
+  // negative-quantity one, since those are ledger errors that must stay visible and flagged as a
+  // discrepancy [[holdings-edit-discrepancy]]. It answers "does this account hold this class at
+  // all", which is what gates a segment, so it must NOT move with the search box.
   // `peHoldings` / `peValue` / `peAtCost` are the money, so they take only real positions.
-  const peCount = displayHoldings.filter(h => h.type === 'PE').length;
   const peHoldings = displayHoldings.filter(h => h.type === 'PE' && !h.sold && h.quantity > 0);
   const peValue = peHoldings.reduce((s, h) => s + h.currentValue, 0);
-  const peAtCost = peHoldings.filter(h => !((h.peValuation ?? 0) > 0)).length;
+  // Genuinely at cost = no valuation AND never transacted. A position valued at its last
+  // trade is NOT at cost, and counting it as such would make the "enter a valuation" prompt
+  // nag about companies that already have a defensible price.
+  const peAtCost = peHoldings.filter(h => !((h.peValuation ?? 0) > 0) && !((h.lastTradePrice ?? 0) > 0)).length;
 
+  /** Every non-listed class id, for the "is this listed" test. */
+  const NON_LISTED = new Set<string>(ASSET_CLASS_IDS);
   const inClass = (h: DisplayHolding): boolean =>
-    assetClass === 'all' ? true : assetClass === 'pe' ? h.type === 'PE' : h.type !== 'PE';
+    assetClass === 'all' ? true
+      : assetClass === 'eq' ? !NON_LISTED.has(h.type)
+      // Equity means "on none of the non-listed tabs". Testing `!== 'PE'` would have kept the
+      // AIF and mutual-fund rows in the Equity segment the moment those tabs existed.
+      : h.type === assetClass;
 
   const matchesSearch = (h: DisplayHolding): boolean => {
     const t = searchTerm.toLowerCase();
@@ -2517,8 +2608,17 @@ export default function Holdings({
   // ("aero" → All 2 · Equity 1 · Private Equity 1). The disabled test still uses the census
   // above, or a search that happens to exclude the PE rows would disable the segment mid-typing.
   const searchedHoldings = displayHoldings.filter(matchesSearch);
-  const peShown = searchedHoldings.filter(h => h.type === 'PE').length;
-  const segmentCounts = { all: searchedHoldings.length, pe: peShown, eq: searchedHoldings.length - peShown };
+  const nonListedShown = searchedHoldings.filter(h => NON_LISTED.has(h.type)).length;
+  const segmentCounts: Record<string, number> = {
+    all: searchedHoldings.length,
+    // Equity is everything on NO non-listed tab, so it subtracts all of them, not just PE.
+    eq: searchedHoldings.length - nonListedShown,
+    ...Object.fromEntries(ASSET_CLASS_IDS.map(id =>
+      [id, searchedHoldings.filter(h => h.type === id).length])),
+  };
+  /** Account census per class - what gates a segment. Never moves with the search box. */
+  const classCensus: Record<string, number> = Object.fromEntries(
+    ASSET_CLASS_IDS.map(id => [id, displayHoldings.filter(h => h.type === id).length]));
 
   const filteredHoldings = searchedHoldings.filter(inClass);
 
@@ -2546,8 +2646,11 @@ export default function Holdings({
   // unlisted holdings while "Private Equity" is active would otherwise leave the grid empty with
   // its own filter greyed out — the control that caused it unable to undo it.
   useEffect(() => {
-    if (assetClass === 'pe' && scrip !== null && peCount === 0) setAssetClass('all');
-  }, [assetClass, scrip, peCount]);
+    if (assetClass !== 'all' && assetClass !== 'eq'
+        && scrip !== null && classCensus[assetClass] === 0) setAssetClass('all');
+    // Depend on the ONE count that matters, not the whole map: `classCensus` is rebuilt every
+    // render, so passing it would re-run this effect on every render for nothing.
+  }, [assetClass, scrip, classCensus[assetClass as string] ?? -1]);
 
   const sortedHoldings = [...filteredHoldings].sort((a, b) => {
     let aVal: any = a[sortField as keyof DisplayHolding] || '';
@@ -2645,21 +2748,44 @@ export default function Holdings({
     const investedValue = isLocal ? (quantity * avgBuyPrice) : (selectedStock as SheetHolding).investedValue;
 
     const { type: seriesType, cleanName } = getCompanyDisplayInfo(name, isin);
-    const inferredSymbol = (selectedStock as any).symbol || (cleanName.split(' ')[0] || "STOCK").toUpperCase();
 
     // Resolve NSE / BSE / ISIN from the shared scrip master (same sheet).
     const scripEntry = scrip ? lookupScrip(scrip, isin, name).entry : null;
-    const nseSymbol = scripEntry?.nse || (selectedStock as any).symbol || inferredSymbol;
-    const bseCode = scripEntry?.bse || '';
     const displayIsin = isin || scripEntry?.isin || '';
-    // Real exchange identifiers only (never the inferred first-word symbol) — so the
-    // Screener link is either correct or absent, never a 404-y guess.
-    const screenerHref = screenerUrl(scripEntry?.nse, scripEntry?.bse);
     // Unlisted company? Then it has a Drive folder of documents instead of a Screener page,
-    // and its long-term holding period is 24 months rather than 12.
+    // and its long-term holding period is 24 months rather than 12. Declared BEFORE the
+    // exchange identifiers because they now depend on it.
     const peInfo = peEntry(scrip, isin, name);
+
+    /**
+     * Exchange identifiers: the scrip master, or nothing.
+     *
+     * `nseSymbol` used to read `scripEntry?.nse || selectedStock.symbol || inferredSymbol`,
+     * where `inferredSymbol` was THE FIRST WORD OF THE COMPANY NAME, UPPERCASED. So anything
+     * the master didn't match displayed a confident "NSE: <GUESS>" for a ticker that exists on
+     * no exchange - and an unlisted company matches no ticker by definition, so every single
+     * one of them showed a fabricated symbol. `selectedStock.symbol` is no better a source:
+     * `getCompanySymbolAndSector` falls back to a name-derived guess and finally to the literal
+     * string "PORTFOLIO".
+     *
+     * An UNLISTED company has no exchange identity at all. Both pills are suppressed outright,
+     * even if a contradictory ticker sits on its master entry (foldPrivateEquities warns about
+     * that case) - the sheet says unlisted, so ISIN is the identity and the only thing shown.
+     *
+     * This is the rule the Screener link below has always followed. The pills just weren't
+     * held to it, so they asserted an identifier the app itself refused to build a URL from.
+     */
+    const nseSymbol = peInfo ? '' : (scripEntry?.nse || '');
+    const bseCode = peInfo ? '' : (scripEntry?.bse || '');
+    // Either correct or absent, never a 404-y guess - and never for an unlisted company.
+    const screenerHref = peInfo ? '' : screenerUrl(scripEntry?.nse, scripEntry?.bse);
     const driveHref = peInfo?.driveLink || '';
+    // NULL when this security's class has no decided holding-period rule (a mutual fund).
+    // It must NOT fall through as a number: `now - null * 86400000` is `now`, which makes
+    // nothing long-term, while `ageDays > null` is `> 0`, which makes EVERYTHING long-term -
+    // the same page would then disagree with itself. No strictNullChecks here to catch either.
     const ltDays = ltDaysFor(scrip, isin, name);
+    const ltKnown = ltDays !== null;
 
     // Compute CMP values — prefer the imported screener price; otherwise value at
     // cost once any prices exist, else fall back to the legacy placeholder.
@@ -2667,7 +2793,9 @@ export default function Holdings({
     if (cleanName.toLowerCase().includes("adani")) {
       defaultCmp = 2908.80;
     }
-    const realDetailCmp = getRealCmp(isin, name);
+    const detailLastPx = isLocal ? undefined : (selectedStock as SheetHolding).lastTradePrice;
+    const detailLastDt = isLocal ? undefined : (selectedStock as SheetHolding).lastTradeDate;
+    const realDetailCmp = getRealCmp(isin, name, detailLastPx);
     if (realDetailCmp !== undefined) defaultCmp = realDetailCmp;
     else if (priceRows.length > 0) defaultCmp = avgBuyPrice;
     const cmpPrice = customCmp !== null ? customCmp : defaultCmp;
@@ -2908,8 +3036,9 @@ export default function Holdings({
     //
     // The threshold is 12 months for listed equity but 24 for an UNLISTED company, so this
     // is derived from `ltDays` rather than fixed at one year.
-    const ltCutoffTs = Date.now() - ltDays * 86400000;
-    const longTermQty = hasTransactions
+    const ltCutoffTs = ltKnown ? Date.now() - ltDays! * 86400000 : 0;
+    // Undecided rule → report 0 long-term rather than a number derived from a guess.
+    const longTermQty = hasTransactions && ltKnown
       ? filteredInventory.reduce((s, l) => { const ts = parseDateStr(l.date); return s + (ts > 0 && ts < ltCutoffTs ? l.remainingQty : 0); }, 0)
       : 0;
     const totalHoldingValue = (soldOut || detailDiscrepancy) ? 0 : finalHoldingQty * cmpPrice;
@@ -2939,10 +3068,12 @@ export default function Holdings({
     const computedXirr = detailDiscrepancy ? 0 : calculateXIRR(cashFlows);
     const xirrValue = detailDiscrepancy ? 0 : (computedXirr !== 0 ? computedXirr : changePct);
 
-    // Portfolio profile markers
+    // Whose holding this is. The ACCOUNT is deliberately not shown here any more - the page you
+    // came from already names it and Back returns to it, so repeating "Name/Code" on every
+    // stock was noise. `portfolioLabel` went with it rather than being left dead: this project
+    // has no `noUnusedLocals`, so an orphaned const compiles silently and reads as still-used.
     const _p = portfolioById(activePortfolio);
     const clientName = activePortfolio === 'local' ? 'Local Sandbox User' : (_p?.label ?? activePortfolio);
-    const portfolioLabel = activePortfolio === 'local' ? 'Local Sandbox Portfolio' : (_p ? `${_p.label}/${_p.code}` : activePortfolio);
 
     const formatNum = (v: number) => {
       return new Intl.NumberFormat('en-IN').format(v);
@@ -3082,7 +3213,6 @@ export default function Holdings({
             
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 font-medium pt-1">
               <div id="detail-client-meta">Client Name: <strong className="text-slate-800 font-bold">{clientName}</strong></div>
-              <div id="detail-portfolio-meta">Portfolio Name/Code: <strong className="text-slate-800 font-semibold">{portfolioLabel}</strong></div>
             </div>
 
             {/* This page is where a wrong holding period is actually READ — the long-term badges
@@ -3123,18 +3253,23 @@ export default function Holdings({
             </div>
 
             {/* CMP Interactive Panel. An unlisted company has no "current market price" — the
-                figure is either a hand-entered valuation from the Private Equities tab or its
-                own cost, so the label says which rather than implying a market. */}
+                figure is a hand-entered valuation, the price it last transacted at, or its own
+                cost, so the label says WHICH rather than implying a market. Showing "CMP" over
+                an average cost was the thing that made the number look like a quote. */}
             <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl mt-1">
               <span
                 className="text-[10px] uppercase font-black text-slate-400"
                 title={peInfo
                   ? (peInfo.peValuation
-                      ? `Valuation from the Private Equities tab${peInfo.peValuationDate ? `, as on ${formatDMY(peInfo.peValuationDate)}` : ''}`
-                      : 'No valuation entered — carried at cost')
+                      ? `Valuation from the ${PRIVATE_EQUITIES_TAB} tab${peInfo.peValuationDate ? `, as on ${formatDMY(peInfo.peValuationDate)}` : ''}`
+                      : (detailLastPx ?? 0) > 0
+                        ? `No valuation entered — valued at the price it last traded at${detailLastDt ? ` on ${formatDMY(detailLastDt)}` : ''}. Enter a valuation on the ${PRIVATE_EQUITIES_TAB} tab to override.`
+                        : 'No valuation entered and never traded — carried at cost')
                   : undefined}
               >
-                {peInfo ? (peInfo.peValuation ? 'VALUATION' : 'AT COST') : 'CMP'}
+                {peInfo
+                  ? (peInfo.peValuation ? 'VALUATION' : (detailLastPx ?? 0) > 0 ? 'LAST TRADE' : 'AT COST')
+                  : 'CMP'}
               </span>
               {isEditingCmp ? (
                 <div className="flex items-center gap-1">
@@ -3747,7 +3882,9 @@ export default function Holdings({
                           // Opening lots carry their own long-term flag from the reconstruction;
                           // regular FY26 lots turn long-term at the security's own threshold —
                           // 365 days listed, 730 for an unlisted company (see ltDays).
-                          const isLong = lot.isOpening ? !!lot.longTerm : ageDays > ltDays;
+                          // An undecided rule shows as neither long nor short: the lot is real,
+                          // its classification is not ours to invent.
+                          const isLong = lot.isOpening ? !!lot.longTerm : (ltKnown && ageDays > ltDays!);
 
                           return (
                             <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
@@ -3936,7 +4073,7 @@ export default function Holdings({
         for (const r of rows) {
           if (!(r.qty > 0)) continue;                 // negative qty = a ledger error; never valued (matches the holdings list)
           investedValue += r.invested;
-          const cmp = getRealCmp(r.isin, r.name);
+          const cmp = getRealCmp(r.isin, r.name, r.lastPx);
           const avg = r.qty > 0 ? r.invested / r.qty : 0;
           const px = (cmp !== undefined && cmp > 0) ? cmp : avg;   // no price yet → hold at cost
           currentValue += r.qty * px;
@@ -4010,6 +4147,9 @@ export default function Holdings({
         onClose={() => setShowAddTrade(false)}
         defaultPortfolio={activePortfolio === 'local' ? DEFAULT_PORTFOLIO_ID : activePortfolio}
         master={scrip}
+        // Recording from the "Private Equity" segment means an unlisted trade. Only scopes the
+        // drawer's form - the saved row is still classified from the scrip master.
+        scope={assetClass === 'pe' ? 'pe' : undefined}
         holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
         onSaved={(pid) => { if (pid === activePortfolio) fetchSheetHoldings(pid, true); }}
       />
@@ -4017,11 +4157,32 @@ export default function Holdings({
       {editEntryModal}
       {expenseModal}
       {corpActionEditModal}
-      {lastPriceUpdate && (
+      {/* Rendered whether or not a timestamp exists. Gating it on `lastPriceUpdate` would mean a
+          sheet whose prices have NEVER been fetched shows no control at all - the affordance
+          appearing only once its own precondition is met, which is unreachable by definition. */}
+      {activePortfolio !== 'local' && (
         <div className="flex justify-end">
-          <span className="text-[11px] text-slate-400">
-            CMP last updated: <span className="font-semibold text-slate-500">{formatDMYTime(lastPriceUpdate)}</span> IST
-          </span>
+          {/* The timestamp IS the refresh control - the separate "Refresh Prices" button is gone.
+              Same text, same size, same colours: a <button> reset to inherit so nothing about the
+              line changes until it is hovered or running. While running it says so in place,
+              because the only feedback a text control can give is its own label. */}
+          <button
+            onClick={handleRefreshPrices}
+            disabled={refreshingPrices}
+            aria-busy={refreshingPrices}
+            title="Fetch the latest market prices from Yahoo Finance and re-value holdings"
+            className="text-[11px] text-slate-400 bg-transparent border-0 p-0 hover:text-indigo-600 disabled:cursor-wait cursor-pointer transition-colors"
+          >
+            {refreshingPrices ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" /> Updating prices…
+              </span>
+            ) : lastPriceUpdate ? (
+              <>CMP last updated: <span className="font-semibold text-slate-500">{formatDMYTime(lastPriceUpdate)}</span> IST</>
+            ) : (
+              <>Update prices</>
+            )}
+          </button>
         </div>
       )}
       {!isDetailView ? (
@@ -4226,12 +4387,6 @@ export default function Holdings({
                   >
                     <ExternalLink className="w-3.5 h-3.5" /> Open Google Sheet
                   </a>
-                  {lastSyncedAt && (
-                    <span className="text-[10px] font-semibold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-1 rounded-lg" title="Holdings auto-refresh from the sheet every 2 minutes">
-                      Auto-sync · {lastSyncedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  )}
-                  <span className="text-[10px] text-slate-400 font-medium">Sync / Rebuild / Download moved to the Holdings summary page</span>
                 </>
               ) : (
                 <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full">
@@ -4322,14 +4477,6 @@ export default function Holdings({
                     <div className="flex items-center gap-2 shrink-0">
                       <PriceStatusButton refreshKey={priceRefreshTick} />
                       <button
-                        onClick={handleRefreshPrices}
-                        disabled={refreshingPrices}
-                        title="Fetch the latest market prices from Yahoo Finance and re-value holdings"
-                        className="btn-press px-3.5 py-2.5 bg-white border border-slate-200 text-slate-600 hover:border-indigo-300 font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
-                      >
-                        <TrendingUp className={`w-4 h-4 ${refreshingPrices ? 'animate-pulse' : ''}`} /> {refreshingPrices ? 'Updating…' : 'Refresh Prices'}
-                      </button>
-                      <button
                         onClick={rebuildHoldingsNow}
                         disabled={rebuildingHoldings}
                         title="Recompute the Holding tab from Opening Holdings + True Entry — use if the list looks out of date after editing opening lots"
@@ -4371,16 +4518,24 @@ export default function Holdings({
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                     <div className="inline-flex items-center p-1 bg-white border border-slate-200 rounded-xl shadow-xs shrink-0">
                       {([
-                        { key: 'all', label: 'All', count: segmentCounts.all, hint: 'Every holding in this account' },
-                        { key: 'eq', label: 'Equity', count: segmentCounts.eq, hint: 'Listed securities only' },
-                        { key: 'pe', label: 'Private Equity', count: segmentCounts.pe, hint: 'Unlisted companies only' },
-                      ] as const).map((seg) => {
+                        { key: 'all' as const, label: 'All', count: segmentCounts.all, hint: 'Every holding in this account' },
+                        { key: 'eq' as const, label: 'Equity', count: segmentCounts.eq, hint: 'Listed securities only' },
+                        // One segment per non-listed tab, from the registry: adding a fourth tab
+                        // adds its segment with no change here.
+                        ...ASSET_CLASS_IDS.map(id => ({
+                          key: id,
+                          label: ASSET_CLASSES[id].label,
+                          count: segmentCounts[id],
+                          hint: `Holdings on the “${ASSET_CLASSES[id].tab}” tab only`,
+                        })),
+                      ]).map((seg) => {
                         const active = assetClass === seg.key;
-                        // Disabled only once we KNOW there is no private equity here. While the
-                        // scrip master is still loading, isPeScrip answers false for everything,
-                        // so "0 unlisted" isn't a fact yet — disabling on it would flicker and
-                        // could hide real holdings behind a dead control.
-                        const off = seg.key === 'pe' && scrip !== null && peCount === 0;
+                        // Disabled only once we KNOW the account holds none of that class. While
+                        // the scrip master is still loading every class answers 0, which is not
+                        // a fact yet — disabling on it would flicker and could hide real
+                        // holdings behind a dead control.
+                        const off = seg.key !== 'all' && seg.key !== 'eq'
+                          && scrip !== null && classCensus[seg.key] === 0;
                         return (
                           <button
                             key={seg.key}
@@ -4388,7 +4543,7 @@ export default function Holdings({
                             onClick={() => setAssetClass(seg.key)}
                             disabled={off}
                             aria-pressed={active}
-                            title={off ? 'No unlisted holdings in this account' : seg.hint}
+                            title={off ? `No ${seg.label} holdings in this account` : seg.hint}
                             className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 ${
                               off
                                 ? 'text-slate-600 opacity-40 cursor-not-allowed'
@@ -4601,7 +4756,8 @@ export default function Holdings({
                           const isPositive = h.unrealizedGain >= 0;
                           // Unlisted AND never marked: its "current" figure is its own cost, so
                           // any gain shown would be zero by construction rather than by market.
-                          const unvaluedPe = h.type === 'PE' && activePortfolio !== 'local' && !((h.peValuation ?? 0) > 0);
+                          const unvaluedPe = h.type === 'PE' && activePortfolio !== 'local'
+                            && !((h.peValuation ?? 0) > 0) && !((h.lastTradePrice ?? 0) > 0);
 
                           return (
                             <tr
@@ -4631,6 +4787,8 @@ export default function Holdings({
                                       className="px-1.5 py-0.5 rounded-md bg-orange-50 border border-orange-200 text-orange-700 text-[9px] font-black shrink-0 select-none"
                                       title={(h.peValuation ?? 0) > 0
                                         ? `Unlisted — valued at ${formatINR(h.peValuation!)}/share${h.peValuationDate ? ` as on ${formatDMY(h.peValuationDate)}` : ''}`
+                                        : (h.lastTradePrice ?? 0) > 0
+                                        ? `Unlisted — no valuation entered, so valued at its last traded price ${formatINR(h.lastTradePrice!)}${h.lastTradeDate ? ` (${formatDMY(h.lastTradeDate)})` : ''}`
                                         : 'Unlisted — no valuation entered, carried at cost'}
                                     >
                                       PE
@@ -4678,14 +4836,19 @@ export default function Holdings({
                                       step="0.01"
                                       value={editingPriceValue}
                                       onChange={(e) => setEditingPriceValue(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleSavePriceEdit(h.id);
+                                        else if (e.key === 'Escape') setEditingPriceId(null);
+                                      }}
                                       className="w-20 px-1 py-0.5 rounded border border-indigo-400 text-xs text-right font-mono bg-white"
                                       autoFocus
                                     />
                                     <button
                                       onClick={() => handleSavePriceEdit(h.id)}
-                                      className="btn-press bg-indigo-600 hover:bg-emerald-600 font-extrabold text-[10px] text-white px-1.5 py-0.5 rounded shadow cursor-pointer"
+                                      disabled={savingPeCmp !== null}
+                                      className="btn-press bg-indigo-600 hover:bg-emerald-600 font-extrabold text-[10px] text-white px-1.5 py-0.5 rounded shadow disabled:opacity-50 cursor-pointer"
                                     >
-                                      Save
+                                      {savingPeCmp !== null ? '…' : 'Save'}
                                     </button>
                                   </div>
                                 ) : (
@@ -4698,11 +4861,33 @@ export default function Holdings({
                                       <span
                                         className="text-slate-700 font-bold"
                                         title={h.type === 'PE'
-                                          ? `Valuation from the ${PRIVATE_EQUITIES_TAB} tab${h.peValuationDate ? `, as on ${formatDMY(h.peValuationDate)}` : ' (no as-on date given)'}`
+                                          ? ((h.peValuation ?? 0) > 0
+                                              ? `Valuation from the ${PRIVATE_EQUITIES_TAB} tab${h.peValuationDate ? `, as on ${formatDMY(h.peValuationDate)}` : ' (no as-on date given)'}`
+                                              : `Its last traded price${h.lastTradeDate ? `, ${formatDMY(h.lastTradeDate)}` : ''} — no valuation is entered on the ${PRIVATE_EQUITIES_TAB} tab`)
                                           : undefined}
                                       >
                                         {formatINR(h.currentPrice)}
                                       </span>
+                                    )}
+                                    {/* The editor markup below has existed all along with nothing
+                                        to open it - handleStartEditingPrice was never called from
+                                        anywhere. Offered for UNLISTED holdings only: their price
+                                        genuinely is a judgement the user makes, and it is saved to
+                                        the Private Equities tab. A listed price is the feed's and
+                                        typing over it would just be undone on the next refresh.
+                                        The row's own onClick already ignores clicks on a button. */}
+                                    {h.type === 'PE' && activePortfolio !== 'local' && (
+                                      <button
+                                        onClick={() => handleStartEditingPrice(h.id, h.currentPrice)}
+                                        disabled={savingPeCmp !== null}
+                                        aria-label={`Set CMP for ${h.name}`}
+                                        title={`Set the CMP for ${h.name} — saved to the ${PRIVATE_EQUITIES_TAB} tab`}
+                                        className="btn-press p-0.5 rounded text-slate-400 hover:text-indigo-600 disabled:opacity-40 cursor-pointer"
+                                      >
+                                        {savingPeCmp === (h.isin || h.name)
+                                          ? <Loader2 className="w-3 h-3 animate-spin" />
+                                          : <Edit2 className="w-3 h-3" />}
+                                      </button>
                                     )}
                                   </div>
                                 )}

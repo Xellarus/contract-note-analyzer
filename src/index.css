@@ -382,6 +382,11 @@ html, body, #root, * {
 .dark .bg-amber-50\/50              { background-color: rgb(42 32 8 / 0.60); }
 .dark .bg-amber-50\/40              { background-color: rgb(42 32 8 / 0.50); }
 .dark .bg-emerald-50\/50            { background-color: rgb(18 41 30 / 0.60); }
+/* The "Performance & Yield" badge on the stock detail page. Its twin "Position size" badge
+   uses bg-indigo-50/70 and was remapped; this one was not, so it kept Tailwind's near-WHITE
+   emerald-50 at 70% while `text-emerald-800` beside it WAS remapped to mint (#52c98a) - a
+   pale wash under bright green text. Same alpha as the indigo twin: they are a designed pair. */
+.dark .bg-emerald-50\/70            { background-color: rgb(18 41 30 / 0.70); }
 .dark .bg-red-50\/40                { background-color: rgb(46 22 20 / 0.50); }
 
 /* ──────────────────────────────────────────────────────────────────────────

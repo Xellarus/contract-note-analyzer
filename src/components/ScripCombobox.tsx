@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { ScripMaster } from '../lib/scripMaster';
+import { ASSET_CLASSES } from '../lib/privateEquities';
 
 interface Props {
   value: string;
@@ -7,6 +8,12 @@ interface Props {
   master: ScripMaster | null;
   placeholder?: string;
   className?: string;
+  /**
+   * Offer ONLY unlisted companies (the "Private Equities" tab). Set when the drawer was
+   * opened with the Private Equity segment active, so the ~5,000 listed securities don't
+   * bury the handful of unlisted ones the user actually means.
+   */
+  peOnly?: boolean;
 }
 
 /**
@@ -19,20 +26,36 @@ interface Props {
  * list we filter ourselves is reliable at any size and lets the user match on ticker too.
  * Free-typing an unmatched name still works (the app supports unmatched scrips).
  */
-export default function ScripCombobox({ value, onChange, master, placeholder, className }: Props) {
+export default function ScripCombobox({ value, onChange, master, placeholder, className, peOnly }: Props) {
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);
 
   const matches = useMemo(() => {
     const term = (value || '').trim().toLowerCase();
-    if (!master || term.length < 1) return [] as { name: string; tag: string }[];
+    // Normally the list stays shut until you type — 5,000 entries are useless unfiltered. The
+    // unlisted list is a handful, so in PE scope an empty box shows all of them: "which of my
+    // private companies is this" is answerable from the list itself.
+    if (!master || (term.length < 1 && !peOnly)) return [] as { name: string; tag: string }[];
     const out: { name: string; tag: string }[] = [];
     const seen = new Set<string>();
     for (const e of master.entries) {
+      if (peOnly && !e.assetClass) continue;
       const name = (e.canonicalName || '').trim();
       if (!name || seen.has(name)) continue;
-      const hay = `${name} ${e.nse || ''} ${e.bse || ''}`.toLowerCase();
-      if (hay.includes(term)) { seen.add(name); out.push({ name, tag: e.nse || e.bse || '' }); }
+      // An UNLISTED company has no ticker to be searched by; matching it on one would only ever
+      // be a contradictory leftover on its master entry. It gets its ISIN instead, which is what
+      // the Private Equities tab now keys on and the only identifier it really has.
+      const hay = (e.assetClass
+        ? `${name} ${e.isin || ''}`
+        : `${name} ${e.nse || ''} ${e.bse || ''}`).toLowerCase();
+      // An unlisted company has no ticker to show, so it is tagged as what it is.
+      // The tag names the CLASS for a non-listed entry ("PE" / "AIF" / "MF") rather than a
+      // generic "unlisted": with three tabs in the same dropdown, which one a company came from
+      // is the thing the user needs to see.
+      if (hay.includes(term)) {
+        seen.add(name);
+        out.push({ name, tag: e.assetClass ? ASSET_CLASSES[e.assetClass].badge : (e.nse || e.bse || '') });
+      }
       if (out.length >= 60) break;   // scan cap; ranked + sliced below
     }
     // Rank prefix matches first, then alphabetical; show at most 30.
@@ -51,7 +74,7 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
       <input
         type="text" placeholder={placeholder} value={value} autoComplete="off"
         onChange={(e) => { onChange(e.target.value); setOpen(true); setHi(0); }}
-        onFocus={() => { if ((value || '').trim()) setOpen(true); }}
+        onFocus={() => { if (peOnly || (value || '').trim()) setOpen(true); }}
         onBlur={() => window.setTimeout(() => setOpen(false), 150)}
         onKeyDown={(e) => {
           if (!open || matches.length === 0) return;

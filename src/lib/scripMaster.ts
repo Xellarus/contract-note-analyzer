@@ -1,5 +1,8 @@
 import { gapi } from "gapi-script";
-import { invalidatePrivateEquityCache, loadPrivateEquities, PrivateEquityRow } from "./privateEquities";
+import {
+  invalidatePrivateEquityCache, loadAssetClass, PrivateEquityRow,
+  ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId,
+} from "./privateEquities";
 
 // The single shared scrip master lives in ONE Google Sheet that the user owns
 // and curates directly (NSE/BSE ISIN ↔ name, plus any additions). The app reads
@@ -60,7 +63,8 @@ export interface ScripEntry {
   // ── Private equity (from the "Private Equities" tab; see privateEquities.ts) ──
   /** An UNLISTED company. No exchange price exists, so it is never fetched and never
    *  counted as "unpriced"; its long-term holding period is 24 months, not 12. */
-  isPe?: boolean;
+  /** Non-listed asset class from its own scrip-master tab. Absent ⇒ ordinary listed equity. */
+  assetClass?: AssetClassId;
   /** Google Drive folder of that company's documents — shown on its page in the same
    *  slot a listed company's Screener.in link occupies. */
   driveLink?: string;
@@ -320,11 +324,20 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
   // foldPrivateEquities for why here rather than in a parallel list. A failure to read that
   // tab is recorded, not thrown: the equity master itself loaded fine, and losing the whole
   // app because an optional tab 500'd would be the worse outcome. The 90s TTL retries it.
-  try {
-    foldPrivateEquities(master, await loadPrivateEquities(spreadsheetId, opts));
-  } catch (e) {
-    master.peFailed = true;
-    console.warn("Could not read the Private Equities tab — PE holdings will show as ordinary unpriced equities:", e);
+  // Each class is independent: an absent AIF tab must not stop the Private Equities tab being
+  // folded in, and one that 500s must not mark the others failed. `peFailed` stays a single flag
+  // because every consumer of it asks the same question - "can this book's non-listed holdings
+  // be identified at all" - and the answer is no if ANY class could not be read.
+  for (const id of ASSET_CLASS_IDS) {
+    try {
+      foldAssetClass(master, await loadAssetClass(spreadsheetId, id, opts));
+    } catch (e) {
+      master.peFailed = true;
+      console.warn(
+        `Could not read the "${ASSET_CLASSES[id].tab}" tab — its holdings will show as ordinary `
+        + `unpriced equities, and their capital gains will be classified as LISTED:`, e,
+      );
+    }
   }
 
   computeGenericTokens(master);   // which single tokens are too common to carry a fuzzy match
@@ -349,13 +362,17 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
  * `pendingPersist` is deliberately left false: these rows belong to the PE tab, and
  * `saveScripMaster` (which appends to the FIRST tab) skips them anyway.
  */
-export function foldPrivateEquities(master: ScripMaster, rows: PrivateEquityRow[]): void {
+export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): void {
   for (const r of rows) {
     const name = (r.company || "").trim();
     if (!name) continue;
     const isin = (r.isin || "").trim().toUpperCase();
     const nk = normName(name);
-    let entry = (isin ? master.byIsin.get(isin) : undefined) || (nk ? master.byAliasNorm.get(nk) : undefined) || null;
+    // ISIN FIRST, and alone when it is given. A row that carries an ISIN has stated its
+    // identity exactly; falling through to the normalised name would let a different company
+    // whose name collapses alike claim the row. Only a row WITHOUT an ISIN needs the name.
+    const byIsin = isin ? master.byIsin.get(isin) : undefined;
+    let entry = byIsin || (!isin && nk ? master.byAliasNorm.get(nk) : undefined) || null;
     if (!entry) {
       entry = makeEntry(name, isin, [], "confirmed");
       indexEntry(master, entry);
@@ -367,19 +384,35 @@ export function foldPrivateEquities(master: ScripMaster, rows: PrivateEquityRow[
     // from it.
     if (r.driveLink) entry.driveLink = r.driveLink;
 
-    // But the UNLISTED flag is not, and this match can land on a LISTED company: normName
+    // But the UNLISTED flag is not, and a NAME match can land on a LISTED company: normName
     // strips "private"/"limited", so "Acme Foods Private Limited" on the PE list resolves to
     // an existing "Acme Foods Ltd" that trades on the exchange. Marking that entry would stop
     // the price feed from ever fetching it and swap its LTCG period to 24 months — silently
-    // wrong, on a live holding.
+    // wrong, on a live holding. An entry carrying an NSE symbol or a BSE code is by definition
+    // listed, so such a row contributes its Drive link and nothing else.
     //
-    // An entry carrying an NSE symbol or a BSE code is, by definition, listed. Such a row
-    // contributes its Drive link and nothing else. If the collision was accidental (two
-    // different companies whose names normalise alike) `findNameCollisions` reports it; if the
-    // company genuinely listed after we bought it, then treating it as listed is correct.
-    if (entry.nse || entry.bse) continue;
+    // That guard applies to NAME matches only. An ISIN match is not a guess - the row named
+    // this exact security - so an exchange ticker must not veto it. Requiring otherwise made
+    // ISIN pointless on this tab: the one thing that makes the identity unambiguous was also
+    // the thing that couldn't override a fuzzy collision.
+    //
+    // A ticker on an ISIN-matched row is contradictory data, not an ambiguity: the sheet says
+    // unlisted, the master says it trades. The sheet is the user's explicit statement so it
+    // wins, but it is worth saying out loud - a company that has since listed should come OFF
+    // this tab, or its holding is taxed at 24 months and never priced.
+    if (byIsin && (entry.nse || entry.bse)) {
+      console.warn(
+        `"${entry.canonicalName}" is on the Private Equities tab by ISIN ${isin} but the scrip `
+        + `master gives it a ticker (${entry.nse || entry.bse}). Treating it as UNLISTED per the `
+        + `tab. If it has listed, remove it from that tab.`,
+      );
+    } else if (entry.nse || entry.bse) {
+      continue;
+    }
 
-    entry.isPe = true;
+    // The row's own tab decides the class. Where a company somehow appears on two tabs the
+    // FIRST fold wins, matching the first-row-wins rule the tabs themselves follow.
+    if (!entry.assetClass) entry.assetClass = r.assetClass;
     // Unlisted ⇒ there is no exchange price to fetch, ever. This is what keeps PE out of the
     // "prices we couldn't fetch" list and out of the "valued at cost" warning count.
     entry.priceExcept = true;
@@ -395,10 +428,32 @@ export function foldPrivateEquities(master: ScripMaster, rows: PrivateEquityRow[
 }
 
 /** True when this security is an unlisted company from the Private Equities tab. */
+/** Which non-listed class this security belongs to, or undefined for ordinary listed equity. */
+export function assetClassOf(master: ScripMaster | null, isin: string, name: string): AssetClassId | undefined {
+  if (!master) return undefined;
+  return lookupScrip(master, isin, name).entry?.assetClass;
+}
+
+/** On one of the non-listed tabs at all - Private Equity, AIF or Mutual Fund. */
+export function isNonListedScrip(master: ScripMaster | null, isin: string, name: string): boolean {
+  return assetClassOf(master, isin, name) !== undefined;
+}
+
+/**
+ * No exchange leg, so Delivery is forced and STT / exchange / SEBI / IPF cannot arise.
+ *
+ * NOT the same question as `isNonListedScrip`. A mutual fund is non-listed but an
+ * equity-oriented redemption really does bear STT, so hiding that box would quietly drop a
+ * real charge out of the cost basis.
+ */
+export function isOffMarketScrip(master: ScripMaster | null, isin: string, name: string): boolean {
+  const id = assetClassOf(master, isin, name);
+  return !!id && ASSET_CLASSES[id].offMarket;
+}
+
+/** Private Equity specifically. Kept for the places that mean that tab and no other. */
 export function isPeScrip(master: ScripMaster | null, isin: string, name: string): boolean {
-  if (!master) return false;
-  const e = lookupScrip(master, isin, name).entry;
-  return !!(e && e.isPe);
+  return assetClassOf(master, isin, name) === "PE";
 }
 
 /** The PE entry behind a security, or null when it isn't one. Carries the Drive link and
@@ -406,7 +461,7 @@ export function isPeScrip(master: ScripMaster | null, isin: string, name: string
 export function peEntry(master: ScripMaster | null, isin: string, name: string): ScripEntry | null {
   if (!master) return null;
   const e = lookupScrip(master, isin, name).entry;
-  return e && e.isPe ? e : null;
+  return e && e.assetClass ? e : null;
 }
 
 /** Long-term holding period in DAYS for this security. Listed equity qualifies at 12
@@ -414,8 +469,24 @@ export function peEntry(master: ScripMaster | null, isin: string, name: string):
  *  not apply to unquoted shares). Getting this wrong reports a short-term gain as long-term. */
 export const LT_DAYS_LISTED = 365;
 export const LT_DAYS_UNLISTED = 730;
-export function ltDaysFor(master: ScripMaster | null, isin: string, name: string): number {
-  return isPeScrip(master, isin, name) ? LT_DAYS_UNLISTED : LT_DAYS_LISTED;
+/**
+ * Long-term threshold in days, or NULL when this security has no decided rule.
+ *
+ * Returning `number | null` rather than a number is the whole point: a mutual fund has no single
+ * threshold (equity-oriented is 12 months WITH STT, post-Apr-2023 debt is always short-term at
+ * slab, other/specified is 24 months), so any number returned here would be a guess printed into
+ * a tax document. The null forces every caller to decide what to do about it, and there are only
+ * four - tsc lists them.
+ */
+export function ltDaysFor(master: ScripMaster | null, isin: string, name: string): number | null {
+  const id = assetClassOf(master, isin, name);
+  if (!id) return LT_DAYS_LISTED;
+  return ASSET_CLASSES[id].ltDays;
+}
+
+/** False when the holding period is undecided, so a sale must not be filed as short or long. */
+export function hasLtRule(master: ScripMaster | null, isin: string, name: string): boolean {
+  return ltDaysFor(master, isin, name) !== null;
 }
 
 /**
@@ -613,9 +684,9 @@ export async function saveScripMaster(spreadsheetId: string, master: ScripMaster
   // the same company, which is precisely the duplicate-identity split `findNameCollisions`
   // exists to report (a name in two entries resolves to only one of them, and the position
   // silently divides between them). Anything that flipped their flag gets it cleared.
-  const pe = master.entries.filter(e => e.pendingPersist && e.isPe);
-  pe.forEach(e => { e.pendingPersist = false; });
-  const toAppend = master.entries.filter(e => e.pendingPersist && !e.isPe);
+  const nonListed = master.entries.filter(e => e.pendingPersist && e.assetClass);
+  nonListed.forEach(e => { e.pendingPersist = false; });
+  const toAppend = master.entries.filter(e => e.pendingPersist && !e.assetClass);
   if (toAppend.length === 0) { master.dirty = false; return; }
 
   const tab = await firstSheetTitle(spreadsheetId);

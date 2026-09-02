@@ -4,6 +4,7 @@ import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
 import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { formatDMY, formatDMMMY, isDateHeader } from '../lib/dates';
 import { loadOpeningHoldings } from '../lib/openingHoldings';
 import { useVirtualRows } from './ui/useVirtualRows';
@@ -24,37 +25,63 @@ type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expens
  * says which one it is (see buildDoc): an equity-only capital-gains statement and a
  * consolidated one are different tax documents and must never be mistaken for each other.
  */
-type ReportScope = 'eq' | 'pe' | 'consolidated';
+/**
+ * 'eq' is listed equity; 'pe' / 'aif' / 'mf' each narrow to ONE non-listed scrip-master tab;
+ * 'consolidated' is everything. The three class scopes share all their machinery - only which
+ * tab's membership set is built differs - so they are derived from ASSET_CLASSES rather than
+ * spelled out, and adding a fourth tab needs no change here.
+ */
+type ReportScope = 'eq' | 'consolidated' | Lowercase<AssetClassId>;
+
+/** Scope -> the asset class it narrows to, or undefined for 'eq' / 'consolidated'. */
+const SCOPE_CLASS: Partial<Record<ReportScope, AssetClassId>> =
+  Object.fromEntries(ASSET_CLASS_IDS.map(id => [id.toLowerCase(), id])) as any;
 
 const SCOPES: { key: ReportScope; label: string; hint: string }[] = [
   { key: 'eq', label: 'Equity', hint: 'Listed securities only' },
-  { key: 'pe', label: 'Private Equity', hint: 'Unlisted companies only' },
-  { key: 'consolidated', label: 'Consolidated', hint: 'Listed and unlisted together' },
+  ...ASSET_CLASS_IDS.map(id => ({
+    key: id.toLowerCase() as ReportScope,
+    label: ASSET_CLASSES[id].label,
+    hint: `Only holdings on the “${ASSET_CLASSES[id].tab}” tab`,
+  })),
+  { key: 'consolidated', label: 'Consolidated', hint: 'Every asset class together' },
 ];
 
 const SCOPE_LABEL: Record<ReportScope, string> = {
   eq: 'Equity only (listed securities)',
-  pe: 'Private equity only (unlisted companies)',
-  consolidated: 'Consolidated — listed and unlisted',
-};
+  consolidated: 'Consolidated — every asset class',
+  ...Object.fromEntries(ASSET_CLASS_IDS.map(id =>
+    [id.toLowerCase(), `${ASSET_CLASSES[id].label} only (from the “${ASSET_CLASSES[id].tab}” tab)`])),
+} as Record<ReportScope, string>;
 
 /** Filename fragment. Consolidated adds nothing, so existing filenames are untouched. */
-const SCOPE_TAG: Record<ReportScope, string> = { eq: 'Equity_', pe: 'PrivateEquity_', consolidated: '' };
+const SCOPE_TAG: Record<ReportScope, string> = {
+  eq: 'Equity_',
+  consolidated: '',
+  ...Object.fromEntries(ASSET_CLASS_IDS.map(id =>
+    [id.toLowerCase(), `${ASSET_CLASSES[id].label.replace(/\s+/g, '')}_`])),
+} as Record<ReportScope, string>;
 
 /** Short qualifier carried into the PDF's running header, the XLSX tab name and the print
  *  footer, so a narrowed report identifies itself on every page and not only on page 1. */
-const SCOPE_SLUG: Record<ReportScope, string> = { eq: 'Equity', pe: 'Private Equity', consolidated: '' };
+const SCOPE_SLUG: Record<ReportScope, string> = {
+  eq: 'Equity',
+  consolidated: '',
+  ...Object.fromEntries(ASSET_CLASS_IDS.map(id => [id.toLowerCase(), ASSET_CLASSES[id].label])),
+} as Record<ReportScope, string>;
 
 /**
  * The disclosure printed under a narrowed report. It names the BASIS of the split, because the
  * reader of an exported file has no other way to know what "Equity" meant here — the split is
- * not a market fact, it is this book's own Private Equities list.
+ * not a market fact, it is this book's own scrip-master tabs.
  */
 const SCOPE_NOTE: Record<ReportScope, string> = {
-  eq: 'Scope: LISTED securities only. Unlisted companies — those on the “Private Equities” list in the shared scrip master — are excluded from this report.',
-  pe: 'Scope: UNLISTED companies only, as listed in the “Private Equities” tab of the shared scrip master. Listed securities are excluded from this report.',
+  eq: `Scope: LISTED securities only. Holdings on the ${ASSET_CLASS_IDS.map(id => `“${ASSET_CLASSES[id].tab}”`).join(' / ')} tabs of the shared scrip master are excluded from this report.`,
   consolidated: '',
-};
+  ...Object.fromEntries(ASSET_CLASS_IDS.map(id =>
+    [id.toLowerCase(),
+     `Scope: ${ASSET_CLASSES[id].label.toUpperCase()} only, as listed in the “${ASSET_CLASSES[id].tab}” tab of the shared scrip master. Every other asset class is excluded from this report.`])),
+} as Record<ReportScope, string>;
 
 /**
  * Unlisted-security membership as two O(1) sets, built ONCE per report run.
@@ -67,11 +94,11 @@ const SCOPE_NOTE: Record<ReportScope, string> = {
  * master still matches the rows written under its old name at import time.
  */
 interface PeMembership { names: Set<string>; isins: Set<string>; }
-const buildPeMembership = (master: ScripMaster): PeMembership => {
+const buildPeMembership = (master: ScripMaster, cls: AssetClassId): PeMembership => {
   const names = new Set<string>();
   const isins = new Set<string>();
   for (const e of master.entries) {
-    if (!e.isPe) continue;
+    if (e.assetClass !== cls) continue;
     for (const a of e.aliasNorms) names.add(a);
     if (e.isin) isins.add(e.isin.trim().toUpperCase());
   }
@@ -327,14 +354,19 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
         // always works.
         if (!master) {
           throw new Error(
-            `Couldn't read the shared Scrip Master (${masterError}), so listed and unlisted securities can't be told apart — and a ${scope === 'pe' ? 'Private Equity' : 'Equity'} report would be mislabelled. A fresh read was already attempted. Check the connection to Google Sheets, or choose Consolidated (which needs no classification).`,
+            `Couldn't read the shared Scrip Master (${masterError}), so asset classes can't be told apart — and a ${SCOPE_SLUG[scope] || 'scoped'} report would be mislabelled. A fresh read was already attempted. Check the connection to Google Sheets, or choose Consolidated (which needs no classification).`,
           );
         }
         if (master.peFailed) {
+          // `peFailed` means AT LEAST ONE non-listed tab could not be read, so neither direction
+          // of the split can be trusted: a class report would come back empty and read as "the
+          // account holds none", and an Equity report would silently include the very holdings
+          // it claims to exclude. Both are wrong in a way the reader of the file cannot see.
+          const cls = SCOPE_CLASS[scope];
           throw new Error(
-            scope === 'pe'
-              ? 'Couldn’t read the "Private Equities" tab of the scrip master, so no company can be identified as unlisted — this report would come back empty and read as though the account holds none. Fix the tab, or choose Consolidated.'
-              : 'Couldn’t read the "Private Equities" tab of the scrip master, so every company would be classified as listed — this report would silently include the unlisted holdings it claims to exclude. Fix the tab, or choose Consolidated.',
+            cls
+              ? `Couldn’t read the “${ASSET_CLASSES[cls].tab}” tab of the scrip master, so nothing can be identified as ${ASSET_CLASSES[cls].label} — this report would come back empty and read as though the account holds none. Fix the tab, or choose Consolidated.`
+              : 'Couldn’t read one of the non-listed tabs of the scrip master, so every holding would be classified as listed — this report would silently include the holdings it claims to exclude. Fix the tab, or choose Consolidated.',
           );
         }
       }
@@ -346,12 +378,21 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
       const unknownNames = new Set<string>();
       let emptyPeList = false;
       if (scopeActive && master) {
-        const mem = buildPeMembership(master);
+        // 'eq' narrows to "on none of the non-listed tabs", so its membership set is the UNION of
+        // every class; a class scope uses just its own. Without the union an Equity report would
+        // exclude only private equity and quietly keep the AIF and mutual-fund rows.
+        const scopeCls = SCOPE_CLASS[scope];
+        const mem = scopeCls
+          ? buildPeMembership(master, scopeCls)
+          : ASSET_CLASS_IDS.map(id => buildPeMembership(master, id)).reduce((a, b) => ({
+              names: new Set([...a.names, ...b.names]),
+              isins: new Set([...a.isins, ...b.isins]),
+            }));
         // An empty list is a FACT here, not a failure: a genuinely absent tab caches as empty
         // and a failed read already threw above. A stated fact beats an empty statement.
         if (mem.names.size === 0 && mem.isins.size === 0) {
-          if (scope === 'pe') {
-            throw new Error('The scrip master lists no unlisted companies, so a Private Equity report has nothing to cover. Add them to the Private Equities tab, or choose Equity / Consolidated.');
+          if (scopeCls) {
+            throw new Error(`The scrip master lists nothing as ${ASSET_CLASSES[scopeCls].label}, so this report has nothing to cover. Add rows to the “${ASSET_CLASSES[scopeCls].tab}” tab, or choose Equity / Consolidated.`);
           }
           // Equity scope with an empty list: nothing was excluded. Correct if the list really is
           // empty, and misleading if the tab was renamed (which reads as "absent", not "failed").
@@ -375,12 +416,13 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             pe = rowIsPe(mem, name, isin);
             if (!pe && nk && !known.has(nk)) {
               const e = lookupScrip(master!, isin, name).entry;
-              if (e) pe = !!e.isPe;
+              // Match the set that was built: one class for a class scope, any class for 'eq'.
+              if (e) pe = scopeCls ? e.assetClass === scopeCls : !!e.assetClass;
               else unknownNames.add(nk);   // in no master entry at all → treated as listed
             }
             memo.set(key, pe);
           }
-          return scope === 'pe' ? pe : !pe;
+          return scopeCls ? pe : !pe;
         };
       }
       if (reportType === 'holding') {

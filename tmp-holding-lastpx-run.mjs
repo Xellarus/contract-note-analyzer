@@ -1,10 +1,9 @@
-// Bundles the Capital Gains register test, stubbing `gapi-script` with a fake Sheets API.
-// Same shape as tmp-pe-fold-run.mjs, with two additions the register needs:
-//   • reads are keyed by `${spreadsheetId}::${range}` — TWO spreadsheets are in play (the
-//     portfolio and the shared scrip master), and `firstSheetTitle` asks each for its own
-//     tab list, so keying by range alone hands the master the portfolio's tabs.
-//   • `spreadsheets.batchUpdate` exists — the register's formatting pass calls it, and the
-//     original stub has none, so every run would die in the paint step.
+// Bundles the "value an unlisted holding at its last traded price" test.
+//
+// The gapi stub is IDENTICAL to tmp-trx-run.mjs's - keyed reads, a batchUpdate that honours
+// addSheet, and recorded update/clear calls - because rebuildHoldingTab needs exactly the same
+// surface as the register: two spreadsheets in play, ensureSheetTabs creating the Holding tab,
+// then a clear + update to write it.
 import { pathToFileURL } from 'node:url';
 
 const ROOT = 'c:/Users/Priti/Desktop/remix_-contract-note-analyzer';
@@ -68,9 +67,9 @@ const stubPlugin = {
   },
 };
 
-const out = `${process.env.TEMP || ROOT}/.trx-bundle.mjs`;
+const out = `${process.env.TEMP || ROOT}/.holding-lastpx-bundle.mjs`;
 await esbuild.build({
-  entryPoints: [`${ROOT}/tmp-trx.ts`],
+  entryPoints: [`${ROOT}/tmp-holding-lastpx.ts`],
   bundle: true,
   platform: 'node',
   format: 'esm',

@@ -93,7 +93,9 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
   // in the feed — something to chase. An UNLISTED one is never priced by design, so folding it
   // in here would inflate a number the reader is meant to act on.
   const unpricedShown = visible.filter(h => !h.priced && !h.pe).length;
-  const peAtCostShown = visible.filter(h => h.pe && !((h.peValuation ?? 0) > 0)).length;
+  // At cost = no valuation AND never traded. A position valued at its last trade already has
+  // a defensible price and must not be nagged about.
+  const peAtCostShown = visible.filter(h => h.pe && !((h.peValuation ?? 0) > 0) && !((h.lastTradePrice ?? 0) > 0)).length;
 
   const downloadCsv = () => {
     // Exports exactly what's on screen — same filter, same sort — plus the per-portfolio
@@ -105,7 +107,7 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
       plOf(h).toFixed(2), plPctOf(h).toFixed(2),
       // An unlisted company's figure is a VALUATION, not a market price. This export leaves the
       // machine, so "yes" against one would be read as a traded price by whoever opens it.
-      h.pe ? ((h.peValuation ?? 0) > 0 ? 'valuation' : 'at cost') : (h.priced ? 'yes' : 'at cost'),
+      h.pe ? ((h.peValuation ?? 0) > 0 ? 'valuation' : (h.lastTradePrice ?? 0) > 0 ? 'last trade' : 'at cost') : (h.priced ? 'yes' : 'at cost'),
       h.lots.map(l => `${l.code}:${qtyFmt(l.qty)}`).join(' | '),
     ]);
     body.push(['Total', '', '', '', totals.invested.toFixed(2), '', totals.current.toFixed(2),
@@ -235,7 +237,9 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
                             className="px-1.5 py-0.5 rounded-md bg-orange-50 border border-orange-200 text-orange-700 text-[9px] font-black shrink-0 select-none"
                             title={h.peValuation
                               ? `Unlisted — valued at ${inr(h.peValuation)}/share${h.peValuationDate ? ` as on ${h.peValuationDate}` : ''}`
-                              : 'Unlisted — no valuation entered, carried at cost'}
+                              : (h.lastTradePrice ?? 0) > 0
+                                ? `Unlisted — no valuation entered, so valued at its last traded price ${inr(h.lastTradePrice!)}`
+                                : 'Unlisted — no valuation entered and never traded, carried at cost'}
                           >
                             PE
                           </span>

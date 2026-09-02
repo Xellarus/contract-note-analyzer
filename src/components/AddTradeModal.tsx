@@ -1,10 +1,12 @@
 import { useEffect, useId, useMemo, useState } from 'react';
-import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Sliders, Lock } from 'lucide-react';
-import { ModalShell } from './ui/overlay';
+import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Sliders, Lock, RefreshCw } from 'lucide-react';
+import { ModalShell, toast, confirmDialog } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { CorpActionType } from '../lib/corporateActions';
-import { ScripMaster, loadScripMaster, lookupScrip, isPeScrip, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { appendPrivateEquity } from '../lib/privateEquityWrite';
+import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { gapi } from 'gapi-script';
 import ScripCombobox from './ScripCombobox';
 import { hasValidGoogleToken } from '../lib/googleAuth';
@@ -21,6 +23,11 @@ interface AddTradeModalProps {
   // it fetches that portfolio's Holding tab itself — see `heldRows` below.
   holdings?: { name: string; isin: string; qty: number }[];
   prefill?: { company: string; isin: string };                // pre-select a security (opened from a stock's detail page)
+  /**
+   * 'pe' when the holdings list had the "Private Equity" segment active. A SCOPE, not a
+   * classification: it decides what the FORM offers, never what gets written. See `peScope`.
+   */
+  scope?: 'pe';
 }
 
 const portfolioLabel = (id: string) => { const p = portfolioById(id); return p ? `${p.label} · ${p.code}` : id; };
@@ -107,7 +114,7 @@ const todayISO = (): string => {
 const isFreeShares = (a: ManualAction) => a === 'Bonus' || a === 'Split';
 const isDeliveryLocked = (a: ManualAction) => isFreeShares(a) || a === 'IPO' || a === 'Rights';
 
-export default function AddTradeModal({ open, onClose, defaultPortfolio, master, onSaved, holdings, prefill }: AddTradeModalProps) {
+export default function AddTradeModal({ open, onClose, defaultPortfolio, master, onSaved, holdings, prefill, scope }: AddTradeModalProps) {
   const titleId = useId();
   const [portfolio, setPortfolio] = useState<string>(defaultPortfolio);
   const [tradeDate, setTradeDate] = useState<string>(todayISO());
@@ -119,7 +126,11 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   // Holdings, but load it here too if that prop is null (modal opened before Holdings
   // finished loading, or that load failed) so the dropdown is never empty.
   const [selfMaster, setSelfMaster] = useState<ScripMaster | null>(null);
-  const activeMaster = master || selfMaster;
+  // A force-reload triggered from inside this drawer has to WIN over the `master` prop. That
+  // prop is the parent's copy and it does not re-fetch just because we did, so without this
+  // precedence the Recheck button spins, reloads, and visibly changes nothing.
+  const [recheckedMaster, setRecheckedMaster] = useState<ScripMaster | null>(null);
+  const activeMaster = recheckedMaster || master || selfMaster;
   useEffect(() => {
     if (open && !master && !selfMaster && hasValidGoogleToken()) {
       loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then(setSelfMaster).catch(() => {});
@@ -147,10 +158,14 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
     // Opened from a stock's detail page → seed the first line with that security.
     setLines([prefill?.company ? { ...blankLine(), company: prefill.company, isin: prefill.isin || '' } : blankLine()]);
     setSaving(false); setError(null); setResult(null);
+    setPeMode(scope === 'pe');
+    // Drop the override so a reopened drawer follows the parent again rather than pinning a
+    // snapshot taken minutes ago.
+    setRecheckedMaster(null);
     setMode('trades'); setCaType('Merger'); setCaDate(todayISO());
     setCaFrom(''); setCaTo(''); setCaSharesIn(''); setCaCost(''); setCaNotes('');
     setCaSaving(false); setCaError(null); setCaResult(null);
-  }, [open, defaultPortfolio, prefill?.company, prefill?.isin]);
+  }, [open, defaultPortfolio, prefill?.company, prefill?.isin, scope]);
 
   // ── "Shares held" source ─────────────────────────────────────────────────────
   // The `holdings` prop is whatever portfolio the Holdings page has OPEN — but this drawer
@@ -186,6 +201,93 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   // at the top and drop the per-line company picker: re-choosing it on every added line was
   // just a chance to book a trade against the wrong stock.
   const lockedScrip = prefill?.company ? { company: prefill.company, isin: prefill.isin || '' } : null;
+
+  /**
+   * Listed vs unlisted, chosen HERE rather than inherited from the holdings segment.
+   *
+   * The `scope` prop only seeds the default. The first version gated this entirely on the
+   * segment being "Private Equity" — which is disabled until the account already holds an
+   * unlisted company, so there was no way to record the FIRST one. A filter over existing
+   * holdings cannot gate the creation of a new one.
+   *
+   * This stays a FORM scope. What gets written is still decided by the scrip master in
+   * `toPayload` (`isPeScrip`), because an intention is not evidence: letting this force PE
+   * treatment on the saved row would zero STT and lock Delivery on a LISTED trade the moment
+   * one was typed here — the same misclassification, pointed the other way. Where the two
+   * disagree, `lineError` blocks the save.
+   *
+   * A prefilled scrip already has its own identity and must not be second-guessed.
+   */
+  const [peMode, setPeMode] = useState(false);
+  const peScope = peMode && !lockedScrip;
+
+  /** Unlisted companies the master knows about — 0 means nothing is registered yet. */
+  const peRegistered = useMemo(
+    () => (activeMaster ? activeMaster.entries.filter((e) => e.assetClass).length : 0),
+    [activeMaster],
+  );
+
+  /**
+   * True when the ONLY thing wrong with this line is that the company has never been registered
+   * as unlisted. Deliberately narrow: every other refusal (a listed-name collision, an
+   * unreadable tab, a master still loading) must NOT offer to write, because writing is exactly
+   * the wrong move in each of those cases.
+   */
+  const peUnregistered = (l: LineDraft): boolean =>
+    peScope && !!l.company.trim() && !!activeMaster && !activeMaster.peFailed
+    && !lookupScrip(activeMaster, l.isin.trim(), l.company.trim()).entry;
+
+  const [addingPe, setAddingPe] = useState<number | null>(null);
+  /**
+   * Register an unrecognised company on ONE of the non-listed tabs.
+   *
+   * The class is chosen by the user, not defaulted: which tab a company lands on decides its
+   * holding period and whether STT can arise, so guessing it would file a mutual fund as private
+   * equity - 730 days and no STT - and, worse, make it classifiable on a rule that does not
+   * apply to it. The confirm dialog states what the chosen class means before writing.
+   */
+  const addToClassTab = async (l: LineDraft, cls: AssetClassId) => {
+    const name = l.company.trim();
+    const p = ASSET_CLASSES[cls];
+    // Confirmed, not silent: this row lands in the SHARED scrip master, so it changes how every
+    // portfolio classifies the name - and with it a tax figure.
+    const go = await confirmDialog({
+      title: `Add “${name}” as ${p.label}?`,
+      body: `This writes a row to the “${p.tab}” tab of the shared scrip master, so ${name} counts as ${p.label} for every portfolio`
+        + (p.offMarket ? ': off-market, and long-term only after 24 months.' : '.')
+        + (p.ltDays === null
+            ? ` Its capital gains will NOT be classified — ${p.label} has no single holding-period rule, so its sales are deliberately left out of the tax ledger rather than filed on a guess.`
+            : '')
+        + ' It will be carried at COST until you enter a CMP on that tab.',
+      confirmLabel: `Add as ${p.badge}`,
+      cancelLabel: 'Cancel',
+    });
+    if (!go) return;
+    setAddingPe(l.id);
+    try {
+      const r = await appendPrivateEquity(SCRIP_MASTER_SPREADSHEET_ID, activeMaster, name, cls);
+      if (r.status === 'refused') { toast.error(r.message); return; }
+      toast.success(
+        `${r.company} registered as ${p.label}${r.createdTab ? ` — created the “${p.tab}” tab` : ''}.`
+        + ' Carried at cost until you enter a CMP.',
+      );
+      // Pull it straight back in, so the line the user is standing on stops erroring.
+      await recheckMaster();
+    } catch (e: any) {
+      toast.error(`Couldn’t add ${name} — ${e?.message || 'unknown error'}`);
+    } finally {
+      setAddingPe(null);
+    }
+  };
+
+  // Force-reload past the master's 90-second cache, for the "just added the row by hand" case.
+  const [rechecking, setRechecking] = useState(false);
+  const recheckMaster = async () => {
+    setRechecking(true);
+    try { setRecheckedMaster(await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true })); }
+    catch { /* the line error stands; nothing worse than before */ }
+    finally { setRechecking(false); }
+  };
 
   // Re-sync "shares held" on any line already carrying a company when the holdings behind it
   // change — the drawer's portfolio was switched, or the parent's holdings finished loading
@@ -288,6 +390,27 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
 
   const lineError = (l: LineDraft): string | null => {
     if (!l.company.trim()) return 'Company is required';
+    // The form has already hidden the exchange charges and locked Delivery, but the ROW is
+    // classified from the master. Saving a company that is not on the "Private Equities" tab
+    // would file an unlisted holding as listed equity - long-term at 12 months instead of 24 -
+    // and nothing downstream can detect it. So refuse, and say which fix applies.
+    if (peScope) {
+      if (!activeMaster) return 'Still loading the company list…';
+      // The tab READ failed, so every company looks un-listed-ly absent. Saying "add it to the
+      // tab" here would talk the user into a duplicate row for a company already on it - the
+      // duplicate-identity split that silently divides a position between two entries.
+      if (activeMaster.peFailed) {
+        return 'Couldn’t read one of the non-listed tabs, so this company can’t be confirmed — Recheck, or try again shortly.';
+      }
+      // "Unlisted" means on ANY of the non-listed tabs - Private Equities, AIF or Mutual Fund.
+      // Which one it is decides the tax and charge treatment, but not whether it belongs here.
+      if (!isNonListedScrip(activeMaster, l.isin, l.company)) {
+        const tabs = ASSET_CLASS_IDS.map(id => `“${ASSET_CLASSES[id].tab}”`).join(', ');
+        return lookupScrip(activeMaster, l.isin.trim(), l.company.trim()).entry
+          ? `${l.company.trim()} is a LISTED security — switch this drawer to “Listed” to record it.`
+          : `${l.company.trim()} isn’t on any of the ${tabs} tabs. Add it to one (the app only reads them), then Recheck.`;
+      }
+    }
     if (isFreeShares(l.action)) return num(l.qty) > 0 ? null : 'Enter a ratio and shares held';
     if (num(l.qty) <= 0) return 'Quantity must be greater than 0';
     if (num(l.price) <= 0) return 'Price must be greater than 0';
@@ -318,7 +441,10 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       // been typed (or an Intraday class chosen) BEFORE the company was picked — the inputs
       // then disappear but their values would still have reached the ledger, quietly
       // overstating the cost basis.
-      const pe = isPeScrip(activeMaster, l.isin, l.company);
+      // OFF-MARKET, not merely non-listed. A mutual fund is non-listed but an equity-oriented
+      // redemption really does bear STT, so zeroing it here would drop a real charge out of the
+      // cost basis - the mirror of the mistake this guard exists to prevent.
+      const pe = isOffMarketScrip(activeMaster, l.isin, l.company);
       return {
         isin: l.isin.trim(),
         securityName: l.company.trim(),
@@ -422,6 +548,26 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 </button>
               ))}
             </div>
+
+            {/* Listed vs unlisted lives HERE, not on the holdings segment. That segment is
+                disabled until the account already holds an unlisted company, so gating this on
+                it made the first unlisted trade in an account impossible to record. Hidden when
+                the drawer is locked to one security - that security's class is already known. */}
+            {mode === 'trades' && !lockedScrip && (
+              <div className="inline-flex ml-2 rounded-xl border border-slate-200 p-0.5 bg-slate-50 text-xs font-bold">
+                {([false, true] as const).map((v) => (
+                  <button
+                    key={String(v)} onClick={() => setPeMode(v)} disabled={busy}
+                    title={v
+                      ? 'Off-market trade in an unlisted company: Delivery only, no STT / exchange / SEBI / IPF, long-term after 24 months'
+                      : 'Exchange-traded listed security: the usual charges and 12-month long-term'}
+                    className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50 ${peMode === v ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'}`}
+                  >
+                    {v ? 'Unlisted' : 'Listed'}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -587,6 +733,34 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 </div>
               )}
 
+              {/* Opened from the Private Equity segment. Says what is scoped and how to leave,
+                  because a picker that silently hides 5,000 securities reads as a broken
+                  autocomplete otherwise. */}
+              {peScope && (
+                <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-indigo-50 border border-indigo-200">
+                  <Lock className="w-3.5 h-3.5 text-indigo-600 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    {/* An empty dropdown reads as a broken autocomplete unless we say otherwise.
+                        This is the normal state the FIRST time an unlisted trade is recorded. */}
+                    {peRegistered === 0 && (
+                      <p className="text-[11px] text-indigo-800 leading-relaxed mt-1.5">
+                        <b className="font-bold">No unlisted companies are registered yet</b>, so the
+                        dropdown is empty. Type the company’s name and use
+                        {' '}<b className="font-bold">Add as unlisted</b> when it appears.
+                      </p>
+                    )}
+                    <button
+                      onClick={recheckMaster} disabled={rechecking}
+                      title="Re-read the Private Equities tab now, instead of waiting for its 90-second cache"
+                      className="btn-press mt-1.5 inline-flex items-center gap-1.5 text-[10px] font-black text-indigo-600 hover:text-indigo-700 disabled:opacity-50 cursor-pointer"
+                    >
+                      {rechecking ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                      {rechecking ? 'Rechecking…' : 'Just added a company? Recheck'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Line items */}
               <div className="space-y-3">
                 {lines.map((l, idx) => {
@@ -594,7 +768,16 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   // Unlisted company? Then there is no exchange leg: the class is Delivery by
                   // definition (nothing can be squared off intraday off-market) and only the
                   // charges that can actually arise are offered.
-                  const isPe = isPeScrip(activeMaster, l.isin, l.company);
+                  // Once a company RESOLVES its own class decides; only while it is still
+                  // unresolved does the scope's optimistic guess apply. Keeping `peScope ||` here
+                  // would hold Delivery locked and the STT box hidden after the user picked a
+                  // MUTUAL FUND, which is non-listed but not off-market.
+                  const resolvedCls = l.company.trim() && activeMaster
+                    ? assetClassOf(activeMaster, l.isin, l.company)
+                    : undefined;
+                  const isPe = resolvedCls
+                    ? ASSET_CLASSES[resolvedCls].offMarket
+                    : (l.company.trim() && activeMaster ? false : peScope);
                   const deliveryLocked = isDeliveryLocked(l.action) || isPe;
                   const prev = linePreview(l);
                   const err = lineError(l);
@@ -625,10 +808,13 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                       <div className={`grid grid-cols-1 gap-3 ${lockedScrip ? '' : 'sm:grid-cols-3'}`}>
                         {!lockedScrip && (
                           <div className="sm:col-span-2 space-y-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Company</label>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                              Company {peScope && <span className="font-normal normal-case text-slate-400">(unlisted only)</span>}
+                            </label>
                             <ScripCombobox
                               value={l.company} onChange={(v) => setLineIdentity(l, { company: v })}
-                              master={activeMaster} placeholder="Start typing a company name…"
+                              master={activeMaster} peOnly={peScope}
+                              placeholder={peScope ? 'Pick an unlisted company…' : 'Start typing a company name…'}
                               className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                             />
                           </div>
@@ -760,15 +946,6 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         </div>
                       ) : actionHint ? <p className="text-[10px] text-slate-400">{actionHint}</p> : null}
 
-                      {/* Say why the class is locked and half the charge boxes are gone. */}
-                      {isPe && (
-                        <p className="text-[10px] text-slate-500">
-                          <strong className="text-slate-700">Unlisted company</strong> — off-market, so
-                          Delivery is forced and STT / exchange / SEBI / IPF don't apply. Long-term
-                          after 24 months, not 12.
-                        </p>
-                      )}
-
                       {/* Charges */}
                       {!free && (
                         <div>
@@ -813,6 +990,26 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         {!free && <span className="text-slate-500">Charges <strong className="font-mono text-slate-700">{inr(prev.charges)}</strong></span>}
                         <span className="text-slate-500">{prev.buySide ? 'Net outflow' : 'Net inflow'} <strong className="font-mono text-slate-900">{inr(prev.net)}</strong></span>
                         {err && l.company.trim() !== '' && <span className="text-rose-500 font-semibold ml-auto">{err}</span>}
+                        {/* One-click fix for the one refusal that a write actually resolves - but
+                            WHICH tab is the user's call, because the tab decides the tax rule.
+                            One compact button per class rather than a default, so nothing is
+                            filed as private equity just because that tab came first. */}
+                        {peUnregistered(l) && (
+                          <span className="inline-flex items-center gap-1">
+                            <span className="text-[10px] text-slate-400 font-bold">Add as</span>
+                            {ASSET_CLASS_IDS.map((id) => (
+                              <button
+                                key={id}
+                                onClick={() => addToClassTab(l, id)} disabled={addingPe !== null}
+                                title={`Add ${l.company.trim()} to the “${ASSET_CLASSES[id].tab}” tab of the shared scrip master`}
+                                className="btn-press inline-flex items-center gap-1 px-2 py-1 text-[10px] font-black text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg disabled:opacity-50 cursor-pointer"
+                              >
+                                {addingPe === l.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                                {ASSET_CLASSES[id].badge}
+                              </button>
+                            ))}
+                          </span>
+                        )}
                       </div>
                     </div>
                   );

@@ -47,6 +47,13 @@ export interface CrossHolding {
    *  number is a valuation rather than a market price. */
   peValuation?: number;
   peValuationDate?: string;
+  /** The price this company LAST TRANSACTED at, from column F of a Holding tab. Used to value
+   *  an unlisted position that has no hand-entered valuation. When the same company is held in
+   *  two portfolios the MOST RECENT trade across them wins - one company must not show two
+   *  different prices in a consolidated table. */
+  lastTradePrice?: number;
+  /** Sheets serial of that trade. Also the tie-break above; 0/undefined when there is none. */
+  lastTradeDate?: number;
 }
 
 export interface CrossHoldingsResult {
@@ -92,7 +99,8 @@ export async function computeCrossHoldings(portfolios: CrossHoldingsPortfolio[])
   const reads = await Promise.all(portfolios.map(async (p) => {
     try {
       const res = await (gapi.client as any).sheets.spreadsheets.values.get({
-        spreadsheetId: p.sheetId, range: "Holding!A:E",
+        // A:G, not A:E - F is Last Trade Price and G its date (a Sheets serial).
+        spreadsheetId: p.sheetId, range: "Holding!A:G",
       });
       return { p, rows: (res?.result?.values || []) as any[][], ok: true };
     } catch {
@@ -134,6 +142,14 @@ export async function computeCrossHoldings(portfolios: CrossHoldingsPortfolio[])
       }
       if (!h.isin && isin) h.isin = isin;
 
+      // Most recent transaction across portfolios wins - see the field comment.
+      const ltp = toN(r[5]);
+      const ltd = toN(r[6]);
+      if (ltp > 0 && (h.lastTradeDate === undefined || (ltd || 0) >= h.lastTradeDate)) {
+        h.lastTradePrice = ltp;
+        h.lastTradeDate = ltd || 0;
+      }
+
       h.qty += qty;
       h.invested += invested;
       h.lots.push({
@@ -147,7 +163,7 @@ export async function computeCrossHoldings(portfolios: CrossHoldingsPortfolio[])
   const rows: CrossHolding[] = [];
 
   for (const h of byKey.values()) {
-    const cmp = cmpOf(h.isin, h.name);
+    const cmp = cmpOf(h.isin, h.name, h.lastTradePrice);
     h.cmp = cmp;
     // An unlisted company has no market price to be missing, so it is neither "priced" nor
     // "unpriced" — counting it as unpriced would put a permanent gap in the Dashboard's

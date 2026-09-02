@@ -2,8 +2,9 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
   normName, loadScripMaster, resolveScrip, lookupScrip, findNameCollisions, ScripMaster, ScripEntry, NameCollision,
-  SCRIP_MASTER_SPREADSHEET_ID, isPriceExcepted, ltDaysFor,
+  SCRIP_MASTER_SPREADSHEET_ID, isPriceExcepted, ltDaysFor, isPeScrip,
 } from "./scripMaster";
+import { updatePrivateEquityCmp } from "./privateEquityWrite";
 import { loadScripPrices, makePriceResolver, makeExceptionResolver, ScripPrice } from "./scripPrices";
 import { invalidateDashboard } from "./dashboardCache";
 import { loadScripIndustries, makeIndustryResolver } from "./scripIndustries";
@@ -29,6 +30,11 @@ export interface RebuildHoldingResult {
   // Names this portfolio uses that map to 2+ scrip-master entries (e.g. a rename left an
   // old entry behind) → those trades won't merge into one holding. Surfaced as a warning.
   nameCollisions: NameCollision[];
+  /** Unlisted companies whose CMP was refreshed on the "Private Equities" tab by this rebuild. */
+  peCmpWritten: { company: string; price: number }[];
+  /** Set when the CMP refresh itself failed. The rebuild still succeeded - the Holding tab is
+   *  written before this runs - so it is reported, not thrown. */
+  peCmpError?: string;
 }
 
 interface HoldingAcc {
@@ -578,7 +584,10 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
 
   // Mirrors ReplayTrade (this reader feeds the same squareOffIntraday); `xfer` marks a
   // cross-portfolio transfer leg so the same-day square-off never nets it against a trade.
-  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; xfer?: boolean; }
+  // `price` is the all-in COST used for the weighted average. `rawPrice` is the price the
+  // trade actually happened at - a different number for a buy (cost includes STT and
+  // brokerage) and the only one that means anything as a "last traded at".
+  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; rawPrice: number; xfer?: boolean; }
   const trades: TradeRow[] = [];
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
@@ -609,6 +618,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
       type,
       qty,
       price: isNaN(price) ? 0 : price,
+      rawPrice: isNaN(avgPrice) ? 0 : avgPrice,
       xfer,
     });
   }
@@ -698,6 +708,32 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     });
   }
 
+  /**
+   * The last price each scrip actually transacted at.
+   *
+   * For an UNLISTED company this is the only price evidence that exists: no feed quotes it, so
+   * without this its holding is valued at its own average cost and its unrealised gain is
+   * always exactly zero, which is not a valuation at all - it is a tautology.
+   *
+   * Three kinds of row are excluded because none of them is a price:
+   *   - a cross-portfolio TRANSFER, which is the same owner moving shares, not a market trade;
+   *   - a SPLIT, which rescales lots;
+   *   - anything at 0 (a Bonus allotment is free, not worth nothing).
+   *
+   * Ties on the same date fall back to sheet row order, the same stand-in for execution order
+   * the FIFO replay uses - consistent with the rest of the engine, and the best available until
+   * the ledger carries a trade time.
+   */
+  const lastTrade = new Map<string, { price: number; ts: number; idx: number }>();
+  for (const t of trades) {
+    if (t.xfer || t.type === "SPLIT" || !(t.rawPrice > 0)) continue;
+    const key = keyOf(t as ReplayTrade);
+    const prev = lastTrade.get(key);
+    if (!prev || t.ts > prev.ts || (t.ts === prev.ts && t.idx > prev.idx)) {
+      lastTrade.set(key, { price: t.rawPrice, ts: t.ts, idx: t.idx });
+    }
+  }
+
   // Every name this portfolio actually references (trades + opening lots), normalized —
   // used below to flag ONLY the scrip-master name collisions that affect THIS portfolio.
   const seenNames = new Set<string>();
@@ -714,7 +750,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   // lets the Holdings view show it as a discrepancy so it can be traced and fixed.
   // Negatives carry invested 0 so they don't distort the total, and computeAum already
   // skips qty<=0 so the dashboard AUM is unaffected.
-  interface HoldingOut { securityName: string; isin: string; quantity: number; avgBuyPrice: number; invested: number; }
+  interface HoldingOut { securityName: string; isin: string; quantity: number; avgBuyPrice: number; invested: number; lastPrice: number; lastTs: number; }
   const active: HoldingOut[] = [];
   for (const [key, o] of fifoOut) {
     if (Math.abs(o.netQty) <= 1e-9) continue;
@@ -722,11 +758,23 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     if (!h) continue;
     const invested = o.netQty > 0 ? o.invested : 0;   // negatives → invested 0
     const avg = o.netQty > 0 ? invested / o.netQty : 0;
-    active.push({ securityName: h.securityName, isin: h.isin, quantity: o.netQty, avgBuyPrice: avg, invested });
+    const lt = lastTrade.get(key);
+    active.push({
+      securityName: h.securityName, isin: h.isin, quantity: o.netQty, avgBuyPrice: avg, invested,
+      lastPrice: lt?.price ?? 0, lastTs: lt?.ts ?? 0,
+    });
   }
   active.sort((a, b) => b.invested - a.invested);
 
-  const rows: any[][] = [["Company Name", "ISIN", "Quantity", "Avg Buy Price", "Invested Value"]];
+  // Appended at the END on purpose: every existing reader of this tab is positional and pinned
+  // to A:E, so adding columns is invisible to them while inserting one would silently shift a
+  // cost basis. Readers that want the new columns widen their own range to A:G.
+  const rows: any[][] = [["Company Name", "ISIN", "Quantity", "Avg Buy Price", "Invested Value", "Last Trade Price", "Last Trade Date"]];
+  // Date as a SHEETS SERIAL, not a formatted string. A display string comes back in whatever
+  // the sheet's locale renders and misparses (dd/mm vs mm/dd); a bare serial has no locale, and
+  // `formatDMY` already reads one. Epoch 1899-12-30, matching `fromSerial` in dates.ts.
+  const toSerial = (ts: number): string | number =>
+    ts > 0 ? Math.round((ts - Date.UTC(1899, 11, 30)) / 86400000) : "";
   let totalInvested = 0;
   for (const h of active) {
     totalInvested += h.invested;
@@ -736,9 +784,11 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
       h.quantity,
       parseFloat(h.avgBuyPrice.toFixed(4)),
       parseFloat(h.invested.toFixed(2)),
+      h.lastPrice > 0 ? parseFloat(h.lastPrice.toFixed(4)) : "",
+      toSerial(h.lastTs),
     ]);
   }
-  rows.push(["Total", "", "", "", parseFloat(totalInvested.toFixed(2))]);
+  rows.push(["Total", "", "", "", parseFloat(totalInvested.toFixed(2)), "", ""]);
 
   // The Holding tab may not exist yet (e.g. first run on a fresh spreadsheet)
   await ensureSheetTabs(spreadsheetId, ["Holding"]);
@@ -763,6 +813,41 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   // function, which is why the invalidation lives here rather than at seven call sites.
   invalidateDashboard();
 
+  /**
+   * Refresh the CMP of every UNLISTED holding on the shared "Private Equities" tab from the
+   * price it last traded at.
+   *
+   * Here, rather than behind a button, because this function is the one place that has just
+   * replayed every trade - the CMP is refreshed exactly when the data it derives from changes.
+   * `updatePrivateEquityCmp` decides what may be overwritten (a hand-entered figure survives
+   * unless a LATER trade exists); this only supplies the evidence.
+   *
+   * Wrapped so it can never fail the rebuild. The Holding tab is already written by this point,
+   * and losing a correct rebuild because a shared sheet was busy would be the worse trade.
+   */
+  let peCmpWritten: { company: string; price: number }[] = [];
+  let peCmpError: string | undefined;
+  try {
+    const peUpdates = active
+      .map((h) => {
+        const lt = lastTrade.get(keyOf({ isin: h.isin, name: h.securityName } as ReplayTrade));
+        return lt && isPeScrip(master, h.isin, h.securityName)
+          ? { isin: h.isin, name: h.securityName, price: lt.price, ts: lt.ts }
+          : null;
+      })
+      .filter((u): u is NonNullable<typeof u> => u !== null);
+    if (peUpdates.length > 0) {
+      const r = await updatePrivateEquityCmp(SCRIP_MASTER_SPREADSHEET_ID, peUpdates);
+      peCmpWritten = r.written;
+      if (r.noCmpColumn) {
+        peCmpError = `The "Private Equities" tab has no CMP / Valuation column, so unlisted prices could not be updated.`;
+      }
+    }
+  } catch (e: any) {
+    peCmpError = e?.result?.error?.message || e?.message || "Could not update unlisted CMPs.";
+    console.warn("PE CMP refresh failed (the Holding tab was still rebuilt):", e);
+  }
+
   return {
     positions: active.length,
     totalInvested: parseFloat(totalInvested.toFixed(2)),
@@ -770,6 +855,8 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     unresolved: [...unresolvedMap.values()],
     master,
     nameCollisions,
+    peCmpWritten,
+    peCmpError,
   };
 }
 
@@ -839,7 +926,8 @@ export async function computeAum(portfolios: { id: string; label: string; sheetI
   for (const p of portfolios) {
     let cur = 0, inv = 0, positions = 0, priced = 0, excepted = 0, exceptedValue = 0;
     try {
-      const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: p.sheetId, range: "Holding!A:E" });
+      // A:G - F carries Last Trade Price, the fallback an unlisted position is valued at.
+      const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: p.sheetId, range: "Holding!A:G" });
       const rows: any[][] = res?.result?.values || [];
       for (let i = 1; i < rows.length; i++) {
         const r = rows[i]; if (!r) continue;
@@ -851,7 +939,7 @@ export async function computeAum(portfolios: { id: string; label: string; sheetI
         const investedVal = toN(r[4]);
         if (isNaN(qty) || qty <= 0 || isNaN(avg)) continue;
         positions++;
-        const cmp = cmpOf(isin, name);
+        const cmp = cmpOf(isin, name, toN(r[5]));
         // A PE company's hand-entered valuation arrives through cmpOf too, so it is a real
         // number here — but it is NOT a market price, so it counts as excepted, not priced.
         const ex = isExcepted(isin, name);
@@ -929,7 +1017,7 @@ export async function computeIndustryAllocation(portfolios: { id: string; label:
   const companies = new Map<string, { industry: string; invested: number; current: number }>();
   for (const p of portfolios) {
     try {
-      const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: p.sheetId, range: "Holding!A:E" });
+      const res = await (gapi.client as any).sheets.spreadsheets.values.get({ spreadsheetId: p.sheetId, range: "Holding!A:G" });
       const rows: any[][] = res?.result?.values || [];
       for (let i = 1; i < rows.length; i++) {
         const r = rows[i]; if (!r) continue;
@@ -941,7 +1029,7 @@ export async function computeIndustryAllocation(portfolios: { id: string; label:
         let key = (isin || "").trim().toUpperCase() || normName(name);
         if (master) { const e = lookupScrip(master, isin, name).entry; if (e) key = e.key; }
         const industry = industryOf(isin, name) || "Unclassified";
-        const cmp = cmpOf(isin, name);
+        const cmp = cmpOf(isin, name, toN(r[5]));
         const cur = qty * (cmp !== undefined ? cmp : (isNaN(avg) ? 0 : avg));
         const inv = isNaN(investedVal) ? qty * (isNaN(avg) ? 0 : avg) : investedVal;
         const prev = companies.get(key);
@@ -965,6 +1053,14 @@ export async function computeIndustryAllocation(portfolios: { id: string; label:
   return { slices, totalCompanies: companies.size, classified, sectorByKey };
 }
 
+/** A sale that could not be filed as short or long because its class has no decided rule. */
+export interface UnclassifiedSale {
+  name: string;
+  isin: string;
+  qty: number;
+  date: string;
+}
+
 export interface CapitalGainsResult {
   stcg: number;
   ltcg: number;
@@ -972,6 +1068,12 @@ export interface CapitalGainsResult {
   exported: number;        // FY25-26+ sale rows written to LTST
   unresolved: UnresolvedScrip[];
   master: ScripMaster;
+  /**
+   * Sales deliberately LEFT OUT of the figures above, because their asset class has no decided
+   * holding-period rule (currently: mutual funds). Reported so the omission is visible - a sale
+   * that silently vanishes from a tax ledger is worse than one that refuses to classify.
+   */
+  unclassified: UnclassifiedSale[];
 }
 
 /**
@@ -1119,6 +1221,9 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   // ── Step 4: FIFO-match delivery sells → STCG / LTCG rows ──
   interface CGRecord { saleDate: string; saleDateObj: Date; assetName: string; isin: string; qtySold: number; salePrice: number; saleAmt: number; purDate: string; purPrice: number; acqCost: number; intradayCg: number; stcg: number; ltcg: number; }
   const allRecords: CGRecord[] = [];
+  // Sales whose holding-period rule is undecided. Collected, never guessed at - see the refusal
+  // in the FIFO match below.
+  const unclassified: UnclassifiedSale[] = [];
 
   // Automatic intraday reconciliation per (scrip, day) — ALWAYS ON, tag-independent.
   // A same-day buy+sell of the same scrip is an intraday round-trip by definition, so the
@@ -1263,7 +1368,19 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
         // 12 months for listed equity, 24 for an UNLISTED company — the concessional
         // listed-share period doesn't apply to unquoted shares, so a PE holding sold at
         // 15 months is SHORT term. See ltDaysFor.
-        const isLT = holdingDays >= ltDaysFor(master, sell.isin, sell.stockName);
+        //
+        // NULL means the rule is undecided (a mutual fund: equity-oriented is 12 months with
+        // STT, post-Apr-2023 debt is always short-term at slab, other is 24). Refuse the row
+        // rather than pick one. `>= null` would compile and coerce to `>= 0`, filing every one
+        // of them as LONG TERM with a green build - there is no strictNullChecks here to catch
+        // it, which is exactly why this is an explicit guard and not a type error.
+        const ltDays = ltDaysFor(master, sell.isin, sell.stockName);
+        if (ltDays === null) {
+          unclassified.push({ name: sell.stockName, isin: sell.isin, qty: matchQty, date: fmtDate(sell.dateObj) });
+          lot.remaining -= matchQty; sellLeft -= matchQty;   // the FIFO still consumes the lot
+          continue;
+        }
+        const isLT = holdingDays >= ltDays;
         allRecords.push({ saleDate: fmtDate(sell.dateObj), saleDateObj: sell.dateObj, assetName: sell.stockName, isin: sell.isin, qtySold: matchQty, salePrice: sell.avgPrice, saleAmt, purDate: fmtDate(lot.buyDate), purPrice: lot.purPrice, acqCost, intradayCg: 0, stcg: isLT ? 0 : gain, ltcg: isLT ? gain : 0 });
         lot.remaining -= matchQty; sellLeft -= matchQty;
       }
@@ -1341,5 +1458,6 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     exported: reportRecords.length,
     unresolved: [...unresolvedMap.values()],
     master,
+    unclassified,
   };
 }
