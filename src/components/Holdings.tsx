@@ -2227,7 +2227,7 @@ export default function Holdings({
       <th
         key={colKey}
         onClick={sortKey ? () => requestSort(sortKey) : undefined}
-        className={`relative px-3 py-2.5 select-none border-r border-slate-200 last:border-r-0 ${sortKey ? 'cursor-pointer hover:bg-slate-100' : ''}`}
+        className={`relative px-3 py-2.5 select-none border-r border-[color:var(--hg-edge)] last:border-r-0 ${sortKey ? 'cursor-pointer hover:bg-[color:var(--hg-head-hover)]' : ''}`}
       >
         <div className={`flex items-center gap-1 ${justify}`}>
           <span className="truncate">{label}</span>
@@ -4516,7 +4516,7 @@ export default function Holdings({
                     Equity" would show you three rows and no idea what they're worth. */}
                 {activePortfolio !== 'local' && (
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                    <div className="inline-flex items-center p-1 bg-white border border-slate-200 rounded-xl shadow-xs shrink-0">
+                    <div className="inline-flex items-center p-1 bg-white border border-[color:var(--hg-edge)] rounded-xl shadow-xs shrink-0">
                       {([
                         { key: 'all' as const, label: 'All', count: segmentCounts.all, hint: 'Every holding in this account' },
                         { key: 'eq' as const, label: 'Equity', count: segmentCounts.eq, hint: 'Listed securities only' },
@@ -4731,7 +4731,7 @@ export default function Holdings({
                     </div>
                   </div>
                 ) : (
-                  <div className="overflow-x-auto border border-slate-200 rounded-2xl">
+                  <div className="overflow-x-auto border border-[color:var(--hg-edge)] rounded-2xl">
                     {(() => { const holdingColKeys = ['name','quantity','avgCost','currentPrice','currentValue','profit', ...(activePortfolio === 'local' ? ['settings'] : [])]; const holdingsWidth = holdingColKeys.reduce((s, k) => s + (colWidths[k] ?? HOLDINGS_COL_DEFAULTS[k] ?? 120), 0); return (
                     <table
                       className="border-collapse whitespace-nowrap text-xs text-left [&_td]:overflow-hidden"
@@ -4740,7 +4740,7 @@ export default function Holdings({
                       <colgroup>
                         {holdingColKeys.map((k) => <col key={k} style={{ width: (colWidths[k] ?? HOLDINGS_COL_DEFAULTS[k] ?? 120) + 'px' }} />)}
                       </colgroup>
-                      <thead className="bg-[#f8fafc] border-b border-slate-200 font-extrabold text-slate-600 uppercase tracking-wider select-none">
+                      <thead className="bg-[color:var(--hg-head-bg)] border-b border-[color:var(--hg-edge)] font-extrabold text-slate-600 uppercase tracking-wider select-none">
                         <tr>
                           {headCell('name', 'Security Name', 'left', 'symbol')}
                           {headCell('quantity', 'Shares Qty', 'right', 'quantity')}
@@ -4751,7 +4751,7 @@ export default function Holdings({
                           {activePortfolio === 'local' && headCell('settings', 'Settings', 'center')}
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-200">
+                      <tbody className="divide-y divide-[color:var(--hg-edge)]">
                         {sortedHoldings.map((h, idx) => {
                           const isPositive = h.unrealizedGain >= 0;
                           // Unlisted AND never marked: its "current" figure is its own cost, so
@@ -4771,9 +4771,9 @@ export default function Holdings({
                                 fetchTransactionsForStock(h.original.companyName || h.original.name, h.original.isin);
                               }}
                               style={{ animationDelay: `${Math.min(idx, 15) * 30}ms` }}
-                              className="hover:bg-slate-50/80 cursor-pointer transition-colors animate-riseIn"
+                              className="hover:bg-[color:var(--hg-row-hover)] cursor-pointer transition-colors animate-riseIn"
                             >
-                              <td className="px-3 py-2.5 overflow-hidden border-r border-slate-100 last:border-r-0">
+                              <td className="px-3 py-2.5 overflow-hidden border-r border-[color:var(--hg-rule)] last:border-r-0">
                                 <div className="flex items-center gap-2 min-w-0">
                                   <span className="font-bold text-slate-800 truncate" title={h.name}>
                                     {h.name}
@@ -4820,15 +4820,15 @@ export default function Holdings({
                                 </div>
                               </td>
 
-                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-r border-slate-100 last:border-r-0 ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-r border-[color:var(--hg-rule)] last:border-r-0 ${h.discrepancy ? 'text-rose-600' : 'text-slate-700'}`}>
                                 {formatNum(h.quantity)}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right font-mono text-slate-500 border-r border-slate-100 last:border-r-0">
+                              <td className="px-3 py-2.5 text-right font-mono text-slate-500 border-r border-[color:var(--hg-rule)] last:border-r-0">
                                 {formatINR(h.avgCost)}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right select-none font-mono border-r border-slate-100 last:border-r-0">
+                              <td className="px-3 py-2.5 text-right select-none font-mono border-r border-[color:var(--hg-rule)] last:border-r-0">
                                 {editingPriceId === h.id ? (
                                   <div className="flex items-center justify-end gap-1.5">
                                     <input
@@ -4893,11 +4893,11 @@ export default function Holdings({
                                 )}
                               </td>
 
-                              <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900 border-r border-slate-100 last:border-r-0">
+                              <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900 border-r border-[color:var(--hg-rule)] last:border-r-0">
                                 {formatINR(h.currentValue)}
                               </td>
 
-                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-r border-slate-100 last:border-r-0 ${unvaluedPe ? 'text-slate-400' : isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
+                              <td className={`px-3 py-2.5 text-right font-mono font-bold border-r border-[color:var(--hg-rule)] last:border-r-0 ${unvaluedPe ? 'text-slate-400' : isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
                                 {unvaluedPe ? (
                                   <div title="No valuation entered, so there is nothing to compare cost against — this is not a flat return">—</div>
                                 ) : (

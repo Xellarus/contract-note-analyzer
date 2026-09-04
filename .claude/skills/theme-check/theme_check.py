@@ -114,6 +114,31 @@ def main():
                 if pct >= 40 and full not in layers['dark'] and ('hover:' + full) not in layers['dark']:
                     findings['C'].append((f, line, c))
 
+            # F ── a SOLID light-tint background with no dark entry. Category C covers only the
+            # opacity-SUFFIXED form, so a plain `bg-blue-50` was in no category at all - yet it
+            # fails identically, keeping Tailwind's near-white base and reading as a bright chip
+            # in a dark UI. Six such classes across nine call sites were live when this was
+            # added, four of them below 2.3:1 contrast.
+            #
+            # `hover:`/`group-hover:` variants ARE included, because a hover that flashes stock
+            # near-white is the same defect - but the lookup must try the variant-qualified name
+            # too: the remap layer names `.dark .hover\:bg-x:hover`, so comparing the bare util
+            # would report every correctly-remapped hover as missing. That false positive is
+            # exactly what made a first pass at this check unusable.
+            # Shade 200 included: a stock `bg-red-200` pill sitting on a themed dark panel
+            # reads at 11.7:1 - the same defect as a 50/100 fill and worse, because a 200 is
+            # more saturated. Restricting this to (50, 100) let exactly that ship.
+            if (not opacity and util.startswith('bg-') and shade in (50, 100, 200)
+                    and '[' not in variants):
+                # A variant is painted ONLY by its variant-qualified selector; the bare
+                # utility's entry cannot reach it. So test the name that would actually have to
+                # be there, and nothing else.
+                qualified = variants + util
+                missing = ((qualified not in layers['dark']) if variants
+                           else (util not in layers['dark']))
+                if missing:
+                    findings['F'].append((f, line, c))
+
             if variants == '' and util.startswith('bg-'):
                 bgs[util] = c
             elif variants == 'hover:' and util.startswith('bg-'):
@@ -136,16 +161,18 @@ def main():
                         findings['E'].append((f, line, f'{bg} + hover:{hv} -> both {rest} in {layer}'))
 
     # D ── hover variant used whose base IS remapped but the hover variant is not
-    used_hover = set()
+    used_variant = set()
     for _f, _l, classes in scan_source():
         for c in classes:
             m = util_exact.match(c)
-            if m and m.group(1) == 'hover:':
-                used_hover.add(m.group(2) + (m.group(3) or ''))
-    for util in sorted(used_hover):
+            # Any single state variant, not just `hover:` - `group-hover:` and `disabled:` are
+            # painted by their own selector too, and the file has no entry for either.
+            if m and m.group(1) in ('hover:', 'group-hover:', 'disabled:', 'focus:'):
+                used_variant.add((m.group(1), m.group(2) + (m.group(3) or '')))
+    for pfx, util in sorted(used_variant):
         for layer in ('dark', 'light'):
-            if util in layers[layer] and ('hover:' + util) not in layers[layer]:
-                findings['D'].append(('-', 0, f'hover:{util} unremapped in {layer} (base {util} is remapped)'))
+            if util in layers[layer] and (pfx + util) not in layers[layer]:
+                findings['D'].append(('-', 0, f'{pfx}{util} unremapped in {layer} (base {util} is remapped)'))
 
     TITLES = {
         'A': ('FAIL', 'Shade does not exist in Tailwind - generates NO CSS, silently inherits'),
@@ -153,10 +180,11 @@ def main():
         'C': ('WARN', 'Opacity-suffixed light background with no dark entry - washes out ivory text'),
         'D': ('INFO', 'Hover variant lacks its own entry while the base class has one'),
         'E': ('FAIL', 'Zero-delta hover - rest and hover paint the same colour, hover is invisible'),
+        'F': ('WARN', 'SOLID light-tint background with no dark entry - a near-white chip in a dark UI'),
     }
 
     total_fail = 0
-    for key in ('A', 'E', 'C', 'B', 'D'):
+    for key in ('A', 'E', 'C', 'F', 'B', 'D'):
         level, title = TITLES[key]
         rows = findings[key]
         print(f'\n[{level}] {title}  ({len(rows)})')

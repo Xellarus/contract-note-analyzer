@@ -45,8 +45,15 @@ html, body, #root, * {
    is a CLASS toggled inside the app, not the OS preference. The meta tag would make native
    scrollbars, <select> popups, date pickers and the canvas follow the SYSTEM setting —
    wrong for anyone running the app in dark while Windows is light, or the reverse. */
-:root { color-scheme: light; --focus-ring: #8a6a1e; }   /* Brass on Paper */
-.dark { color-scheme: dark;  --focus-ring: #d9a441; }   /* Brass Terminal */
+:root { color-scheme: light; --focus-ring: #8a6a1e;
+        /* Holdings-grid chrome. Values are what the utilities they replace already resolved to,
+           so the migration is colour-neutral by construction rather than by inspection.
+           Extends the one runtime token this file already had rather than adding a mechanism. */
+        --hg-rule: #e6ddc8; --hg-edge: #ddd3bc; --hg-head-bg: #f1ebdd;
+        --hg-head-hover: #e4dbc4; --hg-row-hover: #f8fafccc; }   /* Brass on Paper */
+.dark { color-scheme: dark;  --focus-ring: #d9a441;
+        --hg-rule: #2a2721; --hg-edge: #2a2721; --hg-head-bg: #221e17;
+        --hg-head-hover: #242019; --hg-row-hover: #242019; }   /* Brass Terminal */
 
 @layer base {
   button:focus-visible,
@@ -257,33 +264,47 @@ html, body, #root, * {
 .dark .text-rose-600,
 .dark .text-rose-500       { color: #f28577; }
 .dark .text-red-700,
-.dark .text-red-600        { color: #f28577; }
+.dark .text-red-600,
+.dark .text-red-800,
+.dark .text-red-900        { color: #f28577; }
 .dark .text-amber-900,
 .dark .text-amber-800,
 .dark .text-amber-700,
 .dark .text-amber-600      { color: #f0c65a; }
 .dark .text-orange-700     { color: #f3b47c; }
 .dark .text-blue-800       { color: #d6cfbf; }
-.dark .text-violet-800     { color: #e0b45e; }
+.dark .text-violet-800,
+.dark .text-violet-700,
+.dark .text-blue-600       { color: #e0b45e; }
 /* deepest accent shades (parsed contract-note preview money columns) */
 .dark .text-emerald-950    { color: #52c98a; }
 .dark .text-indigo-950     { color: #e0b45e; }
 .dark .text-orange-950,
 .dark .text-orange-900     { color: #fdba74; }
 .dark .text-teal-900,
-.dark .text-teal-800       { color: #5eead4; }
+.dark .text-teal-800,
+.dark .text-teal-700       { color: #5eead4; }
 .dark .text-purple-950,
-.dark .text-purple-900     { color: #d8b4fe; }
+.dark .text-purple-900,
+/* The Levies formula code block at App.tsx:2255, directly under the pill fixed above it. Stock
+   purple-800 on the dark card is ~2.0:1 - a formula the user is meant to READ - while its three
+   siblings in the identical pill+code pattern (blue-800 / amber-800 / rose-800) were all
+   already remapped. It sat between the 600 and the 900 in this very group. */
+.dark .text-purple-800,
+.dark .text-purple-600     { color: #d8b4fe; }
 .dark .text-fuchsia-950,
 .dark .text-fuchsia-900    { color: #f0abfc; }
 .dark .text-sky-950,
-.dark .text-sky-900        { color: #7dd3fc; }
+.dark .text-sky-900,
+.dark .text-sky-700        { color: #7dd3fc; }
 .dark .text-stone-900,
 .dark .text-stone-800      { color: #d6d3d1; }
 
 /* light accent chip backgrounds → subtle warm dark tints */
 .dark .bg-indigo-50,
-.dark .bg-violet-50        { background-color: #2e2820; }
+.dark .bg-violet-50,
+.dark .bg-blue-50,
+.dark .bg-purple-50        { background-color: #2e2820; }
 .dark .bg-indigo-100       { background-color: #383125; }
 .dark .bg-indigo-50\/50    { background-color: rgb(46 40 32 / 0.5); }
 .dark .bg-emerald-50       { background-color: #12291e; }
@@ -295,19 +316,56 @@ html, body, #root, * {
 .dark .bg-amber-100        { background-color: #37290c; }
 .dark .bg-orange-50        { background-color: #2a1a0e; }
 .dark .bg-red-50           { background-color: #2e1614; }
+.dark .bg-red-100          { background-color: #3b1c19; }
+.dark .bg-red-200          { background-color: #4a211c; }
+.dark .bg-emerald-200      { background-color: #1f4a35; }
+.dark .bg-orange-100       { background-color: #372413; }
+/* Kept perceptually apart from each other and from the brass chip - see SourceBadge. */
+.dark .bg-teal-50          { background-color: #16302a; }
+.dark .bg-sky-50           { background-color: #1d2b38; }
 
 .dark .border-indigo-100,
 .dark .border-indigo-200,
+.dark .border-blue-100,
 .dark .border-violet-200   { border-color: #453f34; }
 .dark .border-indigo-400   { border-color: #6b5c39; }
 .dark .border-emerald-100,
 .dark .border-emerald-200  { border-color: #1f4a35; }
 .dark .border-rose-100,
-.dark .border-rose-200     { border-color: #6b322b; }
+.dark .border-rose-200,
+.dark .border-rose-300     { border-color: #6b322b; }
 .dark .border-amber-200    { border-color: #92400e; }
 .dark .border-orange-200   { border-color: #9a3412; }
 .dark .border-red-200      { border-color: #6b2c26; }
+.dark .border-sky-100,
+.dark .border-sky-200      { border-color: #2d4459; }
+.dark .border-teal-200     { border-color: #234b42; }
 .dark .border-violet-100\/30 { border-color: rgb(217 164 65 / 0.25); }
+
+/* Variant fills whose BARE utility is remapped but whose variant was not - so the control
+   flashed a stock near-white on hover in dark. Four buttons sit in one toolbar row
+   (Holdings.tsx:4276/4283/4302/4346) and only two of them were themed; this evens them up.
+   `group-hover:` and `disabled:` had no entry anywhere in the file, in either theme. */
+.dark .hover\:bg-emerald-100:hover    { background-color: #173526; }
+.dark .hover\:bg-amber-100:hover      { background-color: #37290c; }
+.dark .group-hover\:bg-indigo-50:is(:where(.group):hover *) { background-color: #2e2820; }
+.dark .disabled\:bg-slate-100:disabled { background-color: #242019; }
+
+/* Ink on hover: one rung BRIGHTER. Values are the adjacent slate rungs verbatim, except the
+   900 hover, which has no rung above it. */
+.dark .hover\:text-slate-600:hover  { color: #ddd6c8; }
+.dark .hover\:text-slate-700:hover  { color: #eae5da; }
+.dark .hover\:text-slate-800:hover  { color: #f0ebe0; }
+.dark .hover\:text-slate-900:hover  { color: #f8f4ea; }
+.dark .hover\:text-rose-600:hover   { color: #f7a79b; }
+.dark .group-hover\:text-indigo-600:is(:where(.group):hover *),
+.dark .group-hover\:text-indigo-700:is(:where(.group):hover *) { color: #f0c65a; }
+/* Disabled ink must be DIMMER than the rest state. Stock made it BRIGHTER (9.39 -> 6.74), i.e.
+   a disabled control drew more attention than an enabled one. WCAG exempts disabled controls
+   from the 4.5 floor, so this is judged on direction, not on AA. */
+.dark .disabled\:text-slate-400:disabled { color: #857d6e; }
+/* A hairline must stay a hairline. Stock turned this one into a 11.93:1 glowing ring. */
+.dark .hover\:border-slate-300:hover { border-color: #3a352c; }
 
 /* ── Hover states ── */
 .dark .hover\:bg-white:hover,
@@ -377,6 +435,8 @@ html, body, #root, * {
 .dark .bg-indigo-50\/70             { background-color: rgb(46 40 32 / 0.70); }
 .dark .bg-indigo-50\/55             { background-color: rgb(46 40 32 / 0.55); }
 .dark .bg-indigo-50\/40             { background-color: rgb(46 40 32 / 0.40); }
+/* Selected trade row. Interpolates its own /55-/70 ladder, so the value is forced not chosen. */
+.dark .bg-indigo-50\/60             { background-color: rgb(46 40 32 / 0.60); }
 .dark .hover\:bg-indigo-50\/40:hover { background-color: rgb(46 40 32 / 0.50); }
 .dark .bg-amber-50\/60              { background-color: rgb(42 32 8 / 0.70); }
 .dark .bg-amber-50\/50              { background-color: rgb(42 32 8 / 0.60); }
@@ -388,6 +448,14 @@ html, body, #root, * {
    pale wash under bright green text. Same alpha as the indigo twin: they are a designed pair. */
 .dark .bg-emerald-50\/70            { background-color: rgb(18 41 30 / 0.70); }
 .dark .bg-red-50\/40                { background-color: rgb(46 22 20 / 0.50); }
+.dark .bg-red-50\/90                { background-color: rgb(46 22 20 / 0.90); }
+.dark .bg-rose-100\/90              { background-color: rgb(59 30 26 / 0.90); }
+.dark .bg-emerald-100\/90           { background-color: rgb(23 53 38 / 0.90); }
+/* Decorative blue at identity alpha on the brass chip base; its light twin is at line ~455. */
+.dark .bg-blue-50\/80               { background-color: rgb(46 40 32 / 0.80); }
+/* The hover on the "unpriced" pill. bg-orange-50 is remapped in BOTH themes but this hover in
+   neither, so the button flashed stock near-white on hover in light AND dark. */
+.dark .hover\:bg-orange-100:hover   { background-color: #372413; }
 
 /* ──────────────────────────────────────────────────────────────────────────
    LIGHT THEME — "BRASS ON PAPER"
@@ -441,11 +509,13 @@ html:not(.dark) .bg-indigo-100      { background-color: #e6dcc6; }
 html:not(.dark) .hover\:bg-indigo-100:hover,
 html:not(.dark) .hover\:bg-violet-100:hover { background-color: #e0d5bc; }
 html:not(.dark) .bg-indigo-50\/70   { background-color: rgb(84 66 32 / 0.06); }
+html:not(.dark) .bg-indigo-50\/60   { background-color: rgb(84 66 32 / 0.055); }
 html:not(.dark) .bg-indigo-50\/55   { background-color: rgb(84 66 32 / 0.05); }
 html:not(.dark) .bg-indigo-50\/50   { background-color: rgb(84 66 32 / 0.045); }
 html:not(.dark) .bg-indigo-50\/30,
 html:not(.dark) .bg-indigo-50\/25   { background-color: rgb(84 66 32 / 0.03); }
 html:not(.dark) .hover\:bg-indigo-50\/20:hover { background-color: rgb(84 66 32 / 0.04); }
+html:not(.dark) .hover\:bg-indigo-50\/40:hover { background-color: rgb(84 66 32 / 0.09); }
 html:not(.dark) .bg-indigo-100\/60  { background-color: rgb(84 66 32 / 0.09); }
 html:not(.dark) .bg-blue-50\/80     { background-color: rgb(84 66 32 / 0.06); }
 html:not(.dark) .bg-indigo-500\/10  { background-color: rgb(60 48 22 / 0.07); }
@@ -499,6 +569,8 @@ html:not(.dark) .text-red-700       { color: #b93226; }
    valuation from a market price, so it has to read. Terracotta: warm enough to belong on
    parchment, far enough from the brass accent and the rose error tint to stay its own signal. */
 html:not(.dark) .bg-orange-50       { background-color: #f6e6d2; }
+html:not(.dark) .bg-orange-100      { background-color: #eddac2; }
+html:not(.dark) .hover\:bg-orange-100:hover { background-color: #eddac2; }
 html:not(.dark) .border-orange-200  { border-color: #d8a86f; }
 html:not(.dark) .text-orange-700    { color: #8f4b16; }
 
@@ -521,6 +593,19 @@ html:not(.dark) .bg-slate-200       { background-color: #ddd3bb; }
 html:not(.dark) .hover\:bg-white:hover     { background-color: #fbf6eb; }
 html:not(.dark) .hover\:bg-slate-50:hover  { background-color: #eee7d7; }
 html:not(.dark) .hover\:bg-slate-100:hover { background-color: #e4dbc4; }
+/* Ink on hover: one rung DARKER, mirroring the dark block. Without these the ink jumped to a
+   COOL grey on parchment - legible, but the wrong hue in a warm theme. */
+html:not(.dark) .hover\:text-slate-600:hover  { color: #3a342a; }
+html:not(.dark) .hover\:text-slate-700:hover  { color: #211d15; }
+html:not(.dark) .hover\:text-slate-800:hover  { color: #16130d; }
+html:not(.dark) .hover\:text-slate-900:hover  { color: #0a0806; }
+html:not(.dark) .hover\:text-rose-600:hover   { color: #ab2c20; }
+html:not(.dark) .group-hover\:text-indigo-600:is(:where(.group):hover *),
+html:not(.dark) .group-hover\:text-indigo-700:is(:where(.group):hover *) { color: #6d5417; }
+html:not(.dark) .disabled\:text-slate-400:disabled { color: #9a9179; }
+html:not(.dark) .hover\:border-slate-300:hover { border-color: #bcae90; }
+html:not(.dark) .group-hover\:bg-indigo-50:is(:where(.group):hover *) { background-color: #efe8d6; }
+html:not(.dark) .disabled\:bg-slate-100:disabled { background-color: #e4dbc4; }
 html:not(.dark) .hover\:bg-slate-200:hover { background-color: #d5cab0; }
 html:not(.dark) .hover\:bg-slate-300:hover { background-color: #ccbfa2; }
 html:not(.dark) .bg-\[\#f8fafc\]    { background-color: #f1ebdd; }
