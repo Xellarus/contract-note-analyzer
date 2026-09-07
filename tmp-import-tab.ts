@@ -100,7 +100,10 @@ console.log('\n3. Row mapping');
   // Portfolio code → label.
   eq(out[3].portfolio, 'Taparia Holdings', 'T059 → label');
   eq(out[3].portfolioCode, 'T059', 'code kept for the sheet lookup');
-  eq(out[1].portfolio, 'Gunjan Agarwal (ShareIndia)', 'OAEM94 → label');
+  // The registry label is now the plain name (the card badge carries the broker), but the
+// Import Log disambiguates a REPEATED name - there is a Gunjan Agarwal at Integrated too,
+// and this string is what the portfolio filter is built from.
+  eq(out[1].portfolio, 'Gunjan Agarwal (Share India)', 'OAEM94 → disambiguated label');
 
   // Reversed + rewind eligibility.
   eq(out[2].reversed, true, 'Status "Reversed" → reversed');

@@ -434,7 +434,7 @@ export function assetClassOf(master: ScripMaster | null, isin: string, name: str
   return lookupScrip(master, isin, name).entry?.assetClass;
 }
 
-/** On one of the non-listed tabs at all - Private Equity, AIF or Mutual Fund. */
+/** On one of the non-listed tabs at all - Private Equity, AIF, Mutual Fund or Bond. */
 export function isNonListedScrip(master: ScripMaster | null, isin: string, name: string): boolean {
   return assetClassOf(master, isin, name) !== undefined;
 }
@@ -472,10 +472,13 @@ export const LT_DAYS_UNLISTED = 730;
 /**
  * Long-term threshold in days, or NULL when this security has no decided rule.
  *
- * Returning `number | null` rather than a number is the whole point: a mutual fund has no single
- * threshold (equity-oriented is 12 months WITH STT, post-Apr-2023 debt is always short-term at
- * slab, other/specified is 24 months), so any number returned here would be a guess printed into
- * a tax document. The null forces every caller to decide what to do about it, and there are only
+ * Returning `number | null` rather than a number is the whole point. TWO classes come back null:
+ * a mutual fund has no single threshold (equity-oriented is 12 months WITH STT, post-Apr-2023
+ * debt is always short-term at slab, other/specified is 24 months), and a BOND has none either
+ * (listed is 12 months, but under s.50AA an unlisted bond or debenture transferred on or after
+ * 23-Jul-2024 is always short-term at slab) - see ASSET_CLASSES for why the bond rule is
+ * deliberately still open. Any number returned here would be a guess printed into a tax
+ * document. The null forces every caller to decide what to do about it, and there are only
  * four - tsc lists them.
  */
 export function ltDaysFor(master: ScripMaster | null, isin: string, name: string): number | null {

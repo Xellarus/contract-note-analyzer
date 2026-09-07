@@ -1369,8 +1369,9 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
         // listed-share period doesn't apply to unquoted shares, so a PE holding sold at
         // 15 months is SHORT term. See ltDaysFor.
         //
-        // NULL means the rule is undecided (a mutual fund: equity-oriented is 12 months with
-        // STT, post-Apr-2023 debt is always short-term at slab, other is 24). Refuse the row
+        // NULL means the rule is undecided - a mutual fund (equity-oriented is 12 months with
+        // STT, post-Apr-2023 debt is always short-term at slab, other is 24) or a BOND
+        // (listed 12 months, unlisted always short-term under s.50AA). Refuse the row
         // rather than pick one. `>= null` would compile and coerce to `>= 0`, filing every one
         // of them as LONG TERM with a green build - there is no strictNullChecks here to catch
         // it, which is exactly why this is an explicit guard and not a type error.

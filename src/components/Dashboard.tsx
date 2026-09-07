@@ -7,7 +7,7 @@ import { computeInvestedTimeline, AumTimelinePoint } from '../lib/aumTimeline';
 import { logAumSnapshot, loadAumHistory, AumSnapshot } from '../lib/aumHistory';
 import { readDashboardSnapshot, writeDashboardSnapshot, dashboardSnapshotAge } from '../lib/dashboardCache';
 import { hasValidGoogleToken } from '../lib/googleAuth';
-import { PORTFOLIOS } from '../lib/portfolios';
+import { PORTFOLIOS, portfolioDisplayLabel } from '../lib/portfolios';
 import { computeCrossHoldings, CrossHolding } from '../lib/crossHoldings';
 import { computePendingCorpActions, dismissCorpActionAlert, PendingCorpAction } from '../lib/corpActionAlerts';
 import { computeNavTimeline, type NavResult } from '../lib/navTimeline';
@@ -606,13 +606,15 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
           points={timeline}
           nav={navHist}
           aumToday={aum ? aum.totalCurrent : null}
-          portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label }))}
+          portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: portfolioDisplayLabel(p) }))}
         />
       )}
 
       {/* Headline returns — CAGR (time-weighted) beside XIRR (money-weighted). Sits under the
           charts because it is the same series reduced to two numbers. */}
-      <ReturnsPanel nav={navHist} portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: p.label }))} />
+      {/* Disambiguated labels: the per-account returns table and the "could not be measured"
+          note print the label with nothing beside it, and three accounts are "Saket Agarwal". */}
+      <ReturnsPanel nav={navHist} portfolios={PORTFOLIOS.map(p => ({ id: p.id, code: p.code, label: portfolioDisplayLabel(p) }))} />
 
       {/* Unrecorded splits / bonuses. Renders ONLY when something needs entering, so a clean
           ledger shows nothing at all — and recording the action makes the row disappear on the

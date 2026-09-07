@@ -49,9 +49,9 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
         ? `${name} ${e.isin || ''}`
         : `${name} ${e.nse || ''} ${e.bse || ''}`).toLowerCase();
       // An unlisted company has no ticker to show, so it is tagged as what it is.
-      // The tag names the CLASS for a non-listed entry ("PE" / "AIF" / "MF") rather than a
-      // generic "unlisted": with three tabs in the same dropdown, which one a company came from
-      // is the thing the user needs to see.
+      // The tag names the CLASS for a non-listed entry ("PE" / "AIF" / "MF" / "BOND") rather than
+      // a generic "unlisted": with four tabs in the same dropdown, which one a company came
+      // from is the thing the user needs to see.
       if (hay.includes(term)) {
         seen.add(name);
         out.push({ name, tag: e.assetClass ? ASSET_CLASSES[e.assetClass].badge : (e.nse || e.bse || '') });

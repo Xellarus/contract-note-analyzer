@@ -60,7 +60,7 @@ const SEED: [string, string][] = [
 ];
 const ACCTS = [
   { id: 't059', code: 'T059', label: 'Taparia Holdings' },
-  { id: 's713', code: 'S713', label: 'Saket Agarwal (Integrated)' },
+  { id: 's713', code: 'S713', label: 'Saket Agarwal' },
 ];
 const holdings: CrossHolding[] = SEED.map(([name], i) => {
   const invested = 1_500_000 - i * 90_000;

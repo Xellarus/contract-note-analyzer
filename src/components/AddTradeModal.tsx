@@ -402,7 +402,8 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       if (activeMaster.peFailed) {
         return 'Couldn’t read one of the non-listed tabs, so this company can’t be confirmed — Recheck, or try again shortly.';
       }
-      // "Unlisted" means on ANY of the non-listed tabs - Private Equities, AIF or Mutual Fund.
+      // "Unlisted" means on ANY of the non-listed tabs - Private Equities, AIF, Mutual Fund or
+      // Bonds. Derived from ASSET_CLASS_IDS below, so the message never drifts from the registry.
       // Which one it is decides the tax and charge treatment, but not whether it belongs here.
       if (!isNonListedScrip(activeMaster, l.isin, l.company)) {
         const tabs = ASSET_CLASS_IDS.map(id => `“${ASSET_CLASSES[id].tab}”`).join(', ');

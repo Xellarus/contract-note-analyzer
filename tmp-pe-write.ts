@@ -12,7 +12,7 @@
  */
 import { appendPrivateEquity, PE_HEADER_ROW, updatePrivateEquityCmp, setPrivateEquityCmp } from './src/lib/privateEquityWrite';
 import { detectPeColumns, parsePrivateEquityVals, PRIVATE_EQUITIES_TAB } from './src/lib/privateEquities';
-import { loadScripMaster, invalidateScripCache, SCRIP_MASTER_SPREADSHEET_ID } from './src/lib/scripMaster';
+import { loadScripMaster, invalidateScripCache, assetClassOf, ltDaysFor, SCRIP_MASTER_SPREADSHEET_ID } from './src/lib/scripMaster';
 import { invalidatePrivateEquityCache } from './src/lib/privateEquities';
 
 const g: any = globalThis;
@@ -248,6 +248,38 @@ async function main() {
     eq('a company already on ANOTHER class tab is refused', dup.status === 'refused' && dup.reason, 'already-pe');
     ok('and the message names the tab it is actually on',
       dup.status === 'refused' && /AIF/.test(dup.message), dup.status === 'refused' ? dup.message : '');
+  }
+
+  // ── registering a BOND, and the policy it comes back with ─────────────────
+  // Landing a bond on Private Equities would give it 730 days and off-market treatment, which
+  // is not merely wrong - it makes the sale CLASSIFIABLE on a rule that does not apply to it.
+  // A listed bond is long-term at 12 months; an unlisted one transferred on or after
+  // 23-Jul-2024 is always short-term at slab under s.50AA. Neither is 730.
+  {
+    install([['Company', 'ISIN'], ['STRIDE VENTURES LLP', '']]);
+    invalidateScripCache(); invalidatePrivateEquityCache();
+    const master = await loadScripMaster(SID);
+
+    const r = await appendPrivateEquity(SID, master, 'Tata Capital 8.5% NCD 2029', 'BOND');
+    ok('accepts a new company on the Bonds tab', r.status === 'added', JSON.stringify(r));
+    eq('appended to the BONDS tab, not Private Equities', lastAppend()?.range, 'Bonds!A1');
+    const madeBond = (g.__batched || []).flatMap((b: any) => b.resource?.requests || [])
+      .find((q: any) => q.addSheet?.properties?.title === 'Bonds');
+    ok('and created the Bonds tab, since it did not exist', !!madeBond,
+      JSON.stringify((g.__batched || []).map((b: any) => b.resource?.requests)));
+
+    // Fold the row back in and check the POLICY, not just the write. This is the assertion that
+    // would catch a bond registered with PE's 730 days.
+    g.__ranges[`${SID}::Bonds!A1:J5000`] = [['Company', 'ISIN'], ['TATA CAPITAL 8.5% NCD 2029', '']];
+    invalidateScripCache(); invalidatePrivateEquityCache();
+    const m2 = await loadScripMaster(SID);
+    eq('a folded-in Bonds row resolves to class BOND',
+      assetClassOf(m2, '', 'TATA CAPITAL 8.5% NCD 2029'), 'BOND');
+    eq('and its long-term rule is NULL, so no sale can be filed on a guess',
+      ltDaysFor(m2, '', 'TATA CAPITAL 8.5% NCD 2029'), null);
+    // The control: a listed scrip still gets the ordinary 365, so the null above is the bond's
+    // own policy and not a broken lookup returning null for everything.
+    eq('while a listed scrip still gets 365', ltDaysFor(m2, 'INE001A01011', 'ALPHA INDUSTRIES LIMITED'), 365);
   }
 
   // ── updatePrivateEquityCmp ────────────────────────────────────────────────

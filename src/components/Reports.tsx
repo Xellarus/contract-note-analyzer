@@ -26,10 +26,11 @@ type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expens
  * consolidated one are different tax documents and must never be mistaken for each other.
  */
 /**
- * 'eq' is listed equity; 'pe' / 'aif' / 'mf' each narrow to ONE non-listed scrip-master tab;
- * 'consolidated' is everything. The three class scopes share all their machinery - only which
- * tab's membership set is built differs - so they are derived from ASSET_CLASSES rather than
- * spelled out, and adding a fourth tab needs no change here.
+ * 'eq' is listed equity; 'pe' / 'aif' / 'mf' / 'bond' each narrow to ONE non-listed
+ * scrip-master tab; 'consolidated' is everything. The class scopes share all their machinery
+ * - only which tab's membership set is built differs - so they are derived from ASSET_CLASSES
+ * rather than spelled out. Adding the Bonds tab needed no change in this file at all, and
+ * a fifth tab will not either.
  */
 type ReportScope = 'eq' | 'consolidated' | Lowercase<AssetClassId>;
 

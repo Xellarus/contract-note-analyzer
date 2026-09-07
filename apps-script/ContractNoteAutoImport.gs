@@ -44,15 +44,15 @@ var CONFIG = {
 // auto-import; the others are here so a mis-routed note is reported, not written.
 var PORTFOLIOS = [
   { code: 'T059',   label: 'Taparia Holdings',            broker: 'integrated', sheetId: '1ZIW1LeWtHeePcg5C4T-cANz0Xww1ttqlCfxOsb3jgAw', ucc: ['T059'] },
-  { code: 'S713',   label: 'Saket Agarwal (Integrated)',  broker: 'integrated', sheetId: '1Ns1QS91goIg7s4XyY_aO1D1RXRqysoMqGK8H9ybrYSM', ucc: ['S713'] },
+  { code: 'S713',   label: 'Saket Agarwal',               broker: 'integrated', sheetId: '1Ns1QS91goIg7s4XyY_aO1D1RXRqysoMqGK8H9ybrYSM', ucc: ['S713'] },
   { code: 'C087',   label: 'Chaitanya Agarwal',           broker: 'integrated', sheetId: '1JGrCbQf2tgqRsZ6EQHDxkoxQtK1i8ytBznjAz1TGhBg', ucc: ['C087'] },
   { code: 'S1404',  label: 'Sagun Capital',               broker: 'integrated', sheetId: '1THFbOTkuhaM7fZz17adNFq2uhCLGEpGP_YF7AiKKyFY', ucc: ['S1404'] },
-  { code: 'G058',   label: 'Gunjan Agarwal (Integrated)', broker: 'integrated', sheetId: '1oNy7HbQHu9NnCNql2hmkkkd2tiJcAiQ-eyFN9Xz9H6Y', ucc: ['G058'] },
-  { code: 'OAEM94', label: 'Gunjan Agarwal (ShareIndia)', broker: 'shareindia', sheetId: '1GpjgUDDF5f8qdGwnjtnTxvj-hWGH4w2By7rZGw32fxE', ucc: ['OAEM94'] },
-  { code: 'OADR97', label: 'Saket Agarwal (ShareIndia)',  broker: 'shareindia', sheetId: '15tpza8l4JtqZQQvrgSv6brEr1iAAQKdp5LPQGyu0lEw', ucc: ['OADR97'] },
+  { code: 'G058',   label: 'Gunjan Agarwal',              broker: 'integrated', sheetId: '1oNy7HbQHu9NnCNql2hmkkkd2tiJcAiQ-eyFN9Xz9H6Y', ucc: ['G058'] },
+  { code: 'OAEM94', label: 'Gunjan Agarwal',              broker: 'shareindia', sheetId: '1GpjgUDDF5f8qdGwnjtnTxvj-hWGH4w2By7rZGw32fxE', ucc: ['OAEM94'] },
+  { code: 'OADR97', label: 'Saket Agarwal',               broker: 'shareindia', sheetId: '15tpza8l4JtqZQQvrgSv6brEr1iAAQKdp5LPQGyu0lEw', ucc: ['OADR97'] },
   { code: 'CS1106', label: 'Shree Balaji Investments',    broker: 'shareindia', sheetId: '1qZL9Mhpwvm7jVuqmBQppRZ-9BW1V86haY3q0keOjDYY', ucc: ['CS1106'] },
-  { code: 'OAEU09', label: 'Aditya Agarwal (ShareIndia)', broker: 'shareindia', sheetId: '1snmLk3-Y8VoopYSRjVWAMqkINf34daW_ZwA6-Gs9UZM', ucc: ['OAEU09'] },
-  { code: 'NJW724', label: 'Aditya Agarwal (Zerodha)',    broker: 'zerodha',    sheetId: '1QoW51xsJfLtjkSGnEnaqsClgFd4AHJdbnVQKMLHhmYY', ucc: ['NJW724'] },
+  { code: 'OAEU09', label: 'Aditya Agarwal',              broker: 'shareindia', sheetId: '1snmLk3-Y8VoopYSRjVWAMqkINf34daW_ZwA6-Gs9UZM', ucc: ['OAEU09'] },
+  { code: 'NJW724', label: 'Aditya Agarwal',              broker: 'zerodha',    sheetId: '1QoW51xsJfLtjkSGnEnaqsClgFd4AHJdbnVQKMLHhmYY', ucc: ['NJW724'] },
 ];
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -2,8 +2,9 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
   normName, loadScripMaster, resolveScrip, ScripMaster,
-  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor,
+  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor, assetClassOf,
 } from "./scripMaster";
+import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from "./privateEquities";
 import { loadCorporateActions, CORP_ACTIONS_TAB } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
 import { UnresolvedScrip, insertLotByTs } from "./holdingsCalc";
@@ -105,6 +106,32 @@ const CHARGE_KEYS = ["brok", "stt", "gst", "et", "dmat", "stamp", "sebi", "exchC
 const LEFT_HDR = ["S.No", "SCRIPT NAME", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "DATE", "NO OF SHARE", "RATE", "AMOUNT"];
 const CHARGE_HDR = ["Brok.Total", "STT", "GST", "ET Charges", "Dmat", "Stamp duty", "SEBI Chg.", "EXCH.Clg.", "IPF"];
 type ColMap = Record<(typeof LEFT_KEYS)[number] | (typeof CHARGE_KEYS)[number], number>;
+
+/**
+ * The TRANSACTION STATEMENT layout - one row per transaction, for the non-listed classes.
+ *
+ * A different question from the capital-gains tabs, so a different shape: those are
+ * scrip-wise matched SALES (opening → purchase → sale → P/L), this is a record of what was
+ * transacted. It is what makes a mutual-fund or bond sale visible at all, since those have no
+ * holding-period rule and are refused by the gains engines.
+ *
+ * The nine charge columns REUSE `CHARGE_HDR` verbatim so a statement sitting beside a gains tab
+ * has the same charge block in the same order.
+ */
+const TXN_HDR = ["S.No", "DATE", "SCRIPT NAME", "TYPE", "NO OF SHARE", "RATE", "AMOUNT",
+                 ...CHARGE_HDR, "NET AMOUNT"];
+const TX = {
+  sno: 0, date: 1, name: 2, type: 3, qty: 4, rate: 5, amt: 6,
+  brok: 7, stt: 8, gst: 9, et: 10, dmat: 11, stamp: 12, sebi: 13, exchClg: 14, ipf: 15,
+  net: 16,
+};
+const TXN_WIDTH = TXN_HDR.length;
+// The charge block must line up with CHARGE_HDR or every charge lands one column out in a
+// document someone files. Cheap structural check, at module load.
+if (TXN_WIDTH !== 17) throw new Error(`Transaction statement layout: ${TXN_WIDTH} columns, expected 17.`);
+if (TXN_HDR[TX.brok] !== CHARGE_HDR[0] || TXN_HDR[TX.ipf] !== CHARGE_HDR[CHARGE_HDR.length - 1]) {
+  throw new Error("Transaction statement layout: the charge block is not aligned with CHARGE_HDR.");
+}
 
 interface Layout {
   id: VariantId;
@@ -234,6 +261,8 @@ export interface TrxRegisterResult {
   intradayTabName: string;
   holdingTabName: string;
   fyLabel: string;
+  /** One entry per non-listed asset class that produced output this run, in registry order. */
+  classTabs: { id: AssetClassId; label: string; cgTab?: string; txnTab?: string }[];
   /** FY sales omitted from BOTH P/L columns because their asset class has no decided
    *  holding-period rule (currently: mutual funds). Reported so the gap is stated. */
   unclassified: { name: string; isin: string; qty: number; ts: number }[];
@@ -385,9 +414,13 @@ export async function generateTrxRegister(
 
   // Longest name seen per key (usually the full official name over a short code).
   const nameByKey = new Map<string, string>();
+  // First non-blank ISIN seen per key. Kept beside the name because a class lookup wants both,
+  // and a key built from a blank ISIN carries only the name.
+  const isinByKey = new Map<string, string>();
   for (const t of trades) {
     const cur = nameByKey.get(t.key);
     if (!cur || t.name.length > cur.length) nameByKey.set(t.key, t.name);
+    if (t.isin && !isinByKey.get(t.key)) isinByKey.set(t.key, t.isin);
   }
 
   // ── 3. Corporate actions (Merger / Demerger) as dated events ──
@@ -401,7 +434,38 @@ export async function generateTrxRegister(
   for (const ol of openingSeed) {
     const key = keyOf(ol.isin, ol.name);
     if (ol.name && (nameByKey.get(key)?.length ?? 0) < ol.name.length) nameByKey.set(key, ol.name);
+    if (ol.isin && !isinByKey.get(key)) isinByKey.set(key, ol.isin);
   }
+
+  /**
+   * Asset class per scrip key. `undefined` means LISTED - on none of the non-listed tabs.
+   *
+   * Resolved LAZILY and memoised, for two reasons. `assetClassOf` runs `lookupScrip`, whose
+   * token-subset fallback rescans every master entry (~5,000) for a name it cannot match
+   * exactly, so calling it per row would be a full scan per row on a multi-thousand row ledger.
+   * And lazily rather than in the loop above because keys also arrive from the OPENING SEED and
+   * from corporate actions - a mutual fund bought before this FY has no trade row here at all,
+   * and eager population from `trades` would have read it as listed.
+   */
+  const classByKey = new Map<string, AssetClassId | undefined>();
+  const classOfKey = (key: string): AssetClassId | undefined => {
+    if (classByKey.has(key)) return classByKey.get(key);
+    const c = assetClassOf(master, isinByKey.get(key) || "", nameByKey.get(key) || key);
+    classByKey.set(key, c);
+    return c;
+  };
+  /**
+   * Does this scrip's class have a decided long-term threshold?
+   *
+   * Listed equity does (365), PE and AIF do (730), a mutual fund and a bond do NOT. This single
+   * test decides BOTH whether a scrip may appear on a capital-gains tab at all and whether its
+   * charges are expected there, so the emission and the charge-conservation guard cannot drift
+   * apart: whatever is kept off the tabs is exactly what is not expected on them.
+   */
+  const keyHasLtRule = (key: string): boolean => {
+    const c = classOfKey(key);
+    return !c || ASSET_CLASSES[c].ltDays !== null;
+  };
 
   // ── 3b. Automatic intraday reconciliation per (scrip, day) — ALWAYS ON, tag-independent.
   // A same-day buy+sell of the same scrip is an intraday round-trip by definition, so we
@@ -656,7 +720,7 @@ export async function generateTrxRegister(
         }
         continue;
       }
-      // Null = no decided holding-period rule (a mutual fund). The lots must still be
+      // Null = no decided holding-period rule (a mutual fund, or a bond). The lots must still be
       // consumed - the position moved - but the sale cannot be filed as short or long, so it is
       // recorded as unclassified and left out of both P/L columns. Without this the `>= null`
       // comparison coerces to `>= 0` and every such sale prints as LONG TERM in a tax document.
@@ -1124,14 +1188,58 @@ export async function generateTrxRegister(
   // scrip because its trades moved to the other tab would silently delete a holding from a
   // filed document.
   const deliveryActive = [...blocks.values()].filter(b =>
-    b.purchases.length || b.sales.length || b.corpNotes.length || b.splits.length
-    || (intraBlocks.has(b.key) && (b.opening.length || b.closing.length)));
+    (b.purchases.length || b.sales.length || b.corpNotes.length || b.splits.length
+      || (intraBlocks.has(b.key) && (b.opening.length || b.closing.length)))
+    // A class with NO holding-period rule appears on no capital-gains tab at all - its
+    // PURCHASES included, not just its sales. Leaving the purchases on meant their charges
+    // reached `delivery.grand` while the guard excluded the scrip from `expect`, and the
+    // register refused to write; see fixture E and `hasRule` below. Its transactions are
+    // still reported, on that class's own transaction statement.
+    && keyHasLtRule(b.key));
   const intradayActive = [...intraBlocks.values()];
+
+  /**
+   * Capital gains, split by asset class - LISTED on the historic tab, each non-listed class on
+   * its own. Splitting is not cosmetic: PE and AIF are off-market, long-term at 730 days and
+   * bear no STT, so they are taxed on a different footing from listed equity and a preparer
+   * cannot separate them out of a commingled table.
+   *
+   * A sale lands on exactly ONE of these, which is why PE MOVES OFF the main tab instead of
+   * being copied to a second one - two tabs carrying the same gain is a double count that
+   * nothing downstream could detect.
+   */
+  const listedActive = deliveryActive.filter(b => !classOfKey(b.key));
+  const classActive = new Map<AssetClassId, Block[]>();
+  for (const b of deliveryActive) {
+    const c = classOfKey(b.key);
+    if (!c) continue;
+    const arr = classActive.get(c) || [];
+    arr.push(b);
+    classActive.set(c, arr);
+  }
 
   const dL = makeLayout("DELIVERY"), iL = makeLayout("INTRADAY");
   const head = title ? title + " \u2014 " : "";
-  const delivery = emitTab(dL, deliveryActive, `${head}Capital Gains for ${fyLabel}`, "Delivery Expenses");
+  const delivery = emitTab(dL, listedActive, `${head}Capital Gains for ${fyLabel}`, "Delivery Expenses");
   const intraday = emitTab(iL, intradayActive, `${head}Intra-Day for ${fyLabel}`, "Intra-day Expenses");
+  /**
+   * One emission per non-listed class that HAS a rule and HAS activity. Same DELIVERY layout,
+   * so the geometry, the painting and the charge columns are identical - only the block set and
+   * the caption differ. Reusing `emitTab` is safe because it accumulates into its own `grand`
+   * per call; a shared accumulator would double the totals.
+   */
+  const classCg: { id: AssetClassId; tab: string; em: Emission }[] = [];
+  for (const id of ASSET_CLASS_IDS) {
+    if (ASSET_CLASSES[id].ltDays === null) continue;      // nothing to compute
+    const bl = classActive.get(id);
+    if (!bl || !bl.length) continue;
+    const label = ASSET_CLASSES[id].label;
+    classCg.push({
+      id,
+      tab: `${label} Capital Gains for ${fyLabel}`,
+      em: emitTab(dL, bl, `${head}${label} \u2014 Capital Gains for ${fyLabel}`, "Delivery Expenses"),
+    });
+  }
 
   // CHARGE CONSERVATION. Anchored to the SOURCE rows, never to the rows just emitted:
   // `grand` is by definition the sum over emitted rows, so comparing the two tabs' grands to
@@ -1145,16 +1253,19 @@ export async function generateTrxRegister(
     };
     const inFy = (ts: number) => ts >= fyStartTs && ts < fyEndExclTs;
     /**
-     * A sale whose asset class has no decided holding-period rule is deliberately not emitted,
-     * so its charges must not be EXPECTED either.
+     * A scrip whose asset class has no decided holding-period rule appears on NO capital-gains
+     * tab - not its sales, and not its purchases either - so its charges must not be EXPECTED
+     * on one.
      *
-     * Without this the guard fires on any portfolio holding a mutual fund and the whole register
-     * refuses to write - the check doing exactly its job, reporting a scrip whose charges went
-     * missing, because one had. Keyed on the same (isin|name) identity the sale carries.
+     * Keyed on the CLASS, not on whether the scrip happened to sell this year. It WAS keyed on
+     * `unclassifiedSales`, and that was a bug with a narrow, nasty trigger: a fund or bond
+     * BOUGHT inside the FY still emitted a PURCHASE row, `chargeCells` put its buy charges into
+     * `delivery.grand`, and if it also SOLD that year it was excluded from `expect` - drift in
+     * one direction only, so the guard threw and **no register was written at all**. Buying and
+     * selling one mutual fund inside a single financial year was enough. A fixture that buys
+     * pre-FY cannot reach it, which is exactly why fixture E buys inside the year.
      */
-    const noRule = new Set(unclassifiedSales.map(u => `${(u.isin || '').toUpperCase()}|${normName(u.name)}`));
-    const hasRule = (isin: string, name: string) =>
-      !noRule.has(`${(isin || '').toUpperCase()}|${normName(name)}`);
+    const hasRule = (isin: string, name: string) => keyHasLtRule(keyOf(isin, name));
     // Same three sources the emission draws from: unpaired trades, the residual legs of a
     // partial round trip, and the round trips themselves. Transfers realise nothing and
     // never reach a purchase or sale row, so their charges are not expected on either tab.
@@ -1163,8 +1274,15 @@ export async function generateTrxRegister(
     for (const rt of intradayRTs) if (inFy(rt.ts)) { add(rt.buyCharges); add(rt.sellCharges); }
 
     const keys: (keyof Charges)[] = ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf", "dmat"];
+    // Sums EVERY capital-gains tab, not just the two original ones. Splitting the output by
+    // asset class moved charges onto new tabs; a guard still adding only delivery + intraday
+    // would see every PE charge as missing and refuse to write the whole register. The
+    // transaction statements are deliberately NOT counted here - they restate the same
+    // charges as a record of what was transacted, so adding them would double every figure.
+    const cgGrand = (k: keyof Charges) =>
+      delivery.grand[k] + intraday.grand[k] + classCg.reduce((s, c) => s + c.em.grand[k], 0);
     const drift = keys
-      .map(k => ({ k, d: (delivery.grand[k] + intraday.grand[k]) - expect[k] }))
+      .map(k => ({ k, d: cgGrand(k) - expect[k] }))
       .filter(x => Math.abs(x.d) > 0.01);
     if (drift.length) {
       // Refuse rather than file. A charge that is on neither tab, or on both, is a wrong
@@ -1184,6 +1302,19 @@ export async function generateTrxRegister(
     r[iL.COL.name] = `No intra-day (same-day round-trip) transactions in ${fyLabel}.`;
     intraday.values.splice(3, 0, r);
   }
+  // Same for the LISTED tab, which can now legitimately be empty: a book holding only private
+  // equity has no listed transactions at all, and a tab carrying nothing but column headers
+  // reads as a failed run rather than as an answer. It also has to say WHERE the figures went,
+  // or an empty "Capital Gains" tab beside a populated "Private Equity Capital Gains" tab looks
+  // like the split dropped them.
+  if (!listedActive.length) {
+    const r = dL.blankRow();
+    r[dL.COL.name] = classCg.length
+      ? `No LISTED transactions in ${fyLabel}. Non-listed holdings are on their own tabs: `
+        + classCg.map(c => `"${c.tab}"`).join(", ") + "."
+      : `No delivery transactions in ${fyLabel}.`;
+    delivery.values.splice(3, 0, r);
+  }
 
   const tabName = `Capital Gains for ${fyLabel}`;
   const intradayTabName = `Intra-Day for ${fyLabel}`;
@@ -1192,6 +1323,9 @@ export async function generateTrxRegister(
   // the first just renamed.
   await writeAndPaint(dL, tabName, [`${fyLabel} Transaction Ledger`, `${fyLabel} Trx`], delivery);
   await writeAndPaint(iL, intradayTabName, [], intraday);
+  // Per-class capital gains. Sequential, like the two above: these are writes to a shared
+  // spreadsheet inside the app's heaviest operation, and Sheets rate-limits per document.
+  for (const c of classCg) await writeAndPaint(dL, c.tab, [], c.em);
 
   // ── 8. FY-end holding snapshot tab: "Holding as on 31st March <fyEnd>" ──
   // A standalone closing-stock statement — every scrip's lots still held at FY-end (the
@@ -1322,12 +1456,200 @@ export async function generateTrxRegister(
     console.warn(`Failed to write the "${holdingTabName}" tab (the Capital Gains tab is unaffected):`, e);
   }
 
+  // ── 9. Transaction statement, one tab per non-listed class with activity this FY ──
+  // "<Label> Transactions for FY..". Built from `trades` rather than from the capital-gains
+  // blocks: a no-rule sale never reaches `Block.sales`, so a block-derived statement would omit
+  // every mutual-fund and bond SELL - the rows these tabs exist to show.
+  const inFyTs = (ts: number) => ts >= fyStartTs && ts < fyEndExclTs;
+  const txnTabByClass = new Map<AssetClassId, string>();
+  for (const id of ASSET_CLASS_IDS) {
+    const mine = trades.filter(t => inFyTs(t.ts) && classOfKey(t.key) === id);
+    const mySplits = splitRows.filter(s => inFyTs(s.ts) && classOfKey(s.key) === id);
+    if (!mine.length && !mySplits.length) continue;      // no tab for a class this book doesn't trade
+    const label = ASSET_CLASSES[id].label;
+    const txnTabName = `${label} Transactions for ${fyLabel}`;
+    try {
+      const xRow = (): any[] => new Array(TXN_WIDTH).fill("");
+      // Blank a zero charge, exactly as the capital-gains tabs do - a column of 0.00s reads as
+      // "we charged nothing here", a blank reads as "not applicable", and off-market is the
+      // second one.
+      const xCharges = (row: any[], c: Charges) => {
+        row[TX.brok] = c.brok ? r2(c.brok) : ""; row[TX.stt] = c.stt ? r2(c.stt) : "";
+        row[TX.gst] = c.gst ? r2(c.gst) : ""; row[TX.et] = c.et ? r2(c.et) : "";
+        row[TX.dmat] = c.dmat ? r2(c.dmat) : ""; row[TX.stamp] = c.stamp ? r2(c.stamp) : "";
+        row[TX.sebi] = c.sebi ? r2(c.sebi) : ""; row[TX.ipf] = c.ipf ? r2(c.ipf) : "";
+      };
+
+      const xout: any[][] = [];
+      const x0 = xRow(); x0[TX.name] = `${head}${label} \u2014 Transactions for ${fyLabel}`; xout.push(x0);
+      const x1 = xRow(); x1[TX.date] = `TRANSACTIONS ${fyLabel}`; xout.push(x1);
+      xout.push(TXN_HDR);
+
+      // Group by scrip, alphabetical, chronological within a scrip - the same reading order as
+      // the capital-gains tabs.
+      const keys = [...new Set([...mine.map(t => t.key), ...mySplits.map(s => s.key)])]
+        .sort((a, b) => (nameByKey.get(a) || a).localeCompare(nameByKey.get(b) || b, undefined,
+          { numeric: true, sensitivity: "base" }));
+
+      let xsno = 0;
+      const gBuy = { qty: 0, amt: 0, net: 0, ch: { ...ZERO_CHARGES } };
+      const gSell = { qty: 0, amt: 0, net: 0, ch: { ...ZERO_CHARGES } };
+      for (const key of keys) {
+        xsno++;
+        const hdr = xRow(); hdr[TX.sno] = xsno; hdr[TX.name] = nameByKey.get(key) || key;
+        xout.push(hdr);
+
+        type XLine = { ts: number; type: string; qty: number; rate: number; amt: number;
+                       net: number; ch: Charges | null; side: "BUY" | "SELL" | null };
+        const lines: XLine[] = [];
+        for (const t of mine.filter(t => t.key === key)) {
+          // A TRANSFER carries a buy/sell side so the lot queue moves, but no money changed
+          // hands - so it is listed (the quantity has to be explained) and excluded from the
+          // BUY/SELL money subtotals below.
+          const kind = t.xfer ? (t.type === "BUY" ? "TRANSFER IN" : "TRANSFER OUT") : t.type;
+          const rate = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
+          lines.push({
+            ts: t.ts,
+            type: kind + (t.isIntraday ? " (INTRA-DAY)" : ""),
+            qty: t.qty, rate, amt: t.turnover || r2(rate * t.qty),
+            net: t.inclSTT || 0,
+            ch: t.charges,
+            side: t.xfer ? null : t.type,
+          });
+        }
+        // A split restates the holding - no money, no quantity in or out - but a statement that
+        // omitted it could not explain why the share count changed.
+        for (const s of mySplits.filter(s => s.key === key)) {
+          lines.push({ ts: s.ts, type: "SPLIT", qty: s.qty, rate: 0, amt: 0, net: 0, ch: null, side: null });
+        }
+        lines.sort((a, b) => a.ts - b.ts);
+
+        const sBuy = { qty: 0, amt: 0, net: 0, ch: { ...ZERO_CHARGES } };
+        const sSell = { qty: 0, amt: 0, net: 0, ch: { ...ZERO_CHARGES } };
+        for (const l of lines) {
+          const row = xRow();
+          row[TX.date] = fmtDate(l.ts); row[TX.type] = l.type; row[TX.qty] = l.qty;
+          if (l.rate) row[TX.rate] = r6(l.rate);
+          if (l.amt) row[TX.amt] = r2(l.amt);
+          if (l.ch) xCharges(row, l.ch);
+          if (l.net) row[TX.net] = r2(l.net);
+          xout.push(row);
+          if (l.side && l.ch) {
+            const acc = l.side === "BUY" ? sBuy : sSell;
+            acc.qty += l.qty; acc.amt += l.amt; acc.net += l.net;
+            acc.ch = addCharges(acc.ch, l.ch);
+          }
+        }
+        // One subtotal per SIDE, not one per scrip. Adding a buy amount to a sale amount would
+        // produce a number that means nothing; bought-vs-sold is the pair that does.
+        for (const [lbl, acc] of [["TOTAL BUY", sBuy], ["TOTAL SELL", sSell]] as [string, typeof sBuy][]) {
+          if (!acc.qty) continue;
+          const sub = xRow();
+          sub[TX.type] = lbl; sub[TX.qty] = acc.qty; sub[TX.amt] = r2(acc.amt);
+          xCharges(sub, acc.ch); sub[TX.net] = r2(acc.net);
+          xout.push(sub);
+        }
+        gBuy.qty += sBuy.qty; gBuy.amt += sBuy.amt; gBuy.net += sBuy.net; gBuy.ch = addCharges(gBuy.ch, sBuy.ch);
+        gSell.qty += sSell.qty; gSell.amt += sSell.amt; gSell.net += sSell.net; gSell.ch = addCharges(gSell.ch, sSell.ch);
+        xout.push(xRow());   // spacer between scrips
+      }
+
+      for (const [lbl, acc] of [["GRAND TOTAL BUY", gBuy], ["GRAND TOTAL SELL", gSell]] as [string, typeof gBuy][]) {
+        const gr = xRow();
+        gr[TX.name] = lbl; gr[TX.qty] = acc.qty; gr[TX.amt] = r2(acc.amt);
+        xCharges(gr, acc.ch); gr[TX.net] = r2(acc.net);
+        xout.push(gr);
+      }
+      // States the basis, like the report scope notes do. Without it a reader cannot tell
+      // whether a transfer or a split was counted into the totals above.
+      const note = xRow();
+      note[TX.name] = "Transfers and splits are listed but excluded from the BUY / SELL totals — "
+        + "a transfer pays no consideration and a split restates an existing holding.";
+      xout.push(note);
+
+      await ensureSheetTabs(spreadsheetId, [txnTabName]);
+      let xSheetId: number | undefined;
+      {
+        const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
+          spreadsheetId, fields: "sheets.properties(sheetId,title)",
+        }));
+        xSheetId = ((meta?.result?.sheets || []).find((s: any) =>
+          (s.properties?.title || "").toString().trim().toLowerCase() === txnTabName.trim().toLowerCase()) || {}).properties?.sheetId;
+      }
+      // A:Z, wider than the 17 columns written, so a previous run's right-hand cells cannot be
+      // stranded beside this one's - the same reason the capital-gains clear uses A:Z.
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${txnTabName}!A:Z` }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
+        spreadsheetId, range: `${txnTabName}!A1`, valueInputOption: "USER_ENTERED", resource: { values: xout },
+      }));
+      txnTabByClass.set(id, txnTabName);
+
+      // Cosmetic only, and never allowed to fail the run - but a SKIPPED repaint leaves the
+      // previous run's bands over fresh values, so old paint is stripped first either way.
+      if (xSheetId !== undefined && xSheetId !== null) {
+        try {
+          const INR = "#,##,##0.00", INT = "#,##,##0", RATE = "#,##,##0.00####";
+          const numFmt = (c0: number, c1: number, pattern: string) => ({
+            repeatCell: {
+              range: { sheetId: xSheetId, startColumnIndex: c0, endColumnIndex: c1 },
+              cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern } } },
+              fields: "userEnteredFormat.numberFormat",
+            },
+          });
+          const boldRow = (r0: number, r1: number) => ({
+            repeatCell: {
+              range: { sheetId: xSheetId, startRowIndex: r0, endRowIndex: r1, startColumnIndex: 0, endColumnIndex: TXN_WIDTH },
+              cell: { userEnteredFormat: { textFormat: { bold: true } } },
+              fields: "userEnteredFormat.textFormat.bold",
+            },
+          });
+          await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: {
+              requests: [
+                {
+                  repeatCell: {
+                    range: { sheetId: xSheetId },
+                    cell: { userEnteredFormat: { textFormat: { bold: false } } },
+                    fields: "userEnteredFormat.textFormat.bold",
+                  },
+                },
+                numFmt(TX.qty, TX.qty + 1, INT),
+                numFmt(TX.rate, TX.rate + 1, RATE),
+                numFmt(TX.amt, TX.amt + 1, INR),
+                numFmt(TX.brok, TX.net + 1, INR),
+                boldRow(0, 1), boldRow(2, 3),
+                boldRow(xout.length - 3, xout.length - 1),
+              ],
+            },
+          }));
+        } catch (fmtErr) {
+          console.warn(`"${txnTabName}" values written; formatting skipped:`, fmtErr);
+        }
+      } else {
+        console.warn(`Transaction statement: no sheetId for "${txnTabName}" — values written, formatting skipped.`);
+      }
+    } catch (e) {
+      // One class's statement failing must not lose the capital-gains tabs, which are already
+      // written and are the document that matters.
+      console.warn(`Failed to write the "${txnTabName}" tab (the capital-gains tabs are unaffected):`, e);
+    }
+  }
+
   return {
     tabName, intradayTabName, holdingTabName, fyLabel,
-    // Counts span both tabs: the badge reports what the run produced, not one half of it.
-    scrips: delivery.scrips + intraday.scrips,
-    buyRows: delivery.buyRows + intraday.buyRows,
-    sellRows: delivery.sellRows + intraday.sellRows,
+    classTabs: ASSET_CLASS_IDS
+      .filter(id => classCg.some(c => c.id === id) || txnTabByClass.has(id))
+      .map(id => ({
+        id,
+        label: ASSET_CLASSES[id].label,
+        cgTab: classCg.find(c => c.id === id)?.tab,
+        txnTab: txnTabByClass.get(id),
+      })),
+    // Counts span EVERY tab: the badge reports what the run produced, not one part of it.
+    scrips: delivery.scrips + intraday.scrips + classCg.reduce((s, c) => s + c.em.scrips, 0),
+    buyRows: delivery.buyRows + intraday.buyRows + classCg.reduce((s, c) => s + c.em.buyRows, 0),
+    sellRows: delivery.sellRows + intraday.sellRows + classCg.reduce((s, c) => s + c.em.sellRows, 0),
     unresolved: [...unresolvedMap.values()], master,
     unclassified: unclassifiedSales,
   };

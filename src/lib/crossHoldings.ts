@@ -1,6 +1,7 @@
 import { gapi } from "gapi-script";
 import { loadScripMaster, lookupScrip, normName, peEntry, SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
 import { loadScripPrices, makePriceResolver } from "./scripPrices";
+import { displayLabelForId } from "./portfolios";
 
 /**
  * Every open position across EVERY portfolio, folded into one row per security.
@@ -112,7 +113,7 @@ export async function computeCrossHoldings(portfolios: CrossHoldingsPortfolio[])
   const failed: string[] = [];
 
   for (const { p, rows, ok } of reads) {
-    if (!ok) { failed.push(p.label); continue; }
+    if (!ok) { failed.push(displayLabelForId(p.id)); continue; }
     for (let i = 1; i < rows.length; i++) {           // row 0 is the header
       const r = rows[i]; if (!r) continue;
       const name = (r[0] || "").toString().trim();

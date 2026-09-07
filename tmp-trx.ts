@@ -74,7 +74,7 @@ const SCRIP_ROWS = [
 ];
 
 function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = [],
-                 aif: any[][] = [], mf: any[][] = []) {
+                 aif: any[][] = [], mf: any[][] = [], bond: any[][] = []) {
   g.__ranges = {
     [`${PORTFOLIO}::True Entry!A:Z`]: trueEntry,
     [`${PORTFOLIO}::Corporate Actions!A:Z`]: corp.length ? corp : undefined,
@@ -90,6 +90,7 @@ function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = [],
     // below installs them explicitly.
     [`${SCRIP_MASTER_SPREADSHEET_ID}::AIF!A1:J5000`]: aif.length ? aif : undefined,
     [`${SCRIP_MASTER_SPREADSHEET_ID}::Mutual Fund!A1:J5000`]: mf.length ? mf : undefined,
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Bonds!A1:J5000`]: bond.length ? bond : undefined,
   };
   g.__firstTab = { [PORTFOLIO]: 'True Entry', [SCRIP_MASTER_SPREADSHEET_ID]: MASTER_TAB };
   g.__sheetTabs = { [PORTFOLIO]: ['True Entry', 'Opening Holdings', 'Corporate Actions'] };
@@ -108,6 +109,12 @@ const written = (tab: string): any[][] | undefined => {
   const hit = (g.__updated || []).filter((u: any) => (u.range || '').startsWith(`${tab}!`));
   return hit.length ? hit[hit.length - 1].resource.values : undefined;
 };
+/** TRANSACTION STATEMENT column indices - see TXN_HDR in trxRegister.ts. */
+const TXC = { sno: 0, date: 1, name: 2, type: 3, qty: 4, rate: 5, amt: 6, brok: 7, net: 16 };
+/** Rows of a transaction statement whose TYPE cell matches, e.g. 'BUY' or 'TOTAL SELL'. */
+const txnRows = (tab: any[][] | undefined, type: string): any[][] =>
+  (tab || []).filter(r => (r[TXC.type] || '').toString().trim() === type);
+
 const tabsWritten = (): string[] =>
   [...new Set((g.__updated || []).map((u: any) => (u.range || '').split('!')[0]))] as string[];
 
@@ -428,15 +435,22 @@ export async function run() {
       pl.some((v: number) => Math.abs(v - (7777695 - 4941600)) < 0.02), `P/L seen: ${JSON.stringify(pl)}`);
   }
 
-  // ── FIXTURE D — asset classes: AIF is PE-like, a MUTUAL FUND has no rule ──
+  // ── FIXTURE D — asset classes: AIF is PE-like; a MUTUAL FUND and a BOND have no rule ──
   //
-  // The point of this fixture is a NEGATIVE: a mutual-fund sale must appear in NEITHER P/L
-  // column. `ltDaysFor` returns null for MF, and with no strictNullChecks `days >= null`
+  // The point of this fixture is a NEGATIVE: an MF or bond sale must appear in NEITHER P/L
+  // column. `ltDaysFor` returns null for both, and with no strictNullChecks `days >= null`
   // compiles and coerces to `>= 0`, which would file every one of them as LONG TERM under a
   // green build. Only an explicit test can see that.
+  //
+  // TWO no-rule scrips, not one, and that is the load-bearing part. Both carry charges (`te`
+  // stamps brok 10 / stt 5 / gst 2 / et 1 / dmat 0.5 / stamp 0.1 / sebi 0.05 on every row) but
+  // neither sale is emitted, so the charge-conservation guard has to exclude BOTH from what it
+  // expects on the tabs. Miss one and the guard fires and no register is written at all - the
+  // check doing its job over a scrip it was never told to skip.
   {
     const AIF_ROWS = [['Company', 'ISIN'], ['HELION VENTURES FUND II', 'INE500A01019']];
     const MF_ROWS = [['Company', 'ISIN'], ['PARAG PARIKH FLEXI CAP FUND', 'INF879O01027']];
+    const BOND_ROWS = [['Company', 'ISIN'], ['TATA CAPITAL 8.5% NCD 2029', 'INE976I08014']];
     const FIXTURE_D: any[][] = [
       TE_HEADER,
       // AIF: bought pre-FY, sold 20 months later -> SHORT term at 730 days, like PE.
@@ -445,34 +459,255 @@ export async function run() {
       // Mutual fund: held 20 months. Long at 12, short at 24, slab if debt - no answer.
       te([2024, 6, 1], 'PARAG PARIKH FLEXI CAP FUND', 'INF879O01027', 'Buy', 200, 50),
       te([2025, 12, 1], 'PARAG PARIKH FLEXI CAP FUND', 'INF879O01027', 'Sell', 200, 80),
+      // Bond: same holding period, and no answer for the same kind of reason - a LISTED bond is
+      // long at 12 months, but an unlisted one transferred post-23-Jul-2024 is always short at
+      // slab under s.50AA. Gain is 50 x (1100-1000) = 5,000, deliberately distinct from the
+      // AIF's 49,990 and the fund's 6,000 so a leak into a P/L column names its own source.
+      te([2024, 6, 1], 'TATA CAPITAL 8.5% NCD 2029', 'INE976I08014', 'Buy', 50, 1000),
+      te([2025, 12, 1], 'TATA CAPITAL 8.5% NCD 2029', 'INE976I08014', 'Sell', 50, 1100),
     ];
 
-    install(FIXTURE_D, [], [], AIF_ROWS, MF_ROWS);
+    install(FIXTURE_D, [], [], AIF_ROWS, MF_ROWS, BOND_ROWS);
     const res = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
     const d = written(CG_TAB);
     ok('D: delivery tab written', !!d);
 
-    eq('D: exactly one sale refused classification', res.unclassified.length, 1);
-    eq('D: and it is the MUTUAL FUND, not the AIF',
-      res.unclassified[0]?.name, 'PARAG PARIKH FLEXI CAP FUND');
-    eq('D: the whole quantity is reported, not a remnant', res.unclassified[0]?.qty, 200);
+    // The register writing AT ALL is the charge-conservation assertion: two unemitted sales
+    // carrying charges would otherwise throw before any tab was produced.
+    ok('D: the register still wrote with TWO no-rule scrips carrying charges', !!d,
+      'the charge-conservation guard fired - a no-rule scrip\'s charges were still expected');
+
+    eq('D: exactly two sales refused classification', res.unclassified.length, 2);
+    const refused = res.unclassified.map(u => u.name).sort();
+    eq('D: they are the MUTUAL FUND and the BOND, not the AIF', refused,
+      ['PARAG PARIKH FLEXI CAP FUND', 'TATA CAPITAL 8.5% NCD 2029']);
+    eq('D: the whole MF quantity is reported, not a remnant',
+      res.unclassified.find(u => /PARAG/.test(u.name))?.qty, 200);
+    eq('D: the whole BOND quantity is reported, not a remnant',
+      res.unclassified.find(u => /TATA CAPITAL/.test(u.name))?.qty, 50);
+
+    // ── the class split: each sale on exactly ONE tab ──
+    const aifTab = written(`AIF Capital Gains for ${FY_LABEL}`);
+    ok('D: an AIF Capital Gains tab is written', !!aifTab, `tabs: ${tabsWritten().join(', ')}`);
+    ok('D: no PE tab is written - there are no PE trades in this fixture',
+      !written(`Private Equity Capital Gains for ${FY_LABEL}`));
+    ok('D: no MF tab is written - a mutual fund has no gains to compute',
+      !written(`Mutual Fund Capital Gains for ${FY_LABEL}`));
+
+    if (aifTab) {
+      const aFlat = aifTab.map(r => r.join('|')).join('\n');
+      ok('D: the AIF is on its OWN capital-gains tab', /HELION VENTURES/.test(aFlat));
+      const AH = aifTab[2];
+      const ast = AH.indexOf('P/L'), alt = AH.indexOf('P/L', AH.indexOf('P/L') + 1);
+      const apls = aifTab.flatMap(r => [r[ast], r[alt]]).filter(v => typeof v === 'number') as number[];
+      // 100 x (1500-1000) = 50,000 less charges, and 20 months < 730 days, so SHORT term -
+      // the concessional 12-month listed period does not apply to an AIF unit.
+      ok('D: the AIF sale is short-term at 20 months (730-day rule, as PE)',
+        apls.some(v => Math.abs(v - 49990) < 30), `P/L seen: ${JSON.stringify(apls)}`);
+    }
 
     if (d) {
       const flat = d.map(r => r.join('|')).join('\n');
-      ok('D: the AIF appears on the register', /HELION VENTURES/.test(flat));
+      // The main tab is now LISTED ONLY. Leaving the AIF here as well as on its own tab would
+      // put the same gain on two tabs - a double count nothing downstream could detect.
+      ok('D: the AIF is NOT on the main (listed) capital-gains tab', !/HELION VENTURES/.test(flat),
+        'a non-listed gain is on two tabs at once');
       // THE assertion. A ₹6,000 gain (200 x (80-50)) must not be sitting in a P/L column.
       ok('D: the mutual fund is NOT on the register at all', !/PARAG PARIKH/.test(flat),
         'an MF sale reached a tax tab');
+      ok('D: the bond is NOT on the register at all', !/TATA CAPITAL/.test(flat),
+        'a bond sale reached a tax tab');
 
       const H = d[2];
       const st = H.indexOf('P/L'), lt = H.indexOf('P/L', H.indexOf('P/L') + 1);
       const pls = d.flatMap(r => [r[st], r[lt]]).filter(v => typeof v === 'number') as number[];
-      // The AIF gain is 100 x (1500-1000) = 50,000 less charges, and 20 months < 730 days,
-      // so it must be SHORT term - the concessional 12-month period does not apply.
-      ok('D: the AIF sale is short-term at 20 months (730-day rule, as PE)',
-        pls.some(v => Math.abs(v - 49990) < 30), `P/L seen: ${JSON.stringify(pls)}`);
+      ok('D: and its 49,990 gain is not on the listed tab either',
+        !pls.some(v => Math.abs(v - 49990) < 30), `P/L seen: ${JSON.stringify(pls)}`);
       ok('D: no 6,000 mutual-fund gain leaked into either P/L column',
         !pls.some(v => Math.abs(v - 6000) < 30), `P/L seen: ${JSON.stringify(pls)}`);
+      ok('D: no 5,000 bond gain leaked into either P/L column',
+        !pls.some(v => Math.abs(v - 5000) < 30), `P/L seen: ${JSON.stringify(pls)}`);
+    }
+
+    // ── the sales that no capital-gains tab will ever show ──
+    // This is most of the point of the statement: an MF or bond sale is refused by both engines
+    // and reported only in `unclassified`, which nothing in the UI surfaces. Before this tab
+    // existed, a real sale left no trace in the spreadsheet at all.
+    const mfD = written(`Mutual Fund Transactions for ${FY_LABEL}`);
+    const bdD = written(`Bond Transactions for ${FY_LABEL}`);
+    const aifD = written(`AIF Transactions for ${FY_LABEL}`);
+    ok('D: the refused mutual-fund SALE is visible on its transaction statement',
+      !!mfD && txnRows(mfD, 'SELL').length === 1,
+      `rows: ${JSON.stringify((mfD || []).map(r => r[TXC.type]))}`);
+    ok('D: the refused bond SALE is visible on its transaction statement',
+      !!bdD && txnRows(bdD, 'SELL').length === 1);
+    ok('D: the AIF gets a statement as well as a gains tab',
+      !!aifD && txnRows(aifD, 'SELL').length === 1);
+    ok('D: no Private Equity statement - this fixture holds none',
+      !written(`Private Equity Transactions for ${FY_LABEL}`));
+    // The pre-FY BUYs are outside the selected year, so the statement must show the sale only.
+    ok('D: the statement is FY-scoped - the pre-FY purchase is not on it',
+      !!mfD && txnRows(mfD, 'BUY').length === 0,
+      'a purchase from outside the selected FY reached an FY statement');
+  }
+
+  // ── FIXTURE E — a no-rule scrip bought AND SOLD in the SAME financial year ──
+  //
+  // Fixture D above buys its fund PRE-FY, so `inFY` is false at the buy and no PURCHASE row is
+  // ever emitted for it - the charge books balance by accident. Buy it INSIDE the year and the
+  // two sides disagree: `chargeCells` puts the purchase row's charges into `delivery.grand`,
+  // while `noRule` (built from `unclassifiedSales`) excludes that scrip from `expect`. Drift in
+  // one direction, and the charge-conservation guard THROWS rather than writing - so buying and
+  // selling a mutual fund or a bond in the same FY produced no register at all.
+  //
+  // The fix is to key the exclusion on the ASSET CLASS (does it have an LT rule?) rather than
+  // on whether the scrip happened to sell this year, and to keep no-rule scrips off the
+  // capital-gains tabs entirely rather than half-on via their purchases.
+  {
+    const MF_ROWS_E = [['Company', 'ISIN'], ['QUANT SMALL CAP FUND', 'INF966L01374']];
+    const BOND_ROWS_E = [['Company', 'ISIN'], ['HDFC 7.95% NCD 2030', 'INE001A08040']];
+    const FIXTURE_E: any[][] = [
+      TE_HEADER,
+      // A listed scrip so the guard has a real, non-zero expectation to reconcile against.
+      te([2025, 5, 1], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Buy', 100, 90),
+      te([2025, 10, 1], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Sell', 100, 95),
+      // Both bought AND sold inside FY25-26 - this is the case fixture D cannot reach.
+      te([2025, 6, 1], 'QUANT SMALL CAP FUND', 'INF966L01374', 'Buy', 100, 100),
+      te([2025, 12, 1], 'QUANT SMALL CAP FUND', 'INF966L01374', 'Sell', 100, 120),
+      te([2025, 6, 1], 'HDFC 7.95% NCD 2030', 'INE001A08040', 'Buy', 50, 1000),
+      te([2025, 12, 1], 'HDFC 7.95% NCD 2030', 'INE001A08040', 'Sell', 50, 1100),
+    ];
+
+    install(FIXTURE_E, [], [], [], MF_ROWS_E, BOND_ROWS_E);
+    let threw = '';
+    let resE: any = null;
+    try { resE = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio'); }
+    catch (e: any) { threw = e?.message || String(e); }
+
+    // THE assertion. A green build and a passing fixture D both hide this.
+    ok('E: an in-FY buy+sell of a no-rule scrip does not block the whole register',
+      !threw, `threw: ${threw}`);
+
+    const e = written(CG_TAB);
+    ok('E: delivery tab written', !!e);
+    if (e) {
+      const flatE = e.map(r => r.join('|')).join('\n');
+      ok('E: the listed scrip is on the register', /ALPHA INDUSTRIES/.test(flatE));
+      // The PURCHASE row is the leak: a no-rule scrip must be wholly absent, not half-present
+      // through a buy whose charges nothing accounts for.
+      ok('E: the mutual fund is wholly absent, purchases included', !/QUANT SMALL CAP/.test(flatE),
+        'a no-rule scrip leaked a PURCHASE row onto a capital-gains tab');
+      ok('E: the bond is wholly absent, purchases included', !/HDFC 7.95/.test(flatE),
+        'a no-rule scrip leaked a PURCHASE row onto a capital-gains tab');
+    }
+    if (resE) {
+      eq('E: both no-rule sales are reported as unclassified', resE.unclassified.length, 2);
+    }
+
+    // ── the transaction statements carry what the gains tabs refuse ──
+    const mfTxn = written(`Mutual Fund Transactions for ${FY_LABEL}`);
+    const bdTxn = written(`Bond Transactions for ${FY_LABEL}`);
+    ok('E: a Mutual Fund transaction statement is written', !!mfTxn, `tabs: ${tabsWritten().join(', ')}`);
+    ok('E: a Bond transaction statement is written', !!bdTxn);
+    ok('E: no statement for a class with no trades', !written(`AIF Transactions for ${FY_LABEL}`));
+
+    if (mfTxn) {
+      const buys = txnRows(mfTxn, 'BUY'), sells = txnRows(mfTxn, 'SELL');
+      eq('E: the fund has exactly one BUY row', buys.length, 1);
+      eq('E: and exactly one SELL row - the row no other tab shows', sells.length, 1);
+      eq('E: the BUY row carries qty / amount / net', [buys[0]?.[TXC.qty], buys[0]?.[TXC.amt], buys[0]?.[TXC.net]],
+        [100, 10000, 10010]);
+      // 100 x 120 = 12,000 turnover, net of the 10 brokerage = 11,990.
+      eq('E: the SELL row carries qty / amount / net', [sells[0]?.[TXC.qty], sells[0]?.[TXC.amt], sells[0]?.[TXC.net]],
+        [100, 12000, 11990]);
+      // Per-SIDE subtotals: adding a buy amount to a sale amount would mean nothing.
+      eq('E: one TOTAL BUY subtotal', txnRows(mfTxn, 'TOTAL BUY').length, 1);
+      eq('E: one TOTAL SELL subtotal', txnRows(mfTxn, 'TOTAL SELL').length, 1);
+      // The statement's charges must equal what True Entry charged this scrip - `te` stamps
+      // brok 10 per row, so 10 on each side. This is the check that the statement is a record
+      // of the ledger and not a re-derivation of it.
+      const gb = (mfTxn).find(r => (r[TXC.name] || '').toString() === 'GRAND TOTAL BUY');
+      const gs = (mfTxn).find(r => (r[TXC.name] || '').toString() === 'GRAND TOTAL SELL');
+      eq('E: GRAND TOTAL BUY ties to True Entry (amount, brokerage)', [gb?.[TXC.amt], gb?.[TXC.brok]], [10000, 10]);
+      eq('E: GRAND TOTAL SELL ties to True Entry (amount, brokerage)', [gs?.[TXC.amt], gs?.[TXC.brok]], [12000, 10]);
+    }
+    if (bdTxn) {
+      const flatB = bdTxn.map(r => r.join('|')).join('\n');
+      ok('E: the bond statement names the bond', /HDFC 7.95/.test(flatB));
+      eq('E: and shows its sale', txnRows(bdTxn, 'SELL').length, 1);
+    }
+  }
+
+  // ── FIXTURE F — a book holding ONLY private equity ──
+  //
+  // PE is the class this whole split was asked for and it had no register coverage at all
+  // (fixture D is AIF / MF / Bond; everything else is listed equity). It also produces a state
+  // that was unreachable before the split: NO listed transactions, so the historic
+  // "Capital Gains for FY.." tab is empty and has to say where the figures went.
+  {
+    const FIXTURE_F: any[][] = [
+      TE_HEADER,
+      te([2025, 5, 1], 'STRIDE VENTURES PRIVATE LIMITED', '', 'Buy', 1000, 100),
+      te([2025, 11, 1], 'STRIDE VENTURES PRIVATE LIMITED', '', 'Sell', 400, 150),
+    ];
+    install(FIXTURE_F);
+    // The PE tab is stubbed empty by `install`; this fixture needs the company ON it, which is
+    // what makes the name resolve to class PE rather than to an unknown listed scrip.
+    g.__ranges[`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`] =
+      [['Company', 'ISIN'], ['STRIDE VENTURES PRIVATE LIMITED', '']];
+    invalidateScripCache(); invalidatePrivateEquityCache();
+
+    let threwF = '';
+    let resF: any = null;
+    try { resF = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio'); }
+    catch (e: any) { threwF = e?.message || String(e); }
+    ok('F: a PE-only book still produces a register', !threwF, `threw: ${threwF}`);
+
+    const peCg = written(`Private Equity Capital Gains for ${FY_LABEL}`);
+    ok('F: a Private Equity Capital Gains tab is written', !!peCg, `tabs: ${tabsWritten().join(', ')}`);
+    if (peCg) {
+      const pFlat = peCg.map(r => r.join('|')).join('\n');
+      ok('F: the PE company is on its own gains tab', /STRIDE VENTURES/.test(pFlat));
+      const PH = peCg[2];
+      const pst = PH.indexOf('P/L'), plt = PH.indexOf('P/L', PH.indexOf('P/L') + 1);
+      const ppls = peCg.flatMap(r => [r[pst], r[plt]]).filter(v => typeof v === 'number') as number[];
+      // 400 x (150 - 100) = 20,000. Held 1-May-2025 to 1-Nov-2025 = ~184 days, well under the
+      // 730-day unlisted threshold, so SHORT term - the P/L must sit in the FIRST P/L column.
+      const stCol = peCg.find(r => typeof r[pst] === 'number' && Math.abs(Number(r[pst]) - 20000) < 40);
+      ok('F: the PE gain is SHORT term at ~6 months (730-day rule)', !!stCol,
+        `P/L seen: ${JSON.stringify(ppls)}`);
+      ok('F: and nothing landed in the LONG term column',
+        !peCg.some(r => typeof r[plt] === 'number' && Math.abs(Number(r[plt]) - 20000) < 40));
+    }
+
+    // The historic tab must still be written, and must explain itself rather than looking broken.
+    const listedF = written(CG_TAB);
+    ok('F: the listed tab is still written when there are no listed trades', !!listedF);
+    if (listedF) {
+      const lFlat = listedF.map(r => r.join('|')).join('\n');
+      ok('F: it says there were no LISTED transactions', /No LISTED transactions/.test(lFlat),
+        'an empty listed tab reads as a failed run');
+      ok('F: and names the tab the figures went to',
+        /Private Equity Capital Gains for FY25-26/.test(lFlat),
+        'an empty tab beside a populated one reads as though the split dropped the figures');
+      ok('F: the PE company is NOT on the listed tab', !/STRIDE VENTURES/.test(lFlat));
+    }
+
+    const peTxn = written(`Private Equity Transactions for ${FY_LABEL}`);
+    ok('F: a Private Equity transaction statement is written', !!peTxn);
+    if (peTxn) {
+      eq('F: it shows the buy', txnRows(peTxn, 'BUY').length, 1);
+      eq('F: and the part sale', txnRows(peTxn, 'SELL').length, 1);
+      const gb = peTxn.find(r => (r[TXC.name] || '').toString() === 'GRAND TOTAL BUY');
+      const gs = peTxn.find(r => (r[TXC.name] || '').toString() === 'GRAND TOTAL SELL');
+      eq('F: GRAND TOTAL BUY is the full 1,000 shares at 100', [gb?.[TXC.qty], gb?.[TXC.amt]], [1000, 100000]);
+      eq('F: GRAND TOTAL SELL is the 400 sold at 150', [gs?.[TXC.qty], gs?.[TXC.amt]], [400, 60000]);
+    }
+    if (resF) {
+      eq('F: PE is classifiable, so nothing is unclassified', resF.unclassified.length, 0);
+      eq('F: the result reports the PE tabs it wrote',
+        (resF.classTabs || []).map((c: any) => [c.id, c.cgTab, c.txnTab]),
+        [['PE', `Private Equity Capital Gains for ${FY_LABEL}`, `Private Equity Transactions for ${FY_LABEL}`]]);
     }
   }
 

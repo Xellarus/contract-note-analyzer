@@ -1,6 +1,7 @@
 import { gapi } from "gapi-script";
 import { loadScripMaster, lookupScrip, normName, SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
 import { loadOpeningCorpActions } from "./openingCorpActions";
+import { displayLabelForId } from "./portfolios";
 // Reused rather than re-implemented: the same sheet-date coercion this normalises (an ISO
 // string written into a cell becomes a real Date and reads back locale-formatted) hits the
 // Ex-Date column exactly as it hit the Prices tab's Price Date column.
@@ -307,7 +308,7 @@ export async function computePendingCorpActions(
             : null));
       const impliedNewShares = reading ? held * (reading.factor - 1) : 0;
 
-      out.push({ alert: a, portfolioId: p.id, portfolioLabel: p.label, heldQty: held, impliedNewShares, reading });
+      out.push({ alert: a, portfolioId: p.id, portfolioLabel: displayLabelForId(p.id), heldQty: held, impliedNewShares, reading });
     }
   }
 

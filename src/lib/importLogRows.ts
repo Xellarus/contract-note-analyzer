@@ -10,7 +10,7 @@
  * for the current schema.
  */
 import { formatDMY } from "./dates";
-import { portfolioByCode } from "./portfolios";
+import { portfolioByCode, portfolioDisplayLabel } from "./portfolios";
 
 /** 0-based column index for each field; -1 when the log doesn't have that column. */
 export interface ImportLogCols {
@@ -100,7 +100,10 @@ export function buildImportLogRows(rows: string[][], cols: ImportLogCols, firstD
       broker: get(cols.broker),
       user: get(cols.user),
       portfolioCode: code,
-      portfolio: (code && portfolioByCode(code)?.label) || code,
+      // Disambiguated, not the plain label: ImportHistory builds its portfolio FILTER from
+      // this string alone, so two accounts sharing a name would collapse into one option
+      // that matches both and could isolate neither. Only a repeated name gets a suffix.
+      portfolio: (code && portfolioDisplayLabel(portfolioByCode(code))) || code,
       rows: nRows,
       importId,
       reversed: get(cols.status).toLowerCase() === "reversed",

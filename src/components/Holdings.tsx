@@ -37,7 +37,7 @@ import AddTradeModal from './AddTradeModal';
 import StockOpeningImportModal from './StockOpeningImportModal';
 import CubeLoader from './ui/CubeLoader';
 import { GainBar } from './ui/HoldingsViz';
-import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
+import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, brokerLabel, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
 import { classifySheetsError, sheetsAccessLabel, SheetsErrorKind } from '../lib/sheetsAccess';
 import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
@@ -589,9 +589,11 @@ export default function Holdings({
 
   // original local portfolios state
   const [searchTerm, setSearchTerm] = useState('');
-  // Default: Security Name ascending (0-9 → A-Z), per user request.
-  const [sortField, setSortField] = useState<'symbol' | 'quantity' | 'avgCost' | 'currentPrice' | 'currentValue' | 'profit'>('symbol');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  // Default: CURRENT VALUE descending — the biggest holdings first, per user request.
+  // (Was Security Name A-Z, also by request; superseded.) Sorting is plain state, not
+  // persisted, so this is what every load opens on.
+  const [sortField, setSortField] = useState<'symbol' | 'quantity' | 'avgCost' | 'currentPrice' | 'currentValue' | 'profit'>('currentValue');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
   // ── Resizable holdings-grid columns (Excel-style drag) ────────────────────────
   // Per-column pixel widths, persisted in localStorage so a user's sizing sticks. Keys
@@ -1989,7 +1991,7 @@ export default function Holdings({
       cleanName = name.replace(/PEQ/gi, "").replace(/PRE-EQUITY/gi, "").trim();
     }
     // A row on ANY non-listed tab wins over the name-derived guess, and carries which tab it
-    // came from ("PE" / "AIF" / "MF") - the segment toggle and every badge read this.
+    // came from ("PE" / "AIF" / "MF" / "BOND") - the segment toggle and every badge read this.
     const cls = assetClassOf(scrip, isin, name);
     if (cls) type = cls;
 
@@ -2212,7 +2214,10 @@ export default function Holdings({
       setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
     } else {
       setSortField(field);
-      setSortDirection('asc');
+      // Text starts A-Z; numbers start biggest-first, which is what you want from one click on
+      // a money column - and matches AllHoldingsTable, which already works this way. Starting
+      // every column 'asc' meant clicking Current Value showed the SMALLEST holdings first.
+      setSortDirection(field === 'symbol' ? 'asc' : 'desc');
     }
   };
 
@@ -2354,11 +2359,17 @@ export default function Holdings({
   /**
    * Save an edited CMP.
    *
-   * For an UNLISTED company this is now PERSISTED to the "Private Equities" tab, because that
+   * For a PRIVATE EQUITY company this is PERSISTED to the "Private Equities" tab, because that
    * tab is where its price actually lives - the previous behaviour put it in React state, so it
    * vanished on reload and never reached the Dashboard or any report. For a listed security it
    * stays a local override on purpose: its price belongs to the feed, and writing a typed number
    * into the shared Prices tab would be overwritten by the next refresh anyway.
+   *
+   * AIF / Mutual Fund / Bond are NOT yet persisted from here - `updatePrivateEquityCmp` reads and
+   * writes the Private Equities tab only, so there is nowhere to put them. That fails SAFE (a
+   * price is never written to the wrong tab) but it used to fail SILENTLY, which is worse than
+   * useless; the branch below now names the tab to type it into. See the vault's "Non-PE CMP
+   * write-back" problem entry.
    */
   const handleSavePriceEdit = async (id: string) => {
     const val = parseFloat(editingPriceValue);
@@ -2377,7 +2388,19 @@ export default function Holdings({
     // after a round trip to Sheets.
     setSheetCmpOverrides(prev => ({ ...prev, [key]: val }));
 
-    if (matched.type !== 'PE') return;                      // listed → local override only
+    if (matched.type !== 'PE') {
+      // A LISTED security is a local override on purpose (see above). A non-listed row that is
+      // simply not PE is a different case and must NOT be silent: the CMP writer still reads and
+      // writes only the Private Equities tab, so an AIF / Mutual Fund / Bond price has nowhere
+      // to be saved - and until this told the user, the local override looked exactly like a
+      // saved figure and then vanished on reload. Points at the tab that does hold it.
+      const cls = ASSET_CLASS_IDS.find(id => id === matched.type);
+      if (cls) {
+        toast.info(`Shown here only — ${ASSET_CLASSES[cls].label} prices live on the “${ASSET_CLASSES[cls].tab}” `
+          + `tab. Type it into that tab's CMP column so the Dashboard, AUM and reports see it too.`);
+      }
+      return;
+    }
 
     setSavingPeCmp(key);
     try {
@@ -2682,7 +2705,15 @@ export default function Holdings({
         ? aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' })
         : bVal.localeCompare(aVal, undefined, { numeric: true, sensitivity: 'base' });
     }
-    return sortDirection === 'asc' ? (aVal - bVal) : (bVal - aVal);
+    const num = sortDirection === 'asc' ? (aVal - bVal) : (bVal - aVal);
+    if (num) return num;
+    // Ties fall back to the name, ALWAYS ascending. This matters more than it looks: a
+    // portfolio that has not been synced shows Rs 0 for every row (holdings-no-mock-data), so
+    // a value sort over all-zeros would otherwise print in whatever order the rows were built
+    // in. A-Z for ties keeps that predictable, and costs nothing when the values differ.
+    return (a.name || a.symbol || '').toString()
+      .localeCompare((b.name || b.symbol || '').toString(), undefined,
+        { numeric: true, sensitivity: 'base' });
   });
 
   // Standalone Newton-Raphson solver for exact XIRR position returns
@@ -2780,7 +2811,8 @@ export default function Holdings({
     // Either correct or absent, never a 404-y guess - and never for an unlisted company.
     const screenerHref = peInfo ? '' : screenerUrl(scripEntry?.nse, scripEntry?.bse);
     const driveHref = peInfo?.driveLink || '';
-    // NULL when this security's class has no decided holding-period rule (a mutual fund).
+    // NULL when this security's class has no decided holding-period rule (a mutual fund or a
+    // bond).
     // It must NOT fall through as a number: `now - null * 86400000` is `now`, which makes
     // nothing long-term, while `ageDays > null` is `> 0`, which makes EVERYTHING long-term -
     // the same page would then disagree with itself. No strictNullChecks here to catch either.
@@ -4207,9 +4239,23 @@ export default function Holdings({
                 </div>
               );
             })()}
-            {PORTFOLIOS.map((p) => {
+            {PORTFOLIOS
+              // Biggest book first, the same rule the holdings grid uses. `getPortfolioSummary`
+              // is called ONCE per portfolio here and the result carried into the card, rather
+              // than being re-called from inside the comparator - which would run it O(n log n)
+              // times, and it reduces over `portfolioRows` for every valued account.
+              .map((p) => ({ p, summary: getPortfolioSummary(p.id) }))
+              // Sorts the array `.map` just made, never PORTFOLIOS itself - the registry is
+              // module-level shared state and sorting it in place would reorder it for the
+              // dropdowns, the importer and the Dashboard too.
+              //
+              // Ties keep REGISTRY order, which `Array.prototype.sort` guarantees (stable since
+              // ES2019). That is deliberate and differs from the grid's A-Z tiebreak: until the
+              // sheets load every card is 0, so a cold load must look exactly as it did before
+              // rather than re-alphabetising itself and then moving again as data arrives.
+              .sort((a, b) => b.summary.currentValue - a.summary.currentValue)
+              .map(({ p, summary }) => {
               const id = p.id;
-              const summary = getPortfolioSummary(id);
               const noAccess = portfolioAccess[id];
               const isPositiveGain = summary.unrealisedGain >= 0;
               const isPositiveToday = summary.todaysGain >= 0;
@@ -4224,10 +4270,22 @@ export default function Holdings({
                   onClick={() => { setActivePortfolio(id); setSelectedStock(null); setIsDetailView(true); }}
                   className="group rounded-2xl border border-slate-200 bg-white shadow-sm hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer overflow-hidden flex flex-col"
                 >
-                  {/* Header: code + name + sheet link */}
+                  {/* Header: broker + name + sheet link */}
                   <div className="flex items-center justify-between gap-2 px-3.5 pt-3">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10px] font-black font-mono tracking-wider shrink-0 group-hover:bg-indigo-50 group-hover:text-indigo-700 transition-colors">{p.code}</span>
+                      {/* The BROKER, not the client code. Which firm holds the account is the
+                          more useful thing at a glance; the code is one the user already knows
+                          for the account they are looking at. It is not lost - it is the
+                          tooltip here, the subtext on the detail header, and every dropdown -
+                          which matters because the CODE, not the broker, is what a contract
+                          note prints and what routes an import.
+                          `whitespace-nowrap` because a label can now be two words ("Share
+                          India") where a code never was, and `shrink-0` only stops the box
+                          shrinking, not the text inside it wrapping. */}
+                      <span
+                        title={`Client code ${p.code} · ${brokerLabel(p.broker)}`}
+                        className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10px] font-black font-mono tracking-wider shrink-0 whitespace-nowrap group-hover:bg-indigo-50 group-hover:text-indigo-700 transition-colors"
+                      >{brokerLabel(p.broker)}</span>
                       <h3 className="font-bold text-slate-900 group-hover:text-indigo-600 transition-colors text-sm truncate">{summary.name}</h3>
                     </div>
                     <a
@@ -4333,7 +4391,14 @@ export default function Holdings({
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={rb.error}>✗ Rebuild failed</span>
                     ))}
                     {trx && (trx.result ? (
-                      <span className="text-[10px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-1 rounded-lg" title={`Wrote "${trx.result.tabName}" + "${trx.result.intradayTabName}" + "${trx.result.holdingTabName}" — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
+                      <span className="text-[10px] font-bold text-violet-700 bg-violet-50 border border-violet-200 px-2 py-1 rounded-lg" title={[
+                        // Every tab the run produced, not just the three fixed ones — a
+                        // non-listed class now gets its own capital-gains tab and its own
+                        // transaction statement, and a tooltip that named only the originals
+                        // would read as though the PE tabs had not been written.
+                        ...[trx.result.tabName, trx.result.intradayTabName, trx.result.holdingTabName],
+                        ...(trx.result.classTabs || []).flatMap(c => [c.cgTab, c.txnTab].filter(Boolean) as string[]),
+                      ].map(t => `"${t}"`).join(' + ') + ` — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
                       </span>
                     ) : (

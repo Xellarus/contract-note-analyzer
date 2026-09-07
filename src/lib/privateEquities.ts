@@ -34,13 +34,14 @@ import { parseDMY } from "./dates";
 const PE_TAB = "Private Equities";
 const AIF_TAB = "AIF";
 const MF_TAB = "Mutual Fund";
+const BOND_TAB = "Bonds";
 
 /**
  * The NON-LISTED asset classes, each on its own hand-maintained tab of the shared scrip master.
- * All three tabs share the identical column shape and reader; what differs is the POLICY the
+ * All four tabs share the identical column shape and reader; what differs is the POLICY the
  * fold-in applies, which is why that lives here as data rather than as branches.
  */
-export type AssetClassId = "PE" | "AIF" | "MF";
+export type AssetClassId = "PE" | "AIF" | "MF" | "BOND";
 
 export interface AssetClassPolicy {
   id: AssetClassId;
@@ -61,12 +62,31 @@ export interface AssetClassPolicy {
    * at slab with no holding-period benefit at all, and other/specified funds sit at 24 months
    * post-Jul-2024. Picking one would file the other two wrongly with nothing downstream able to
    * detect it, so the classification is refused until the sheet says which kind each row is.
+   *
+   * BOND: null, and DELIBERATELY NOT DECIDED YET - the holding, valuation and AUM side of bonds
+   * is wanted now, the tax side is explicitly deferred. Bonds have no single rule either, and
+   * the two halves pull in opposite directions: a LISTED bond or debenture is long-term at 12
+   * months, whereas an UNLISTED one is worse than merely undecided - under s.50AA (extended to
+   * unlisted bonds and debentures by the Finance (No.2) Act 2024) a transfer on or after
+   * 23-Jul-2024 is ALWAYS deemed short-term at slab whatever the holding period, and a
+   * market-linked debenture has been always-short-term since Apr-2023. So 365 would understate
+   * the tax on an unlisted NCD and always-short-term would overstate it on a listed one. Buys,
+   * sells, the FIFO position, the valuation and the AUM all work normally; only the SHORT/LONG
+   * split is withheld, and those sales surface in `unclassified` rather than being filed on a
+   * guess. See the vault's "Bond Holding-Period Rule" problem entry before deciding.
    */
   ltDays: number | null;
   /**
    * Off-market: no exchange leg, so Delivery is forced and STT / exchange turnover / SEBI / IPF
    * cannot arise. True for PE and AIF. FALSE for MF - an equity-oriented redemption really does
    * bear STT, and hiding the box would silently drop it from the cost basis.
+   *
+   * FALSE for BOND, for the same reason and one more: the listed/unlisted question above is
+   * open, and `false` is the only safe side of it because it merely OFFERS the charge boxes.
+   * `true` would force Delivery and zero out exchange turnover / SEBI / IPF / stamp duty on a
+   * bond actually bought on the exchange's debt segment, silently understating its cost basis -
+   * and unlike a wrong holding period, nothing downstream could detect it. STT never applies to
+   * debt either way, so an offered-and-left-blank STT box costs nothing.
    */
   offMarket: boolean;
 }
@@ -75,9 +95,12 @@ export const ASSET_CLASSES: Record<AssetClassId, AssetClassPolicy> = {
   PE: { id: "PE", tab: PE_TAB, label: "Private Equity", badge: "PE", ltDays: 730, offMarket: true },
   AIF: { id: "AIF", tab: AIF_TAB, label: "AIF", badge: "AIF", ltDays: 730, offMarket: true },
   MF: { id: "MF", tab: MF_TAB, label: "Mutual Fund", badge: "MF", ltDays: null, offMarket: false },
+  // Label singular against a plural tab, exactly as "Private Equity" sits against
+  // "Private Equities" - the label is a class name, the tab is a list of things.
+  BOND: { id: "BOND", tab: BOND_TAB, label: "Bond", badge: "BOND", ltDays: null, offMarket: false },
 };
 
-export const ASSET_CLASS_IDS: AssetClassId[] = ["PE", "AIF", "MF"];
+export const ASSET_CLASS_IDS: AssetClassId[] = ["PE", "AIF", "MF", "BOND"];
 
 export interface PrivateEquityRow {
   /** Which tab this row came from, so the fold-in knows which policy to apply. */

@@ -67,7 +67,7 @@ function mkNav(n: number, opts: { flowOn?: number; gapCoverage?: boolean } = {})
 
 const PORTFOLIOS = [
   { id: 't059', code: 'T059', label: 'Taparia Holdings' },
-  { id: 's713', code: 'S713', label: 'Saket Agarwal (Integrated)' },
+  { id: 's713', code: 'S713', label: 'Saket Agarwal' },
   { id: 'c087', code: 'C087', label: 'Chaitanya Agarwal' },
 ];
 
