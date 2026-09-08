@@ -54,6 +54,15 @@ export interface ModalShellProps {
   /** id of the element labelling this dialog (for aria-labelledby). */
   labelledBy?: string;
   zClass?: string;
+  /**
+   * The dialog panel. It MUST carry `relative z-10` (or any positioning + z-index).
+   *
+   * The backdrop below is `position: absolute`, and CSS paints positioned elements in a LATER
+   * layer than non-positioned in-flow siblings - so an unpositioned panel renders UNDER the
+   * blurred, half-opaque backdrop: washed out, and deaf to clicks including the one meant to
+   * close it. Every existing caller does this; two new ones did not, and that is exactly how
+   * it presented ("a UI blur error"). Asserted for the new overlays in `tmp-shortcuts.ts`.
+   */
   children: ReactNode;
 }
 

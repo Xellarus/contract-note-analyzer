@@ -5,7 +5,7 @@ import {
   Upload, X, Download, FileText, CheckCircle2, AlertCircle, AlertTriangle,
   RefreshCw, Check, ShieldAlert, ChevronRight, ArrowLeft, Gauge,
   Menu, ChevronDown, BookOpen, Calculator, ArrowDown, ArrowUp, ArrowUpDown, BarChart3,
-  Briefcase, ShieldCheck
+  Briefcase, ShieldCheck, SlidersHorizontal,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGoogleLogin } from '@react-oauth/google';
@@ -25,6 +25,12 @@ import { formatDMY } from './lib/dates';
 import { useVirtualRows } from './components/ui/useVirtualRows';
 import CubeLoader from './components/ui/CubeLoader';
 import ThemeToggle from './components/ui/ThemeToggle';
+import SettingsView from './components/Settings';
+import PortfolioSwitcher from './components/PortfolioSwitcher';
+import ShortcutHelp from './components/ui/ShortcutHelp';
+import {
+  installShortcuts, emitShortcut, ShortcutAction, HOLDINGS_SEARCH_ID,
+} from './lib/shortcuts';
 import { processFile, mergeResults } from './lib/parsers';
 import { BrokerId } from './lib/brokers/types';
 import sessionVaultSvg from './assets/session-vault.svg?url';
@@ -117,7 +123,7 @@ const MAX_FILES = 31;
  * to the last `else` (Imports) rather than to the Dashboard. `pe`, from a short-lived separate
  * Private Equity view, is exactly that case.
  */
-const APP_VIEWS = ['dashboard', 'holdings', 'imports', 'reports'] as const;
+const APP_VIEWS = ['dashboard', 'holdings', 'imports', 'reports', 'settings'] as const;
 type AppView = typeof APP_VIEWS[number];
 
 // Best-effort trade date from a contract-note file name (broker files normally
@@ -647,6 +653,8 @@ export default function App() {
 
   const [activePortfolio, setActivePortfolio] = useState<string>(DEFAULT_PORTFOLIO_ID);
   const [isDetailView, setIsDetailView] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
 
   // Browser / mouse BACK button → top-level nav (the app has no router). A shared handler
   // ([appBack](./lib/appBack.ts)) runs the DEEPEST active level: stock detail (registered in
@@ -690,6 +698,63 @@ export default function App() {
     root.classList.toggle('dark', theme === 'dark');
     try { localStorage.setItem('theme', theme); } catch { /* ignore */ }
   }, [theme]);
+
+  /**
+   * Global keyboard shortcuts. The registry lives in `lib/shortcuts.ts`; this is the only place
+   * that knows what each action MEANS, because every bit of state they touch is owned here.
+   *
+   * `run` is typed on the ShortcutAction union, so adding a shortcut to the registry is a
+   * compile error until it is handled - the two cannot drift apart.
+   *
+   * Nothing here writes to Google Sheets. Rebuild / Sync / the Capital Gains register / Transfer
+   * are deliberately unbound; a stray keypress must never start a sheet write.
+   */
+  useEffect(() => {
+    const goto = (v: AppView) => { setCurrentView(v); setIsSidebarOpen(false); };
+    const run = (a: ShortcutAction) => {
+      switch (a) {
+        case 'goDashboard': goto('dashboard'); break;
+        case 'goPortfolios': goto('holdings'); break;
+        case 'goImports': goto('imports'); break;
+        // Matches the sidebar button, which also clears the stock focus - otherwise Reports
+        // opens still scoped to whatever stock was last drilled into.
+        case 'goReports': setReportsFocus(null); goto('reports'); break;
+        case 'goSettings': goto('settings'); break;
+        case 'openSwitcher': setSwitcherOpen(true); break;
+        case 'toggleTheme': setTheme((t) => (t === 'dark' ? 'light' : 'dark')); break;
+        case 'toggleDrawer': setIsSidebarOpen((o) => !o); break;
+        case 'showHelp': setShortcutHelpOpen(true); break;
+        case 'focusSearch': {
+          // The holdings filter lives INSIDE a portfolio, not on the card list - so "/" has to
+          // get you there before it can focus anything. Already-focused is a no-op.
+          const el = document.getElementById(HOLDINGS_SEARCH_ID) as HTMLInputElement | null;
+          if (el) { el.focus(); el.select(); break; }
+          goto('holdings');
+          setIsDetailView(true);
+          // Two frames, not one: the view switch and the detail switch are separate renders,
+          // and the input does not exist until both have committed.
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const late = document.getElementById(HOLDINGS_SEARCH_ID) as HTMLInputElement | null;
+            late?.focus();
+          }));
+          break;
+        }
+        case 'addTrade': {
+          // The only action whose state lives in Holdings. Forwarded as an event rather than
+          // hoisting `showAddTrade` up here - see the note in lib/shortcuts.ts.
+          if (currentViewRef.current !== 'holdings') {
+            goto('holdings');
+            requestAnimationFrame(() => requestAnimationFrame(() => emitShortcut('addTrade')));
+          } else {
+            emitShortcut('addTrade');
+          }
+          break;
+        }
+      }
+    };
+    return installShortcuts(run);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Google's OAuth token lapses ~hourly. Detect it proactively and pop a
   // one-click re-login, rather than letting Sheets calls quietly fail. (Skips
@@ -1939,6 +2004,12 @@ export default function App() {
                   >
                     <BarChart3 className="w-4 h-4" /> Reports
                   </button>
+                  <button
+                    onClick={() => { setCurrentView('settings'); setIsSidebarOpen(false); }}
+                    className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'settings' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                  >
+                    <SlidersHorizontal className="w-4 h-4" /> Settings
+                  </button>
                 </div>
               </div>
             </motion.div>
@@ -1958,11 +2029,11 @@ export default function App() {
           </button>
           <div className="flex items-center space-x-2.5">
             <div className="bg-indigo-600 text-white p-1.5 rounded-lg shadow-sm flex items-center justify-center">
-              {currentView === 'dashboard' ? <Gauge className="w-4 h-4" /> : currentView === 'holdings' ? <Briefcase className="w-4 h-4" /> : currentView === 'reports' ? <BarChart3 className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
+              {currentView === 'dashboard' ? <Gauge className="w-4 h-4" /> : currentView === 'holdings' ? <Briefcase className="w-4 h-4" /> : currentView === 'reports' ? <BarChart3 className="w-4 h-4" /> : currentView === 'settings' ? <SlidersHorizontal className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
             </div>
             <div>
               <h1 className="text-xs sm:text-base font-black text-slate-800 tracking-tight leading-none uppercase">
-                {currentView === 'dashboard' ? "Executive Dashboard" : currentView === 'holdings' ? "Portfolios" : currentView === 'reports' ? "Reports" : "Broker Note Imports"}
+                {currentView === 'dashboard' ? "Executive Dashboard" : currentView === 'holdings' ? "Portfolios" : currentView === 'reports' ? "Reports" : currentView === 'settings' ? "Settings" : "Broker Note Imports"}
               </h1>
             </div>
           </div>
@@ -1971,7 +2042,8 @@ export default function App() {
         <div className="flex-1 hidden md:block" />
 
         <div className="flex-1 flex justify-end items-center gap-3">
-          <ThemeToggle theme={theme} onToggle={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} />
+          {/* The theme toggle and the account block moved to Settings, by request. `T` reaches
+              the theme from any view, so this is not a step backwards in reach. */}
           {currentView === 'imports' && (
             <>
               {/* Sheets access is granted at login; this only appears if the
@@ -2009,22 +2081,9 @@ export default function App() {
             </>
           )}
 
-          {currentUser && (
-            <div className="flex items-center gap-2 bg-slate-50 p-1 pr-3 rounded-full border border-slate-200 shadow-sm shrink-0">
-              <img src={currentUser.picture} alt="Avatar" className="w-6 h-6 rounded-full shadow-xs" referrerPolicy="no-referrer" />
-              <span className="text-[10px] font-extrabold text-slate-700 hidden sm:inline max-w-[90px] truncate">{currentUser.given_name || currentUser.name.split(' ')[0]}</span>
-              <button
-                onClick={() => {
-                  localStorage.removeItem('portfolio_user');
-                  clearGoogleToken();
-                  setCurrentUser(null);
-                }}
-                className="text-[9px] font-black text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 px-1.5 py-0.5 rounded-full transition-all ml-1 cursor-pointer"
-              >
-                Sign out
-              </button>
-            </div>
-          )}
+          {/* The account block and Sign out live in Settings now, by request. Nothing replaces
+              them here: the header was carrying two controls that are set once and then never
+              touched, and "S" reaches them in one keystroke. */}
         </div>
       </header>
 
@@ -2489,6 +2548,20 @@ export default function App() {
           <Reports
             focus={reportsFocus}
             onClearFocus={() => setReportsFocus(null)}
+          />
+        ) : currentView === 'settings' ? (
+          <SettingsView
+            theme={theme}
+            onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+            currentUser={currentUser}
+            onSignOut={() => {
+              // Same three steps the header button did - the stored user, the Sheets token, and
+              // the in-memory session. Dropping any one of them leaves a half-signed-out app.
+              localStorage.removeItem('portfolio_user');
+              clearGoogleToken();
+              setCurrentUser(null);
+            }}
+            onShowShortcuts={() => setShortcutHelpOpen(true)}
           />
         ) : (
           <>
@@ -3363,6 +3436,27 @@ export default function App() {
           </>
         )}
       </main>
+
+      {/* Global overlays. Mounted at the app root, outside <main>, so they are reachable from
+          every view - the switcher and the help are shortcut-driven and must not depend on
+          which view happens to be rendered. Both use ModalShell, which owns Esc, the focus
+          trap and focus restore; that is why the global key handler deliberately does NOT
+          bind Esc (a fifth listener would close two things on one press). */}
+      <PortfolioSwitcher
+        open={switcherOpen}
+        onClose={() => setSwitcherOpen(false)}
+        activeId={activePortfolio}
+        onPick={(id) => {
+          // Straight to that book's holdings, which is what picking it is for. Clearing the
+          // stock focus matters: without it, switching accounts while a stock detail was open
+          // would land on the new account still showing the old account's security.
+          setActivePortfolio(id);
+          setIsDetailView(true);
+          setReopenStock(null);
+          setCurrentView('holdings');
+        }}
+      />
+      <ShortcutHelp open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} />
     </div>
   );
 }

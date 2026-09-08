@@ -33,6 +33,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-holdings-sort.mjs` | Sort order: the holdings grid (default biggest-first, click direction, tiebreaks) **and** the Portfolios page cards, incl. a guard that `PORTFOLIOS` is never sorted in place (19). Reads the comparators OUT of `Holdings.tsx`, so it fails if the source drifts — and needs no `ROOT` edit |
 | `node tmp-transfer-run.mjs` | Cross-portfolio transfer: FIFO, cost carryover, no gain realised (83) |
 | `node tmp-axis-run.mjs` | Axis Securities parser (68) |
+| `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry (38) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
@@ -90,6 +91,24 @@ The transaction statement is built from the parsed `trades`, **not** from the ca
 blocks: a no-rule sale never reaches `Block.sales`, so a block-derived statement would silently
 omit every mutual-fund and bond sale — the rows those tabs exist to surface.
 
+**Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
+the key handler **and** the `?` help overlay, so a working-but-undocumented key is not
+expressible. Three rules:
+
+- **No Sheets-writing action may ever be bound.** Rebuild Holding, Sync Capital Gains, the
+  Capital Gains register and Transfer stay click-only — a stray keypress must not start a sheet
+  write. `tmp-shortcuts.ts` asserts it.
+- **Escape is NOT in the global handler.** Four components already own an Escape each and listen
+  on `document`; a fifth would close two things on one press. Overlays get Escape, the focus trap
+  and focus restore from `ModalShell` instead.
+- The handler ignores any event whose target is an `input` / `textarea` / `select` /
+  contenteditable, and anything held with Ctrl / Cmd / Alt (those belong to the browser). Single
+  letters were chosen *because* the browser owns Ctrl+T/W/N/P/F/D/L — every one a view here.
+
+Actions whose state lives in `Holdings` (Add Trade) are forwarded as a DOM event rather than
+hoisting that state into `App`; `/` focuses the filter by `HOLDINGS_SEARCH_ID`, and because that
+input only exists **inside** a portfolio it navigates there first.
+
 **Sheets writes.** Writers are header-aware — locate columns by header name, never by position.
 Read dates as **serial numbers**, not display strings (mixed/US formats misparse). True Entry has
 no ISIN column, so an unlisted holding's identity is its name. When a classification cannot be
@@ -146,4 +165,8 @@ catch a self-consistent misparse. STT allocation goes through the shared `alloca
   `scripPrices`, `navTimeline`, `reportDoc` / `reportPdf` / `reportXlsx`, `brokers/`
 - `src/components/` — `Holdings.tsx` is the largest (portfolio list + stock detail + trade book)
 - `apps-script/` — Gmail-triggered auto-import (`.gs`); leave alone unless asked
-- No router: `currentView` is plain state; browser Back is wired via `src/lib/appBack.ts`
+- No router: `currentView` is plain state; browser Back is wired via `src/lib/appBack.ts`.
+  `APP_VIEWS` is a **value**, not just a type — the persisted view name is validated against it,
+  so adding a view means one entry there or a reload falls through to Imports
+- Keyboard: `src/lib/shortcuts.ts` (registry + the one listener), `ShortcutHelp`, `Settings`
+  (the fifth view — holds the theme toggle and Sign out, both moved out of the header)

@@ -380,6 +380,10 @@ html, body, #root, * {
 .dark .hover\:bg-slate-300:hover     { background-color: #3a352b; }
 .dark .hover\:bg-slate-800:hover     { background-color: #242019; }
 .dark .hover\:bg-rose-50:hover       { background-color: #2e1815; }
+/* Sign out in Settings rests on bg-rose-50 and hovers to rose-100 - so the hover takes the
+   themed rose-100 value, one rung up the same ladder. Without this the fill jumped to
+   Tailwind's stock pale pink the moment the pointer landed. */
+.dark .hover\:bg-rose-100:hover      { background-color: #3b1e1a; }
 .dark .hover\:bg-indigo-50:hover,
 .dark .hover\:bg-indigo-100:hover,
 .dark .hover\:bg-violet-100:hover    { background-color: #383125; }

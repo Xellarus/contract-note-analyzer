@@ -29,6 +29,7 @@ import {
 } from '../lib/openingCorpActions';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
+import { onShortcut, HOLDINGS_SEARCH_ID } from '../lib/shortcuts';
 import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { TransferHoldingModal } from './TransferHoldingModal';
 import { formatDMY, formatDMYTime } from '../lib/dates';
@@ -310,6 +311,15 @@ export default function Holdings({
   const selectedStockRef = useRef(selectedStock);
   selectedStockRef.current = selectedStock;
   useEffect(() => registerBackStep(3, () => selectedStockRef.current != null, () => { setSelectedStock(null); setCustomCmp(null); }), []);
+
+  /**
+   * "A" opens Add Trade. Forwarded from App as an event because `showAddTrade` lives HERE, and
+   * hoisting it would have meant lifting the drawer's state out of the largest component in the
+   * app for one keystroke. The drawer carries its own portfolio picker, so it is valid from the
+   * card list, a portfolio's grid and a stock detail alike - the two mounts below are mutually
+   * exclusive (the detail view early-returns), so this sets one flag and the right one renders.
+   */
+  useEffect(() => onShortcut((a) => { if (a === 'addTrade') setShowAddTrade(true); }), []);
   // Scrip master (NSE/BSE/ISIN reference) for the stock-detail header pills.
   const [scrip, setScrip] = useState<ScripMaster | null>(null);
   // Current-price snapshot (from the screener.in import) — values holdings live-ish.
@@ -4518,6 +4528,7 @@ export default function Holdings({
                   <div className="flex-grow max-w-md relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input
+                      id={HOLDINGS_SEARCH_ID}
                       type="text"
                       placeholder="Filter holdings by symbol, name, sector..."
                       value={searchTerm}
