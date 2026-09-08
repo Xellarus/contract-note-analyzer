@@ -33,6 +33,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-holdings-sort.mjs` | Sort order: the holdings grid (default biggest-first, click direction, tiebreaks) **and** the Portfolios page cards, incl. a guard that `PORTFOLIOS` is never sorted in place (19). Reads the comparators OUT of `Holdings.tsx`, so it fails if the source drifts — and needs no `ROOT` edit |
 | `node tmp-transfer-run.mjs` | Cross-portfolio transfer: FIFO, cost carryover, no gain realised (83) |
 | `node tmp-axis-run.mjs` | Axis Securities parser (68) |
+| `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry (38) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
@@ -65,6 +66,21 @@ must be remapped in dark or it washes out ivory text; and a shade outside 50/100
 `text-slate-655`) generates **no CSS at all**, so it silently inherits and no remap can reach it.
 Keep authoring indigo/slate classes — indigo *is* the brass accent before remapping; never
 "modernise" it away. Run the `theme-check` skill after any styling change.
+
+**theme-check's reach, and what it still cannot see.** It scans `className=` attributes AND any
+string/template literal whose tokens look like colour utilities — the second pass exists because
+classes assembled in a `const` and passed as `className={shell}` were previously **invisible**,
+and two unremapped classes shipped that way under a clean "0 findings". Comments are stripped
+first (a backticked class name in prose used to be reported as real markup, which is worse than
+silence — it manufactures confidence).
+
+**Prove it sees your file before trusting a 0.** Inject a known-unremapped class (`bg-amber-50/80`
+has no dark entry) into the exact expression you care about and confirm the checker names that
+line. Twice this session a "0" meant "not scanned".
+
+Remaining gap: there is **no category for an unremapped border colour**. `border-amber-300` has
+no dark entry and the checker says nothing — borders were the source of an earlier regression
+where fills got dark and hairlines became the loudest thing on screen.
 
 **The register's output tabs.** `generateTrxRegister` writes **one capital-gains tab per asset
 class** — `Capital Gains for FY..` is **LISTED ONLY**; PE and AIF each get
@@ -168,5 +184,7 @@ catch a self-consistent misparse. STT allocation goes through the shared `alloca
 - No router: `currentView` is plain state; browser Back is wired via `src/lib/appBack.ts`.
   `APP_VIEWS` is a **value**, not just a type — the persisted view name is validated against it,
   so adding a view means one entry there or a reload falls through to Imports
+- Session: `src/lib/sessionClock.ts` (pure urgency ramp, imports nothing) drives `LiveClock`,
+  which is both the IST clock and the token-expiry gauge — gold from 15 min out, click to re-auth
 - Keyboard: `src/lib/shortcuts.ts` (registry + the one listener), `ShortcutHelp`, `Settings`
   (the fifth view — holds the theme toggle and Sign out, both moved out of the header)

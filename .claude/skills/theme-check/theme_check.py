@@ -54,6 +54,45 @@ def load_css():
 CLS_ATTR = re.compile(r'className=(?:"([^"]*)"|\{`((?:[^`\\]|\\.)*)`\}|\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\})', re.S)
 SPLIT = re.compile(r'\$\{|\}|`|\'|"|\?')
 
+# Classes assembled in a VARIABLE and passed as `className={shell}` never reach CLS_ATTR: the
+# attribute holds an identifier, not the strings. Not a corner case - it is exactly how the
+# LiveClock chip shipped with `bg-amber-50/80` and `border-amber-300`, neither remapped in dark,
+# under a clean "0 findings". Demonstrated by injecting the bad class and watching this stay
+# silent.
+#
+# So also scan every string / template literal that LOOKS like a class list, i.e. contains a
+# colour utility of the shape the categories below reason about. Anchored on that shape rather
+# than on "has spaces", so a prose string that happens to mention a colour stays quiet.
+# Matched against a COMPLETE token, after splitting - never against surrounding context. The
+# first version anchored on whitespace-or-start and so missed every class sitting next to a
+# quote, which is exactly the `const shell = \u0060... ${cond ? 'bg-x' : 'bg-y'}\u0060` shape it was
+# added to catch. Tokens are self-delimiting; context anchors are not worth getting wrong twice.
+CLASSY_TOKEN = re.compile(
+    r'^(?:hover:|focus:|active:|disabled:|group-hover:|dark:)?'
+    r'(?:bg|text|border|divide|ring)-'
+    r'(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|'
+    r'sky|blue|indigo|violet|purple|fuchsia|pink|rose|white|black)'
+    r'(?:-\d{2,3})?(?:/\d{1,3})?$'
+)
+STR_LIT = re.compile(
+    r"'((?:[^'\\\n]|\\.)*)'"
+    r'|"((?:[^"\\\n]|\\.)*)"'
+    r'|`((?:[^`\\]|\\.)*)`',
+    re.S,
+)
+COMMENT = re.compile(r'/\*.*?\*/|//[^\n]*', re.S)
+
+
+def strip_comments(src):
+    """Blank out comments, KEEPING newlines so reported line numbers stay correct.
+
+    The literal pass must not read prose. This project's comments quote class names constantly
+    (often in backticks), and a backticked class name reads to STR_LIT as real markup - which is
+    how a probe of this very feature reported a finding on a doc comment while the actual
+    unremapped class two lines below went unseen.
+    """
+    return COMMENT.sub(lambda m: re.sub(r'[^\n]', ' ', m.group(0)), src)
+
 
 def source_files():
     out = []
@@ -66,13 +105,34 @@ def scan_source():
     """Yield (file, line, fragment_classes) for every co-occurring group of classes."""
     for f in source_files():
         src = io.open(f, encoding='utf-8', errors='replace').read()
+        seen = set()
         for m in CLS_ATTR.finditer(src):
             val = next((g for g in m.groups() if g), '')
             line = src[:m.start()].count('\n') + 1
             for frag in SPLIT.split(val):
                 classes = frag.split()
                 if classes:
+                    seen.add((line, ' '.join(classes)))
                     yield f, line, classes
+        # Second pass: class-looking literals anywhere - a `const shell = '...'`, an array of
+        # fragments, a ternary arm assigned to a variable. Deduped against the first pass so a
+        # plain className literal is not reported twice.
+        for m in STR_LIT.finditer(strip_comments(src)):
+            val = next((g for g in m.groups() if g is not None), '')
+            if not val:
+                continue
+            line = src[:m.start()].count('\n') + 1
+            for frag in SPLIT.split(val):
+                classes = frag.split()
+                if not classes:
+                    continue
+                # The prose gate, per fragment: at least one token has to actually BE a colour
+                # utility. Without it every quoted sentence in the app becomes a candidate.
+                if not any(CLASSY_TOKEN.match(c) for c in classes):
+                    continue
+                if (line, ' '.join(classes)) in seen:
+                    continue
+                yield f, line, classes
 
 
 def main():

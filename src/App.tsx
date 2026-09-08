@@ -1912,8 +1912,10 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#f4efe3] via-[#f1ebdc] to-[#ebe4d1] dark:from-[#121110] dark:via-[#121110] dark:to-[#161410] text-slate-900 dark:text-slate-100 font-sans pb-20 animate-fadeIn">
 
-      {/* Live IST time, pinned bottom-right of the viewport. */}
-      <LiveClock />
+      {/* Live IST time, pinned bottom-right - and the session gauge. The ink drifts to gold as
+          the Google token nears expiry, and clicking it re-authorises, so the warning and the
+          fix are the same control. `login` is the same call the expired-session modal makes. */}
+      <LiveClock theme={theme} onReauth={() => login()} />
 
       {/* Auto re-login: Google's token lapses ~hourly; this pops the moment it
           does so the user signs back in (one click) instead of hitting failures. */}
