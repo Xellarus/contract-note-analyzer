@@ -64,6 +64,10 @@ html, body, #root, * {
   summary:focus-visible,
   [role="button"]:focus-visible,
   [role="switch"]:focus-visible,
+  /* A row reached by the arrow keys is focused BEFORE React re-renders its tabIndex to 0, so for
+     one frame it is still tabindex="-1" and the rule below would skip it. Matching the row marker
+     directly means the ring never flickers while arrowing down a table. */
+  [data-rownav]:focus-visible,
   [tabindex]:not([tabindex="-1"]):focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;

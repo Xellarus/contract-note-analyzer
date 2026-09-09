@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
+import type { RefObject } from 'react';
 import {
   Search, X, Download, ArrowUp, ArrowDown, ArrowUpDown, ChevronRight, ChevronDown,
   AlertTriangle, Layers,
 } from 'lucide-react';
 import { CrossHolding } from '../lib/crossHoldings';
 import CubeLoader from './ui/CubeLoader';
+import { useRowNav } from '../lib/rowNav';
 
 /**
  * Every security held across every portfolio, one row each — the Dashboard's consolidated
@@ -127,6 +129,14 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
     const active = sortKey === key;
     return (
       <th
+        tabIndex={0}
+        aria-sort={active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          requestSort(key);
+        }}
         onClick={() => requestSort(key)}
         className={`px-4 py-3 select-none cursor-pointer hover:bg-slate-100 ${align === 'right' ? 'text-right' : 'text-left'}`}
       >
@@ -141,6 +151,29 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
   };
 
   const money = (v: number) => (v >= 0 ? 'text-emerald-600' : 'text-rose-600');
+
+  // ── Keyboard navigation over BOTH row kinds ────────────────────────────────────────────
+  // This table interleaves two kinds of row - a scrip, and one "who holds it" line per portfolio
+  // when it is expanded - so the arrow keys need ONE flat index space across both, in render
+  // order. Keyed by the same strings already used as React keys, so the index and the element
+  // cannot disagree: if a key is right for React it is right here.
+  //
+  // Rebuilt every render, which is correct rather than wasteful: expanding a row inserts rows
+  // into the middle, and a cached index would then point at the wrong one.
+  const navRows: Array<{ id: string; run: () => void }> = [];
+  for (const h of visible) {
+    navRows.push({ id: h.key, run: () => toggle(h.key) });
+    if (open.has(h.key)) {
+      for (const l of h.lots) {
+        navRows.push({
+          id: `${h.key}::${l.portfolioId}`,
+          run: () => onOpenStock({ portfolioId: l.portfolioId, scripName: h.name, isin: h.isin }),
+        });
+      }
+    }
+  }
+  const navIndex = new Map(navRows.map((r, i) => [r.id, i] as const));
+  const rowNav = useRowNav(navRows.length, (i) => navRows[i]?.run());
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
@@ -185,7 +218,7 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
 
       {loading && rows.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-14">
-          <CubeLoader className="w-12" />
+          <CubeLoader className="w-20" />
           <span className="text-xs font-bold text-slate-500">Loading holdings…</span>
         </div>
       ) : rows.length === 0 ? (
@@ -210,13 +243,17 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
                 {th('plPct', 'P/L %')}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody
+              ref={rowNav.containerRef as RefObject<HTMLTableSectionElement>}
+              className="divide-y divide-slate-100"
+            >
               {visible.map((h) => {
                 const expanded = open.has(h.key);
                 const pl = plOf(h), plPct = plPctOf(h);
                 return [
                   <tr
                     key={h.key}
+                    {...rowNav.rowProps(navIndex.get(h.key) ?? 0)}
                     onClick={() => toggle(h.key)}
                     title={h.lots.length === 1 ? `Held in ${h.lots[0].label}` : `Held across ${h.lots.length} portfolios`}
                     className="hover:bg-slate-50 transition-colors cursor-pointer"
@@ -268,6 +305,7 @@ export default function AllHoldingsTable({ rows, loading, onOpenStock }: Props) 
                   ...(expanded ? h.lots.map((l) => (
                     <tr
                       key={`${h.key}::${l.portfolioId}`}
+                      {...rowNav.rowProps(navIndex.get(`${h.key}::${l.portfolioId}`) ?? 0)}
                       onClick={() => onOpenStock({ portfolioId: l.portfolioId, scripName: h.name, isin: h.isin })}
                       title={`Open ${h.name} in ${l.label}`}
                       className="bg-[#f8fafc] hover:bg-slate-200 transition-colors cursor-pointer"

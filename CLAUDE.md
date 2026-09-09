@@ -30,11 +30,13 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal (110; 111 with `TRX_BASELINE` set) |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
+| `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
 | `node tmp-holdings-sort.mjs` | Sort order: the holdings grid (default biggest-first, click direction, tiebreaks) **and** the Portfolios page cards, incl. a guard that `PORTFOLIOS` is never sorted in place (19). Reads the comparators OUT of `Holdings.tsx`, so it fails if the source drifts — and needs no `ROOT` edit |
 | `node tmp-transfer-run.mjs` | Cross-portfolio transfer: FIFO, cost carryover, no gain realised (83) |
 | `node tmp-axis-run.mjs` | Axis Securities parser (68) |
 | `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
-| `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry (38) |
+| `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
+| `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
@@ -125,6 +127,49 @@ Actions whose state lives in `Holdings` (Add Trade) are forwarded as a DOM event
 hoisting that state into `App`; `/` focuses the filter by `HOLDINGS_SEARCH_ID`, and because that
 input only exists **inside** a portfolio it navigates there first.
 
+**Lists and tables: `src/lib/rowNav.ts`.** Every control in the app is a real `<button>`, so Tab
+already reaches it and the global `:focus-visible` ring in `index.css` shows where it is. What Tab
+cannot do is a 300-row grid — one tab stop per row means 300 presses to get past the table — so a
+row list gets the **roving-tabindex** treatment: exactly one tab stop (the active row), ↑↓ inside,
+Home/End/PageUp/PageDown, Enter to activate. `l` jumps focus to the first row or card on screen.
+
+Rules that have each already cost something:
+
+- **One `useRowNav` call, one `containerRef` attached.** `focusIndex` finds its rows by querying
+  *inside* the container, so a list whose rows carry `rowProps` but whose container never got the
+  ref is focusable, reachable by Tab, and **silently dead to every arrow key**. Shipped exactly
+  that way once during this change (the portfolio cards). `tmp-rownav.ts` asserts the counts match
+  per file, and that assertion was probed by deleting a ref and confirming it fails.
+- **`rowNavIntent` must never claim Tab.** The handler `preventDefault()`s anything that is not
+  `none`, so claiming Tab would trap the user inside the table with no keyboard way out — the
+  exact opposite of the feature.
+- **Ends clamp, they do not wrap.** One ArrowDown teleporting from the last row to the first is
+  indistinguishable from a mis-tracked index.
+- **Enter activates everywhere; Space only on the portfolio cards** (card-shaped things read as
+  buttons) **and on a trade row while selecting** (Space *is* the checkbox key). Everywhere else
+  Space stays page-down, which is what a reader expects of a table.
+- **A clickable card must not take `role="button"`** — it contains buttons, and a button role with
+  interactive descendants is invalid ARIA, which is worse than no role. `tabIndex` + `aria-label`.
+- **A sortable `<th>` must not take `role="button"` either** — that would replace its
+  `columnheader` role, and `aria-sort` is only valid on a columnheader. `tabIndex` alone.
+- The active index is re-synced from `onFocus`, not only from our own key handling, or Shift+Tab
+  from below (and `l`) leaves the tab stop pointing at a row that is not the focused one — after
+  which the next ArrowDown jumps.
+
+The **trade book** deliberately uses plain tab stops instead of the hook: `sortedTxs` is computed
+inside `renderStockDetailView`, *below* the `if (selectedStock)` early return, so a hook keyed on
+its length cannot be declared without hoisting state out of the largest component in the app. It
+is also a bounded per-stock list. Residual, on purpose: Tab walks every trade row.
+
+`q` is Back, and it calls `goBack()` — `runDeepestStep()` — **not `history.back()`**. `appBack.ts`
+only arms its trap history entry once a view has registered a step, so a `history.back()` fired
+before that walks **out of the SPA**, which is the bug that module exists to prevent. Running the
+step directly consumes no history entry, cannot navigate away, and is a no-op at the Dashboard
+exactly as a Back press is. It reads like pointless indirection — which is why a tidy-up would
+collapse it — so `tmp-shortcuts.ts` asserts it, over comment-stripped source (the rule is stated
+in a comment beside the code it guards, and a naive scan reports its own documentation as the
+violation).
+
 **Sheets writes.** Writers are header-aware — locate columns by header name, never by position.
 Read dates as **serial numbers**, not display strings (mixed/US formats misparse). True Entry has
 no ISIN column, so an unlisted holding's identity is its name. When a classification cannot be
@@ -153,6 +198,49 @@ true would zero real exchange charges out of a cost basis with nothing downstrea
 it. Note `updatePrivateEquityCmp` still reads and writes **only** the Private Equities tab, so an
 AIF / MF / Bond CMP cannot be saved from inside the app — it fails safe (never the wrong tab) and
 Holdings now says which tab to type it into, but the price must go in the sheet by hand.
+
+**Two scrip resolvers, and they do NOT agree.** The app's `lookupScrip` and
+`apps-script/YahooPriceUpdate.gs`'s `symbolsFor_` both map a held scrip to a scrip-master row,
+by different rules — so a broker's truncated name (`ANAWIL WIRE& ENGINEERI`) resolved in the app,
+which showed the right NSE symbol on the detail page, while the price fetch reported "No exchange
+symbol" and the CMP silently went stale. **The trap is that the app is the thing you look at**:
+the sheet looks correctly configured because, for the app, it is.
+
+**The Holding tab LAGS the scrip master, and that is the trap.** It *does* have an ISIN column
+(`holdingsCalc.ts:772`), but the cell is filled only for a scrip that **resolved at the last
+Rebuild Holding** (`holdingsCalc.ts:648`; the ledger carries no ISIN of its own, `col("ISIN", -1)`),
+and the tab is rewritten **only** by an explicit rebuild. So fixing a scrip in the master makes the
+app resolve it *instantly* — the detail page reads the master live, and `displayIsin` falls back to
+`scripEntry.isin` — while the price script still sees the pre-fix Holding row: **no ISIN, and the
+broker's raw truncated name.** Name matching is all that is left, precisely for the scrips somebody
+just fixed and is watching for a price on.
+
+**A stale Holding tab is diagnosable without the sheet**: if a `Price Status` miss is reported
+under the *broker's* name rather than the master's canonical name, that row predates the master
+entry — a rebuild would have written `r.entry.canonicalName`. Three gaps in the name path have been
+closed, and the order they were found in is the lesson — each looked like the whole bug:
+
+1. the script **skipped the alias column** — so adding an alias fixed the app and nothing else;
+2. it never indexed the **NSE/BSE symbol as a lookup key**, though the app does
+   (`scripMaster.ts` builds its alias list as `[...bseParts, bsecode, nse, ...aliasCol]`);
+3. it had no **truncated-prefix** rule. `PREFIX_MIN` is 6 on **both** sides deliberately —
+   divergence is the disease here, so a "better" threshold on one side re-opens it.
+
+For `ANAWIL WIRE& ENGINEERI` (2) and (3) are **both** load-bearing: exact-matching the ticker key
+fails, and prefix-matching the canonical name fails too (`wire&` vs `wire &`). Pinned as string
+facts in the suite so the reason survives a refactor of either rule.
+
+An ambiguous prefix **refuses** rather than guessing: the app can guess because it raises the
+review popup, but a wrong ticker here writes a wrong *price* — money, silently wrong, with
+nothing downstream able to detect it. Still app-only: the **token-subset** fallback, which needs
+the generic-token veto to avoid over-matching. `SYMBOL_OVERRIDES` remains the escape hatch.
+
+**Diagnosing it needs the live sheet, so there is a route for that**: `/exec?sym=<held name>`
+reports the rule that fired, **which row** it locked onto and the ticker returned — none of which
+the suite can prove, because the suite uses a *guessed* master row. Its `version` field is a
+deploy marker, so "not fixed" and "not deployed" stop being the same observation. **Editing the
+repo copy changes nothing until it is saved in the Apps Script editor** — see
+[[Portfolio Registry Triplication]] in the vault.
 
 **Scrip resolution.** `extractIsin` (`src/lib/brokers/utils.ts`) is shared by every parser and its
 regex **must** keep the trailing check digit (`IN[A-Z0-9]{9}[0-9]`) — without it, "INfrastructu"
@@ -186,5 +274,6 @@ catch a self-consistent misparse. STT allocation goes through the shared `alloca
   so adding a view means one entry there or a reload falls through to Imports
 - Session: `src/lib/sessionClock.ts` (pure urgency ramp, imports nothing) drives `LiveClock`,
   which is both the IST clock and the token-expiry gauge — gold from 15 min out, click to re-auth
-- Keyboard: `src/lib/shortcuts.ts` (registry + the one listener), `ShortcutHelp`, `Settings`
+- Keyboard: `src/lib/shortcuts.ts` (registry + the one listener), `src/lib/rowNav.ts`
+  (roving-tabindex list navigation — pure key mapping + the hook over it), `ShortcutHelp`, `Settings`
   (the fifth view — holds the theme toggle and Sign out, both moved out of the header)

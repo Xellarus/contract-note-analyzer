@@ -183,6 +183,32 @@ console.log('\n── wiring ' + '─'.repeat(48));
   ok('Holdings listens for the addTrade shortcut',
     /onShortcut\(\(a\) => \{ if \(a === 'addTrade'\)/.test(hold));
 
+  // ── `q` = Back, and the reason it is NOT history.back() ──
+  // appBack.ts only arms its trap history entry once some view has registered a back step, so a
+  // `history.back()` fired before that walks OUT of the SPA - the very bug that module exists to
+  // stop ("mouse previous goes to a new tab"). Calling the step directly consumes no history
+  // entry and cannot navigate away. It reads like a pointless indirection, which is exactly why
+  // a future tidy-up would collapse it; pinned here so that fails loudly.
+  const back = SHORTCUTS.find((s) => s.action === 'goBack');
+  eq('q is bound to Back', back?.keys, ['q']);
+
+  // Comments stripped FIRST. The rule this checks is stated in a comment two lines above the code
+  // it guards, so a naive scan matches the prose describing the ban and reports the ban itself as
+  // a violation - a checker that reads its own documentation as evidence. Newlines are preserved
+  // so nothing downstream shifts.
+  const decomment = (src: string) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' ')).replace(/\/\/[^\n]*/g, '');
+  const appCode = decomment(app);
+  ok('the Back case calls goBack(), not history.back()',
+    /case 'goBack': goBack\(\); break;/.test(appCode) && !/history\.back\(\)/.test(appCode),
+    `case present: ${/case 'goBack': goBack\(\);/.test(appCode)}, history.back in CODE: ${/history\.back\(\)/.test(appCode)}`);
+
+  const backSrc = io.readFileSync(new URL('./src/lib/appBack.ts', import.meta.url), 'utf8');
+  ok('appBack exports goBack and it runs the deepest step',
+    /export function goBack\(\): void \{\s*runDeepestStep\(\);/.test(backSrc));
+  ok('...and goBack does not touch history itself',
+    !/goBack[\s\S]{0,240}window\.history/.test(backSrc));
+
   // The safety boundary, asserted rather than trusted: no Sheets-writing action is bound.
   const banned = ['rebuild', 'syncCapitalGains', 'generateTrx', 'transfer'];
   const bad = SHORTCUTS.filter((s) => banned.some((b) => s.action.toLowerCase().includes(b.toLowerCase())));

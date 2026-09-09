@@ -12,7 +12,8 @@ import { useGoogleLogin } from '@react-oauth/google';
 import { ContractNoteResult, PortfolioHolding, PortfolioUser } from './types';
 import { persistGoogleToken, restoreGoogleToken, clearGoogleToken, hasValidGoogleToken } from './lib/googleAuth';
 import { installSheetsRetry } from './lib/sheetsRetry';
-import { registerBackStep } from './lib/appBack';
+import { registerBackStep, goBack } from './lib/appBack';
+import { focusFirstRow } from './lib/rowNav';
 import { logAccess, logImport } from './lib/accessLog';
 import { rebuildHoldingTab, syncCapitalGains } from './lib/holdingsCalc';
 import { ensureSheetTabs } from './lib/sheetTabs';
@@ -720,10 +721,25 @@ export default function App() {
         // opens still scoped to whatever stock was last drilled into.
         case 'goReports': setReportsFocus(null); goto('reports'); break;
         case 'goSettings': goto('settings'); break;
+        // The same step the browser's Back button takes - one level out, no-op at the Dashboard.
+        // NOT history.back(): that only stays inside the app once a view has armed the trap
+        // entry, so it could unload the SPA. See lib/appBack.ts.
+        case 'goBack': goBack(); break;
         case 'openSwitcher': setSwitcherOpen(true); break;
         case 'toggleTheme': setTheme((t) => (t === 'dark' ? 'light' : 'dark')); break;
         case 'toggleDrawer': setIsSidebarOpen((o) => !o); break;
         case 'showHelp': setShortcutHelpOpen(true); break;
+        case 'focusRows': {
+          // A DOM query, not a message to whichever table is mounted: only the mounted view
+          // carries `data-rownav`, so this needs no registry and no coordination. Each table's
+          // own onFocus then syncs its tab stop to the row that just took focus.
+          if (focusFirstRow()) break;
+          // Nothing listy on screen. Mirror what "/" does and go where the lists live, then try
+          // again once both the view switch and the detail switch have committed.
+          goto('holdings');
+          requestAnimationFrame(() => requestAnimationFrame(() => focusFirstRow()));
+          break;
+        }
         case 'focusSearch': {
           // The holdings filter lives INSIDE a portfolio, not on the card list - so "/" has to
           // get you there before it can focus anything. Already-focused is a no-op.
@@ -2765,7 +2781,7 @@ export default function App() {
 
             {isLoading && (
               <div className="text-center py-20 max-w-md mx-auto">
-                <CubeLoader className="w-16 mx-auto mb-4" />
+                <CubeLoader className="w-28 mx-auto mb-4" />
                 <p className="text-slate-800 font-bold text-md">Parsing Contract Notes</p>
                 <p className="text-slate-400 text-xs mt-1">Processing {fileCount.processed}/{fileCount.total} files inside sandboxed container...</p>
               </div>

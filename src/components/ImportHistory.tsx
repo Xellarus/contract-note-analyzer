@@ -232,7 +232,7 @@ export default function ImportHistory({ onNewImport }: { onNewImport?: () => voi
         {/* Body */}
         {loading ? (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-slate-500 text-sm">
-            <CubeLoader className="w-12" />
+            <CubeLoader className="w-20" />
             <span className="animate-pulse">Fetching import history…</span>
           </div>
         ) : error ? (

@@ -29,6 +29,7 @@ import {
 } from '../lib/openingCorpActions';
 import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
+import { useRowNav } from '../lib/rowNav';
 import { onShortcut, HOLDINGS_SEARCH_ID } from '../lib/shortcuts';
 import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { TransferHoldingModal } from './TransferHoldingModal';
@@ -38,7 +39,7 @@ import AddTradeModal from './AddTradeModal';
 import StockOpeningImportModal from './StockOpeningImportModal';
 import CubeLoader from './ui/CubeLoader';
 import { GainBar } from './ui/HoldingsViz';
-import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, brokerLabel, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
+import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, brokerLabel, portfolioDisplayLabel, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
 import { classifySheetsError, sheetsAccessLabel, SheetsErrorKind } from '../lib/sheetsAccess';
 import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
@@ -2241,6 +2242,15 @@ export default function Holdings({
     return (
       <th
         key={colKey}
+        tabIndex={sortKey ? 0 : undefined}
+        aria-sort={!sortKey ? undefined : active ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+        onKeyDown={!sortKey ? undefined : (e) => {
+          // Only the header itself - the resize handle is a descendant and owns its own keys.
+          if (e.target !== e.currentTarget) return;
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          requestSort(sortKey);
+        }}
         onClick={sortKey ? () => requestSort(sortKey) : undefined}
         className={`relative px-3 py-2.5 select-none border-r border-[color:var(--hg-edge)] last:border-r-0 ${sortKey ? 'cursor-pointer hover:bg-[color:var(--hg-head-hover)]' : ''}`}
       >
@@ -3686,7 +3696,7 @@ export default function Holdings({
           <div className="overflow-x-auto">
             {isLoadingTransactions ? (
               <div className="py-24 flex flex-col items-center justify-center gap-3" id="transactions-loading-spinner">
-                <CubeLoader className="w-16" />
+                <CubeLoader className="w-28" />
                 <span className="text-xs text-slate-500 font-bold uppercase tracking-wider select-none animate-pulse">Syncing ledger records live...</span>
               </div>
             ) : (
@@ -3803,10 +3813,36 @@ export default function Holdings({
 
                           return (
                             <tr key={idx}
+                              // Plain tab stops here, NOT the roving-tabindex hook the holdings
+                              // grid uses. `sortedTxs` is computed inside renderStockDetailView,
+                              // below the `if (selectedStock)` return, so a hook keyed on its
+                              // length cannot be declared without hoisting it out of the largest
+                              // component in the app. The trade book is also a bounded list for
+                              // ONE stock - tens of rows, not the grid's hundreds - so one tab
+                              // stop per row is predictable rather than punishing. Residual: Tab
+                              // walks every trade row.
+                              // `data-rownav` still marks them, so `l` jumps here in this view.
+                              tabIndex={0}
+                              data-rownav=""
+                              onKeyDown={e => {
+                                if (e.target !== e.currentTarget) return;
+                                if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+                                // Space toggles selection because Space IS the checkbox key, and
+                                // in selecting mode this row is a checkbox. Elsewhere it stays
+                                // page-down, which is what a reader expects of a table.
+                                const isSpaceSelect = e.key === ' ' && editMode && selecting;
+                                if (e.key !== 'Enter' && !isSpaceSelect) return;
+                                e.preventDefault();
+                                if (!editMode) { setExpenseTx(t); return; }
+                                if (!editable) return;
+                                if (selecting) toggleRowSel(t); else openEdit(t);
+                              }}
                               onClick={editMode
                                 ? (editable ? () => { selecting ? toggleRowSel(t) : openEdit(t); } : undefined)
                                 : () => setExpenseTx(t)}
-                              title={editMode ? (selecting ? 'Click to select / deselect this row' : undefined) : 'View expense breakdown'}
+                              title={editMode
+                                ? (selecting ? 'Click, or press Space, to select / deselect this row' : undefined)
+                                : 'View expense breakdown'}
                               // Rose tint from the row where the running balance first goes
                               // negative onward — the eye lands straight on where the ledger broke,
                               // instead of having to scan the Bal Qty column for a minus sign.
@@ -4161,6 +4197,49 @@ export default function Holdings({
     }
   };
 
+  // ── Keyboard navigation for the two lists on this screen ───────────────────────────
+  // One tab stop per list and ↑↓ inside it. Both hooks MUST be declared above the
+  // `if (selectedStock)` return below - a hook after a conditional return is a hook that
+  // sometimes does not run, which React treats as a changed hook order and throws on.
+  //
+  // The card order is hoisted out of the JSX because the hook addresses cards BY INDEX, and the
+  // index has to mean the order actually on screen (biggest book first), not registry order.
+  // Biggest book first, the same rule the holdings grid uses. `getPortfolioSummary`
+  // is called ONCE per portfolio here and the result carried into the card, rather
+  // than being re-called from inside the comparator - which would run it O(n log n)
+  // times, and it reduces over `portfolioRows` for every valued account.
+  // Sorts the array `.map` just made, never PORTFOLIOS itself - the registry is
+  // module-level shared state and sorting it in place would reorder it for the
+  // dropdowns, the importer and the Dashboard too.
+  //
+  // Ties keep REGISTRY order, which `Array.prototype.sort` guarantees (stable since
+  // ES2019). That is deliberate and differs from the grid's A-Z tiebreak: until the
+  // sheets load every card is 0, so a cold load must look exactly as it did before
+  // rather than re-alphabetising itself and then moving again as data arrives.
+  const orderedPortfolios = PORTFOLIOS
+    .map((p) => ({ p, summary: getPortfolioSummary(p.id) }))
+    .sort((a, b) => b.summary.currentValue - a.summary.currentValue);
+
+  const openPortfolio = (id: string) => {
+    setActivePortfolio(id);
+    setSelectedStock(null);
+    setIsDetailView(true);
+  };
+  const cardNav = useRowNav(orderedPortfolios.length, (i) => {
+    const hit = orderedPortfolios[i];
+    if (hit) openPortfolio(hit.p.id);
+  });
+
+  // Enter on a holdings row does exactly what a click on it does.
+  const openStockAt = (i: number) => {
+    const h = sortedHoldings[i];
+    if (!h) return;
+    setSelectedStock(h.original);
+    setCustomCmp(null);
+    fetchTransactionsForStock(h.original.companyName || h.original.name, h.original.isin);
+  };
+  const gridNav = useRowNav(sortedHoldings.length, openStockAt);
+
    // Switch views when drawing granular stocks details
   if (selectedStock) {
     return renderStockDetailView();
@@ -4229,7 +4308,16 @@ export default function Holdings({
       )}
       {!isDetailView ? (
         // Freestanding portfolio cards on the page ground — no wrapping panel/header.
-        <div id="portfolio-selection-panel" className="grid grid-cols-1 lg:grid-cols-2 gap-4 animate-fadeIn">
+        // The ref is what makes the arrow keys work: useRowNav finds its rows by querying INSIDE
+        // this element, so focusable cards with no container ref would Tab but never arrow.
+        // The arrows walk the cards in ON-SCREEN order (biggest book first), which in the
+        // two-column layout reads left-to-right then down - the column count is responsive, so
+        // treating the down arrow as "down a column" would need a breakpoint the JS cannot see.
+        <div
+          id="portfolio-selection-panel"
+          ref={cardNav.containerRef as React.RefObject<HTMLDivElement>}
+          className="grid grid-cols-1 lg:grid-cols-2 gap-4 animate-fadeIn"
+        >
             {(() => {
               // Access is granted on the Google Sheet, not in the app, so the only useful
               // thing to say is which sheets are missing and who can grant them.
@@ -4249,22 +4337,8 @@ export default function Holdings({
                 </div>
               );
             })()}
-            {PORTFOLIOS
-              // Biggest book first, the same rule the holdings grid uses. `getPortfolioSummary`
-              // is called ONCE per portfolio here and the result carried into the card, rather
-              // than being re-called from inside the comparator - which would run it O(n log n)
-              // times, and it reduces over `portfolioRows` for every valued account.
-              .map((p) => ({ p, summary: getPortfolioSummary(p.id) }))
-              // Sorts the array `.map` just made, never PORTFOLIOS itself - the registry is
-              // module-level shared state and sorting it in place would reorder it for the
-              // dropdowns, the importer and the Dashboard too.
-              //
-              // Ties keep REGISTRY order, which `Array.prototype.sort` guarantees (stable since
-              // ES2019). That is deliberate and differs from the grid's A-Z tiebreak: until the
-              // sheets load every card is 0, so a cold load must look exactly as it did before
-              // rather than re-alphabetising itself and then moving again as data arrives.
-              .sort((a, b) => b.summary.currentValue - a.summary.currentValue)
-              .map(({ p, summary }) => {
+            {orderedPortfolios
+              .map(({ p, summary }, cardIdx) => {
               const id = p.id;
               const noAccess = portfolioAccess[id];
               const isPositiveGain = summary.unrealisedGain >= 0;
@@ -4277,7 +4351,9 @@ export default function Holdings({
               return (
                 <div
                   key={id}
-                  onClick={() => { setActivePortfolio(id); setSelectedStock(null); setIsDetailView(true); }}
+                  {...cardNav.rowProps(cardIdx, { activateOnSpace: true })}
+                  aria-label={`Open ${portfolioDisplayLabel(p)}`}
+                  onClick={() => openPortfolio(id)}
                   className="group rounded-2xl border border-slate-200 bg-white shadow-sm hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer overflow-hidden flex flex-col"
                 >
                   {/* Header: broker + name + sheet link */}
@@ -4779,7 +4855,7 @@ export default function Holdings({
                 {/* Live spreadsheet synchronization loaders */}
                 {isLoadingSheet ? (
                   <div className="py-20 text-center space-y-3">
-                    <CubeLoader className="w-24 mx-auto" />
+                    <CubeLoader className="w-36 mx-auto" />
                     <p className="text-xs font-black text-slate-500 animate-pulse">Loading holdings ledger values...</p>
                   </div>
                 ) : sheetError ? (
@@ -4827,7 +4903,10 @@ export default function Holdings({
                           {activePortfolio === 'local' && headCell('settings', 'Settings', 'center')}
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-[color:var(--hg-edge)]">
+                      <tbody
+                        ref={gridNav.containerRef as React.RefObject<HTMLTableSectionElement>}
+                        className="divide-y divide-[color:var(--hg-edge)]"
+                      >
                         {sortedHoldings.map((h, idx) => {
                           const isPositive = h.unrealizedGain >= 0;
                           // Unlisted AND never marked: its "current" figure is its own cost, so
@@ -4838,6 +4917,7 @@ export default function Holdings({
                           return (
                             <tr
                               key={h.id}
+                              {...gridNav.rowProps(idx)}
                               onClick={(e) => {
                                 const target = e.target as HTMLElement;
                                 if (target.closest('button') || target.closest('input') || target.closest('select') || target.closest('a')) return;

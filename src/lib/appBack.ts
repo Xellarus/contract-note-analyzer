@@ -37,6 +37,19 @@ function ensureArmed(): void {
 }
 
 /**
+ * Run ONE back step from a source that is not the browser's Back button - the `q` shortcut.
+ *
+ * Deliberately calls the step directly instead of `history.back()`. The trap history entry only
+ * exists once `ensureArmed` has run, and that happens when the first view registers a step - so
+ * before then a `history.back()` would unload the SPA, which is the exact bug this module was
+ * written to stop. Running the step consumes no history entry, so it cannot navigate away, and at
+ * the home view it is a no-op - matching what a Back press does there.
+ */
+export function goBack(): void {
+  runDeepestStep();
+}
+
+/**
  * Register a back step. `active` returns whether this level is currently open; `step` reverts it
  * (e.g. `setSelectedStock(null)`). Higher `depth` = deeper level (runs first). Returns an
  * unregister fn to call on unmount.

@@ -22,8 +22,10 @@ export type ShortcutAction =
   | "goImports"
   | "goReports"
   | "goSettings"
+  | "goBack"
   | "openSwitcher"
   | "focusSearch"
+  | "focusRows"
   | "addTrade"
   | "toggleTheme"
   | "toggleDrawer"
@@ -46,6 +48,12 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: ["i"], action: "goImports", group: "Go to", label: "Imports", hint: "Broker note imports and the import log." },
   { keys: ["r"], action: "goReports", group: "Go to", label: "Reports", hint: "Reports, unscoped — clears any stock focus." },
   { keys: ["s"], action: "goSettings", group: "Go to", label: "Settings", hint: "Appearance and account." },
+  // Relative, where the rest of this group is absolute - but it is filed here because "Go to" is
+  // where anyone hunting for a navigation key looks first.
+  {
+    keys: ["q"], action: "goBack", group: "Go to", label: "Back",
+    hint: "One level out: stock detail → the holdings list → Dashboard. The same step the browser's Back button takes, and a no-op once you are at the Dashboard.",
+  },
 
   {
     keys: ["k"], action: "openSwitcher", group: "Find", label: "Switch portfolio",
@@ -54,6 +62,11 @@ export const SHORTCUTS: Shortcut[] = [
   {
     keys: ["/"], action: "focusSearch", group: "Find", label: "Search holdings",
     hint: "Jumps into the holdings filter. That box lives INSIDE a portfolio, so this opens the current one first if you are not already in it.",
+  },
+
+  {
+    keys: ["l"], action: "focusRows", group: "Find", label: "Jump to the list",
+    hint: "Puts focus on the first row or card on screen; then \u2191\u2193 move, Enter opens, Home/End jump to the ends. From a view with no list it opens Portfolios first.",
   },
 
   {

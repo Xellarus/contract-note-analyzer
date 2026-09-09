@@ -114,6 +114,13 @@ var SYMBOL_OVERRIDES = [
                                       'Shri Gang Industries & Allied Products'] },
   { bse: 'HIGHENE',  nse: '', match: ['INE783E01023', 'High Energy Batteries',
                                       'High Energy Batteries (India)'] },
+  // The broker's name for this one is TRUNCATED and mis-spaced - "ANAWIL WIRE& ENGINEERI" - so it
+  // normalises to "anawil wire& engineeri" and matches no properly spelled master row. The app
+  // still resolves it (its lookup has a fuzzy fallback; this script's does not), which is why the
+  // detail page showed "NSE: ANAWIL" while the fetch reported "no exchange symbol".
+  { bse: '',         nse: 'ANAWIL', match: ['INE1J5V01013', 'ANAWIL WIRE& ENGINEERI',
+                                      'Anawil Wire & Engineering', 'Anawil Wire and Engineering',
+                                      'Anawil Wire & Engineering Industries'] },
 ];
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -141,6 +148,18 @@ function doGet(e) {
   // ISIN+ex-date and preserves the Status column, so dismissals survive.
   if (e && e.parameter && e.parameter.probe === 'nse') {
     return ContentService.createTextOutput(JSON.stringify(probeNse_())).setMimeType(ContentService.MimeType.JSON);
+  }
+  // /exec?sym=<held name>[&isin=...] → resolve ONE name through the LIVE scrip master and
+  // report WHICH row it hit and by WHICH rule. This is the answer to "I put the ticker in the
+  // sheet and it still will not fetch": the local test suite runs these same functions, but
+  // against a GUESSED master row, so it cannot tell you whether the real sheet has the ticker in
+  // the column this code reads. `version` in the response is also the quickest proof that a
+  // paste into the Apps Script editor actually took effect.
+  if (e && e.parameter && e.parameter.sym) {
+    var ps;
+    try { ps = probeSymbol_(e.parameter.sym, e.parameter.isin || ''); }
+    catch (e4) { ps = { ok: false, error: (e4 && e4.message) ? e4.message : String(e4) }; }
+    return ContentService.createTextOutput(JSON.stringify(ps)).setMimeType(ContentService.MimeType.JSON);
   }
   if (e && e.parameter && e.parameter.scan === 'corp') {
     var s;
@@ -303,21 +322,41 @@ function collectHeldScrips_() {
   return out;
 }
 
+// How a name key was claimed. A key coming from a row's CANONICAL name outranks the same key
+// coming from an alias or an exchange symbol, whatever the row order - the app's claimAlias()
+// carries the identical rule, because the rights ("-RE") rows list the parent company's full
+// name in their Alias column and would otherwise steal the parent's exact-name slot.
+var NAME_ALIAS_ = 0, NAME_CANON_ = 1;
+
+// Claim `key` for `entry` at `rank`. First writer wins within a rank; a higher rank displaces.
+function putNameKey_(m, key, entry, rank) {
+  if (!key) return;
+  if (!m.byName[key] || rank > (m.nameRank[key] || 0)) { m.byName[key] = entry; m.nameRank[key] = rank; }
+}
+
 // Scrip Master → { byIsin: {ISIN: {nse,bse,name}}, byName: {normName: {...}} }.
 function loadMasterSymbols_() {
-  var m = { byIsin: {}, byName: {} };
+  var m = { byIsin: {}, byName: {}, nameRank: {} };
   var sh = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID).getSheets()[0];
   var vals = sh.getDataRange().getValues();
   if (vals.length < 1) return m;
   var hdr = vals[0].map(function (c) { return String(c == null ? '' : c).trim().toLowerCase(); });
-  var ci = { isin: 0, name: 1, bse: 2, nse: 3 };
+  var ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: -1 };
   var nameSet = false;
   for (var j = 0; j < hdr.length; j++) {
     var h = hdr[j];
     if (/isin/.test(h)) ci.isin = j;
+    // The ALIAS column is now indexed, not skipped. Skipping it was the root cause of a whole
+    // class of "I updated the sheet and prices still will not fetch": the APP matches on aliases
+    // (that is what the column is for), so adding a broker's odd spelling there made the detail
+    // page resolve correctly while this script - which never read the column - kept reporting
+    // "no exchange symbol". A half-fix that looks like a fix.
+    // `tally` stays skipped: it is the user's Tally ledger-name column, not a match column, and
+    // the app treats it the same way.
+    else if (/tally/.test(h)) { /* the user's Tally ledger name - not a match column */ }
+    else if (/alias/.test(h)) ci.alias = j;
     else if (/bse/.test(h)) ci.bse = j;
     else if (/nse/.test(h)) ci.nse = j;
-    else if (/tally|alias/.test(h)) { /* skip */ }
     else if (!nameSet && /name|security|company|scrip/.test(h)) { ci.name = j; nameSet = true; }
   }
   var hasHeader = hdr.some(function (h) { return /isin|name|security|company|bse|nse|scrip/.test(h); });
@@ -333,17 +372,77 @@ function loadMasterSymbols_() {
     // canonicalised to its ISIN — the column key the price-history grid and the app agree on.
     var entry = { nse: nse, bse: bse, name: name, isin: isin };
     if (isin && !m.byIsin[isin]) m.byIsin[isin] = entry;
-    var nk = normName_(name);
-    if (nk && !m.byName[nk]) m.byName[nk] = entry;
+    putNameKey_(m, normName_(name), entry, NAME_CANON_);
+    // Aliases, the alias column pipe-separated, plus THE EXCHANGE SYMBOLS THEMSELVES - all
+    // indexed as match keys, which is what the app does (scripMaster.ts builds its alias list as
+    // [...bseParts, bsecode, nse, ...aliasCol]).
+    //
+    // Indexing the symbol is the fix for "I put the ticker in the master and it still will not
+    // fetch". The Holding tab DOES carry an ISIN column, but its cell is blank for any scrip that
+    // did not resolve against the master at the last Rebuild Holding, and that tab is rewritten
+    // only by an explicit rebuild - so it LAGS the master. Fix a scrip in the master and the app
+    // resolves it instantly (it reads the master live) while this script still sees the pre-fix
+    // Holding row: no ISIN, and the broker's raw truncated name. Name matching is all that is
+    // left, exactly for the scrips someone just fixed and is watching. Before this, the ticker
+    // sat INSIDE the row the name match could not find - a payload, never a way in.
+    var keys = [];
+    if (ci.alias >= 0) keys = keys.concat(String(r[ci.alias] == null ? '' : r[ci.alias]).split('|'));
+    keys.push(nse);
+    keys.push(bse);
+    for (var q = 0; q < keys.length; q++) {
+      var a = String(keys[q] == null ? '' : keys[q]).trim();
+      // A <=2-char key is dropped for the reason the app documents: a two-letter exchange symbol
+      // ("LT" = Larsen & Toubro) is short enough to collide with real words, and letting it claim
+      // a name slot mis-resolves whatever else normalises to it ("LT Foods").
+      if (a.length <= 2) continue;
+      putNameKey_(m, normName_(a), entry, NAME_ALIAS_);
+    }
   }
   return m;
+}
+
+// Last-resort name match for a TRUNCATED held name. Broker notes cut a company name at a fixed
+// width ("KISAN MOULDINGS" -> "KISAN MOULDIN"), which defeats exact matching in both directions,
+// so treat one normalised name being a PREFIX of the other as a hit. This is the app's prefixHit()
+// (scripMaster.ts) and PREFIX_MIN_ is deliberately the app's 6: the two resolvers disagreeing is
+// the bug this whole function exists to close, and a "better" threshold on one side re-opens it.
+//
+// AMBIGUITY REFUSES. Two master rows prefix-matching one held name means we do not know which
+// company this is, and guessing writes a WRONG PRICE - money, silently wrong, with nothing
+// downstream able to detect it. The app can afford a guess because it raises the review popup;
+// this script has no user to ask. So: exactly one distinct row, or nothing.
+// Bumped whenever the RESOLVER changes. Echoed by /exec?sym= so "the fix is not working" and
+// "the fix is not deployed" stop being the same observation.
+var RESOLVER_VERSION_ = '2026-09-08 ticker-as-key + truncated-prefix';
+
+var PREFIX_MIN_ = 6;
+function masterPrefixHit_(master, nk) {
+  if (!nk || nk.length < PREFIX_MIN_) return null;
+  var hit = null, seenId = '';
+  for (var k in master.byName) {
+    if (k.length < PREFIX_MIN_) continue;
+    if (k.indexOf(nk) !== 0 && nk.indexOf(k) !== 0) continue;
+    var e = master.byName[k];
+    // One row owns several keys (its name, its symbol, its aliases), so dedupe by the ROW before
+    // calling it ambiguous - otherwise a row matching on two of its own keys vetoes itself.
+    var id = (e.isin || e.name || '').toUpperCase();
+    if (hit && id !== seenId) return null;
+    hit = e; seenId = id;
+  }
+  return hit;
 }
 
 // Held scrip → Yahoo tickers. NSE preferred ("<SYM>.NS"); BSE ("<CODE>.BO") is the fallback
 // exchange (or the primary if there's no NSE symbol). { primary, fallback } — either may be ''.
 function symbolsFor_(master, isin, name) {
+  // Weakest last: hand-written override, then exact ISIN, then exact name/alias/symbol, then a
+  // truncated-prefix match. Do not assume the ISIN step carries the load: the Holding tab's ISIN
+  // cell is only filled for scrips that resolved at the last Rebuild Holding, so a newly-fixed
+  // scrip arrives here with isin === '' until the tab is rebuilt.
+  var nk = normName_(name);
   var e = symbolOverrideFor_(isin, name) ||
-          (isin && master.byIsin[isin]) || master.byName[normName_(name)] || null;
+          (isin && master.byIsin[isin]) || master.byName[nk] ||
+          masterPrefixHit_(master, nk) || null;
   if (!e) return { primary: '', fallback: '' };
   var nse = e.nse ? e.nse.toUpperCase().replace(/\s+/g, '') + '.NS' : '';
   var bse = e.bse ? String(e.bse).replace(/\s+/g, '') + '.BO' : '';
@@ -1657,3 +1756,40 @@ function probeTradingView_() {
 }
 
 function testTradingView_() { Logger.log(JSON.stringify(probeTradingView_())); }
+
+// ── DIAGNOSTIC: how does the LIVE scrip master resolve one held name? ────────
+//
+// Reports the rule that fired, the row it locked onto and the ticker that came back. `matchedRow`
+// is the one worth reading twice: a resolver that finds the WRONG row still returns a ticker, and
+// a wrong ticker is a wrong price - money, silently wrong, with nothing downstream able to catch
+// it. Seeing the row name lets a human confirm it is the right company.
+//
+// Callable two ways:
+//   • Editor: Run testSymbol_ (edit the name in it) and read the Execution log.
+//   • URL:    <web app>/exec?sym=ANAWIL%20WIRE%26%20ENGINEERI
+// Reads only - loads the master and resolves. Nothing is written.
+function probeSymbol_(name, isin) {
+  var master = loadMasterSymbols_();
+  var nk = normName_(name);
+  var e = null, rule = '';
+  if ((e = symbolOverrideFor_(isin, name))) rule = 'SYMBOL_OVERRIDES (hand-written)';
+  else if (isin && (e = master.byIsin[isin])) rule = 'exact ISIN';
+  else if ((e = master.byName[nk])) rule = 'exact name / alias / ticker';
+  else if ((e = masterPrefixHit_(master, nk))) rule = 'truncated prefix';
+  else rule = 'NOTHING MATCHED — no master row for this name';
+  var syms = symbolsFor_(master, isin || '', name);
+  return {
+    ok: true,
+    version: RESOLVER_VERSION_,
+    asked: name,
+    normalised: nk,
+    isin: isin || '(none supplied — matches a Holding row whose ISIN cell is still blank)',
+    rule: rule,
+    matchedRow: e ? { name: e.name || '', isin: e.isin || '', nse: e.nse || '', bse: e.bse || '' } : null,
+    primary: syms.primary,
+    fallback: syms.fallback,
+    masterNameKeys: Object.keys(master.byName).length,
+  };
+}
+
+function testSymbol_() { Logger.log(JSON.stringify(probeSymbol_('ANAWIL WIRE& ENGINEERI', ''), null, 2)); }

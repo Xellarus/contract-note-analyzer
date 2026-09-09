@@ -525,7 +525,7 @@ export default function Dashboard({ onOpenStock }: DashboardProps) {
           <span className="text-[11px] font-black uppercase tracking-[0.15em]">Current AUM</span>
         </div>
         {loading && !aum ? (
-          <div className="flex items-center gap-2 mt-4 text-[#756b57] dark:text-[#938b7c]"><CubeLoader className="w-7" /> <span className="text-sm font-bold">Computing…</span></div>
+          <div className="flex items-center gap-2 mt-4 text-[#756b57] dark:text-[#938b7c]"><CubeLoader className="w-10" /> <span className="text-sm font-bold">Computing…</span></div>
         ) : aum ? (
           <>
             <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-1">
