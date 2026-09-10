@@ -120,5 +120,64 @@ eq('collision: no valuation applied', lookupScrip(master, '', 'Acme Foods Ltd').
   g.__missingRange = null;
 }
 
+// -- REQUEST COUNT: the point of the batching, and what nothing measured before ------------
+// The regression that started this was invisible because no test counted requests. Adding an
+// asset class used to add a REQUEST to every master load - PE alone was 1, then AIF, Mutual
+// Fund and Bonds took it to 4, serially, from 29 call sites, against 60 reads per minute.
+{
+  invalidateScripCache();
+  g.__sheetTabs = ['Scrip Master', 'Private Equities', 'AIF', 'Mutual Fund', 'Bonds'];
+  g.__ranges = {
+    [MAIN_RANGE]: MAIN,
+    [PE_RANGE]: PE,
+    'AIF!A1:J5000': [],
+    'Mutual Fund!A1:J5000': [],
+    'Bonds!A1:J5000': [],
+  };
+  g.__reads = { get: 0, batchGet: 0, meta: 0, ranges: [], batched: [] };
+
+  const m = await loadScripMaster('SHEET');
+  eq('every class tab is read in ONE batchGet', g.__reads.batchGet, 1);
+  eq('...carrying all four ranges at once', g.__reads.batched[0]?.length, 4);
+  eq('the master itself is the only single-range read', g.__reads.get, 1);
+  eq('so a master load costs 2 value reads, not 5', g.__reads.get + g.__reads.batchGet, 2);
+  eq('and the PE rows still fold in', isPeScrip(m, '', 'Stellar Robotics Private Limited'), true);
+}
+
+// A tab the list does not mention must STILL be read. The tab list is an optimisation, never an
+// authority: concluding "absent, so empty" without asking would file PE gains as LISTED with no
+// peFailed flag to warn anyone - silent, and wrong in the direction that costs money.
+{
+  invalidateScripCache();
+  g.__sheetTabs = ['Scrip Master'];        // the class tabs exist, but the list omits them
+  g.__reads = { get: 0, batchGet: 0, meta: 0, ranges: [], batched: [] };
+
+  const m = await loadScripMaster('SHEET');
+  eq('an unlisted tab is still read, not assumed empty',
+    isPeScrip(m, '', 'Stellar Robotics Private Limited'), true);
+  eq('...with no batch attempted', g.__reads.batchGet, 0);
+  eq('...and nothing marked failed', m.peFailed, false);
+}
+
+// One batchGet means one failure loses every class in it. The rule is explicit: an AIF tab that
+// 500s must not stop Private Equities folding in. So a failed batch retries per class.
+{
+  invalidateScripCache();
+  g.__sheetTabs = ['Scrip Master', 'Private Equities', 'AIF', 'Mutual Fund', 'Bonds'];
+  g.__reads = { get: 0, batchGet: 0, meta: 0, ranges: [], batched: [] };
+  g.__failBatch = true;
+
+  const m = await loadScripMaster('SHEET');
+  // >= 1, not == 1: sheetsBackoff retries a 5xx five times before giving up, so a hard batch
+  // failure costs those retries AND the per-class fallback. Rare, and the retries are right for
+  // a 429 (where waiting is the cure), but worth knowing the failure path is the expensive one.
+  eq('the batch was attempted', g.__reads.batchGet >= 1, true);
+  eq('...and its failure falls back to per-class reads', g.__reads.get >= 5, true);
+  eq('...so PE still folds in despite the batch failing',
+    isPeScrip(m, '', 'Stellar Robotics Private Limited'), true);
+  eq('...and no class is wrongly marked failed', m.peFailed, false);
+  g.__failBatch = false;
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

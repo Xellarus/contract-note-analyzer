@@ -307,6 +307,25 @@ export async function loadAssetClass(
   return rows;
 }
 
+/**
+ * Seed one class's cache from values SOMEBODY ELSE already fetched.
+ *
+ * Exists so `loadScripMaster` can read all four class tabs in ONE `batchGet` instead of four
+ * `values.get` calls, without those rows then being invisible to every direct `loadAssetClass`
+ * caller. The cache key and the parser are the same ones `loadAssetClass` uses, so a primed
+ * entry is indistinguishable from a fetched one - which is the point: prime it, and the next
+ * `loadAssetClass` costs nothing rather than re-fetching what the batch already has.
+ */
+export function primeAssetClass(
+  spreadsheetId: string,
+  assetClass: AssetClassId,
+  values: any[][],
+): PrivateEquityRow[] {
+  const rows = parsePrivateEquityVals(values || [], assetClass);
+  _cache.set(`${spreadsheetId}::${assetClass}`, { rows, ts: Date.now() });
+  return rows;
+}
+
 /** Back-compat alias: the Private Equities tab specifically. */
 export const loadPrivateEquities = (spreadsheetId: string, opts?: { force?: boolean }) =>
   loadAssetClass(spreadsheetId, "PE", opts);

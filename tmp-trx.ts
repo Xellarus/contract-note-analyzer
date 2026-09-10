@@ -721,10 +721,92 @@ export async function run() {
     console.log('golden written to ' + process.env.TRX_DUMP);
   }
 
+  // ── FIXTURE G — "STT Removed" hides STT on the gains tab, and changes NOTHING else ────────
+  // The whole claim in one test. STT never entered a gain: the P/L is
+  // `sale turnover - purchase turnover`, and turnover is charge-free. So flipping the flag must
+  // move exactly ONE column and leave every other cell — every rate, amount, subtotal and P/L —
+  // byte-identical. Running the same fixture twice and diffing the two written tabs proves that
+  // far better than reading a P/L cell would, because it also proves nothing ELSE moved.
+  {
+  const MASTER_RANGE = `${SCRIP_MASTER_SPREADSHEET_ID}::'${MASTER_TAB}'!A1:Z50000`;
+  // GAMMA is the ETF stand-in: marked. ALPHA is the control, in the same register.
+  const FLAGGED_MASTER = [
+    ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name', 'STT Removed'],
+    ['INE001A01011', 'ALPHA INDUSTRIES LIMITED', '500001', 'ALPHA', '', ''],
+    ['INE002A01018', 'BETA MOTORS LIMITED', '500002', 'BETA', '', ''],
+    ['INE003A01015', 'GAMMA TECH LIMITED', '500003', 'GAMMA', '', 'x'],
+    ['INE004A01012', 'DELTA POWER LIMITED', '500004', 'DELTA', '', ''],
+  ];
+  const FIXTURE_G: any[][] = [
+    TE_HEADER,
+    te([2025, 5, 2], 'GAMMA TECH LIMITED', 'INE003A01015', 'Buy', 100, 100, { stt: 11 }),
+    te([2025, 8, 4], 'GAMMA TECH LIMITED', 'INE003A01015', 'Sell', 100, 150, { stt: 13 }),
+    te([2025, 5, 2], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Buy', 50, 200, { stt: 7 }),
+    te([2025, 8, 4], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Sell', 50, 260, { stt: 9 }),
+  ];
+  /** Index of a header cell anywhere in a written tab. */
+  const colOf = (tab: any[][] | undefined, header: string): number => {
+    for (const r of tab || []) { const i2 = r.indexOf(header); if (i2 >= 0) return i2; }
+    return -1;
+  };
+  const colTotal = (tab: any[][] | undefined, c: number): number =>
+    (tab || []).reduce((sum, r) => sum + (typeof r[c] === 'number' ? r[c] : 0), 0);
+
+  install(FIXTURE_G);
+  await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+  const plain = written(CG_TAB);
+
+  install(FIXTURE_G);
+  g.__ranges[MASTER_RANGE] = FLAGGED_MASTER;
+  // If the emission dropped STT but the conservation guard still EXPECTED it, this throws and
+  // no register is written at all — the failure CLAUDE.md records twice. So reaching the next
+  // line is itself the assertion that both sides were keyed off the same flag.
+  await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+  const flagged = written(CG_TAB);
+
+  ok('the register still writes with a scrip flagged', !!flagged);
+
+  const sttCol = colOf(plain, 'STT');
+  ok('the gains tab has an STT column to begin with', sttCol >= 0);
+
+  const brokCol = colOf(plain, 'Brok.Total');
+  const stampCol = colOf(plain, 'Stamp duty');
+  const REMOVED = 11 + 13;                     // GAMMA's buy + sell STT, and nothing else
+
+  interface Change { r: number; c: number; from: any; to: any }
+  const changes: Change[] = [];
+  (plain || []).forEach((row, r) => row.forEach((v: any, c: number) => {
+    const w = flagged?.[r]?.[c];
+    if (JSON.stringify(v) !== JSON.stringify(w)) changes.push({ r, c, from: v, to: w });
+  }));
+  if (process.env.STT_DEBUG) for (const d of changes) console.log(`  DIFF r${d.r} c${d.c}: ${JSON.stringify(d.from)} -> ${JSON.stringify(d.to)}`);
+
+  // TWO columns may move, and only two: STT itself, and the expenses TOTAL that sums the
+  // charge block (it lands in the brokerage column). Everything else - every rate, amount,
+  // quantity, subtotal and P/L cell - must be byte-identical, which is the real claim: the
+  // gain is `sale turnover - purchase turnover`, so no charge has ever been part of it.
+  eq('only the STT column and the expenses total move',
+    [...new Set(changes.map((d) => d.c))].sort((x, y) => x - y),
+    [brokCol, sttCol].sort((x, y) => x - y));
+
+  const sttDrop = changes.filter((d) => d.c === sttCol)
+    .reduce((sum, d) => sum + ((typeof d.from === 'number' ? d.from : 0) - (typeof d.to === 'number' ? d.to : 0)), 0);
+  // Two blanked cells (11, 13) plus two total rows that each fall by 24.
+  eq('STT falls by exactly the flagged scrip figures, twice over in the totals', sttDrop, REMOVED * 3);
+
+  const brokChanges = changes.filter((d) => d.c === brokCol);
+  eq('exactly ONE cell in the brokerage column moves - the expenses total', brokChanges.length, 1);
+  eq('...and it falls by exactly the STT removed, so the block still adds up',
+    (brokChanges[0]?.from as number) - (brokChanges[0]?.to as number), REMOVED);
+
+  eq('stamp duty is untouched - it IS deductible under s.48',
+    colTotal(flagged, stampCol), colTotal(plain, stampCol));
+  }
+
   // ── report ────────────────────────────────────────────────────────────────
   console.log('='.repeat(60));
   for (const f of failures) console.log('  FAIL ' + f);
-  console.log(`${passed} passed, ${failures.length} failed`);
+console.log(`${passed} passed, ${failures.length} failed`);
   if (failures.length) process.exitCode = 1;
 }
 

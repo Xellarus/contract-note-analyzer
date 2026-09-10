@@ -1,6 +1,6 @@
 import { gapi } from "gapi-script";
 import {
-  invalidatePrivateEquityCache, loadAssetClass, PrivateEquityRow,
+  invalidatePrivateEquityCache, loadAssetClass, primeAssetClass, PrivateEquityRow,
   ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId,
 } from "./privateEquities";
 
@@ -60,6 +60,11 @@ export interface ScripEntry {
   bse?: string;             // BSE scrip code (from the BSE column), for display
   industry?: string;        // Industry / Sector (from a screener import), for the allocation chart
   priceExcept?: boolean;    // "Price Exception" column truthy → never fetched/priced; hidden from the "unpriced" UI (ETFs/liquid funds)
+  /** "STT Removed" column truthy → STT is not shown among this scrip's charges on a
+   *  capital-gains tab. It never affected the GAIN (that is computed on turnover, which is
+   *  charge-free), so this is about not presenting STT as an expense claimed against the
+   *  gain — which, under s.48, it cannot be. Set for ETFs. */
+  sttRemoved?: boolean;
   // ── Private equity (from the "Private Equities" tab; see privateEquities.ts) ──
   /** An UNLISTED company. No exchange price exists, so it is never fetched and never
    *  counted as "unpriced"; its long-term holding period is 24 months, not 12. */
@@ -165,7 +170,13 @@ function makeEntry(canonicalName: string, isin: string, aliases: string[], statu
 
 // ── Live fetch from the shared scrip sheet, cached per session ──────────────
 let _cache: { id: string; master: ScripMaster; ts: number } | null = null;
-const _titleCache: Record<string, string> = {};
+// What tabs does this spreadsheet have? Cached with the SAME TTL as the master itself, not
+// forever: the tab list decides which asset-class ranges the batched read asks for, so a
+// permanently-cached list would mean a newly created "Bonds" tab is invisible until a page
+// reload. One metadata request per 90s buys tab discovery AND replaces the request that used to
+// be spent discovering the absent tab the hard way - by asking for it and being refused.
+interface SheetInfo { first: string; titles: Set<string>; ts: number }
+const _titleCache: Record<string, SheetInfo> = {};
 const CACHE_TTL_MS = 90_000;
 
 /** Drop the cached scrip list so the next load re-fetches the sheet (used after
@@ -175,21 +186,35 @@ export function invalidateScripCache(): void {
   // The PE tab is folded into every master, so a stale PE cache would survive a forced
   // master reload and the newly-added company still wouldn't appear.
   invalidatePrivateEquityCache();
+  // The TAB LIST too. It decides which class tabs go in the batched read, so a stale list means
+  // a tab the user just created ("Bonds") keeps taking the slow per-tab path — or, after a
+  // rename, that the fast path asks for a tab that no longer exists. "Forget what you cached
+  // about this sheet" has to mean all of it.
+  for (const k of Object.keys(_titleCache)) delete _titleCache[k];
 }
 
 /** The title of the sheet's first tab (gid=0), so we read the right range
  *  regardless of how the tab was named when the CSV was imported. */
-async function firstSheetTitle(spreadsheetId: string): Promise<string> {
-  if (_titleCache[spreadsheetId]) return _titleCache[spreadsheetId];
+async function sheetInfo(spreadsheetId: string, force = false): Promise<SheetInfo> {
+  const hit = _titleCache[spreadsheetId];
+  if (!force && hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit;
   const meta: any = await sheetsBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
     spreadsheetId,
     fields: "sheets.properties(title,sheetId)",
   }));
   const arr: any[] = meta?.result?.sheets || [];
   const s0 = arr.find((s: any) => s?.properties?.sheetId === 0) || arr[0];
-  const title = s0?.properties?.title || "Sheet1";
-  _titleCache[spreadsheetId] = title;
-  return title;
+  const info: SheetInfo = {
+    first: s0?.properties?.title || "Sheet1",
+    titles: new Set<string>(arr.map((s: any) => s?.properties?.title).filter(Boolean)),
+    ts: Date.now(),
+  };
+  _titleCache[spreadsheetId] = info;
+  return info;
+}
+
+async function firstSheetTitle(spreadsheetId: string): Promise<string> {
+  return (await sheetInfo(spreadsheetId)).first;
 }
 
 // A1-notation-safe sheet reference: always single-quoted (handles spaces).
@@ -214,6 +239,79 @@ async function sheetsBackoff<T>(fn: () => Promise<T>, tries = 5): Promise<T> {
 }
 
 /**
+ * Fold every non-listed asset-class tab into the master in ONE request instead of four.
+ *
+ * WHY: this loop used to `await loadAssetClass` once per class, serially. With only Private
+ * Equities that was one request; adding AIF, Mutual Fund and Bonds made it FOUR - four requests
+ * and four sequential round-trips on every master cache miss, from 29 call sites. Google allows
+ * 60 Sheets reads per minute per user, and crossing it does not just error: the backoff sleeps
+ * 1.2s, 2.4s, 3.6s... so the page gets slower exactly when it is already struggling.
+ *
+ * `batchGet` reads many ranges from ONE spreadsheet in ONE request, and counts as one against
+ * that quota. All four tabs live in the scrip master, so they collapse perfectly.
+ */
+async function foldAllAssetClasses(
+  master: ScripMaster,
+  spreadsheetId: string,
+  info: SheetInfo,
+  opts?: { force?: boolean },
+): Promise<void> {
+  // Read class tabs one at a time, exactly as this always did. Each failure is independent, and
+  // an absent tab answers itself: loadAssetClass turns "unable to parse range" into a cached [].
+  const foldOneByOne = async (ids: AssetClassId[]) => {
+    for (const id of ids) {
+      try {
+        foldAssetClass(master, await loadAssetClass(spreadsheetId, id, opts));
+      } catch (e) {
+        master.peFailed = true;
+        console.warn(
+          `Could not read the "${ASSET_CLASSES[id].tab}" tab — its holdings will show as ordinary `
+          + `unpriced equities, and their capital gains will be classified as LISTED:`, e,
+        );
+      }
+    }
+  };
+
+  // THE TAB LIST IS AN OPTIMISATION, NOT AN AUTHORITY. It may move a tab onto the fast path; it
+  // may never conclude a tab is empty. Letting "not in the list" mean "no rows" would seed the
+  // class empty without a single request — turning private-equity holdings into ordinary listed
+  // equities, filing their gains as LISTED, and setting no `peFailed` for anyone to notice.
+  // Silent, and wrong in the direction that costs money. Asking is self-verifying: the answer
+  // comes from the same request that would have returned the data.
+  //
+  // So a tab we cannot see listed is still READ (one request, and its absence then caches for
+  // 60s). It just stays out of `ranges`, because ONE bad range rejects an ENTIRE batchGet.
+  const listed: AssetClassId[] = [];
+  const unlisted: AssetClassId[] = [];
+  for (const id of ASSET_CLASS_IDS) {
+    (info.titles.has(ASSET_CLASSES[id].tab) ? listed : unlisted).push(id);
+  }
+
+  if (listed.length > 0) {
+    try {
+      const res: any = await sheetsBackoff(() => (gapi.client as any).sheets.spreadsheets.values.batchGet({
+        spreadsheetId,
+        // The SAME range string loadAssetClass builds — unquoted. Not quoteTab: the fallback
+        // path must ask for byte-identical ranges, or the fast and slow paths could disagree
+        // about which tab they read, and only one of them would be exercised in testing.
+        ranges: listed.map((id) => `${ASSET_CLASSES[id].tab}!A1:J5000`),
+        valueRenderOption: "UNFORMATTED_VALUE",   // the option loadAssetClass uses, so rows parse identically
+      }));
+      const vrs: any[] = res?.result?.valueRanges || [];   // returned in the order asked for
+      listed.forEach((id, i) => foldAssetClass(master, primeAssetClass(spreadsheetId, id, vrs[i]?.values || [])));
+    } catch (e) {
+      // One batch means one failure loses every class in it, and the rule here is explicit: an
+      // AIF tab that 500s must NOT stop Private Equities being folded in. The batch is only the
+      // fast path — on any failure fall back to per-class reads, which fail independently.
+      console.warn('Batched asset-class read failed; falling back to one request per tab.', e);
+      await foldOneByOne(listed);
+    }
+  }
+
+  if (unlisted.length > 0) await foldOneByOne(unlisted);
+}
+
+/**
  * Read the shared scrip master from its Google Sheet. Columns are detected from
  * the header (ISIN / Security Name / Aliases) in any order; falls back to A/B/C.
  * Rows are merged by ISIN (or normalized name) so duplicate/append rows fold in.
@@ -227,11 +325,14 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
 
   const master = emptyMaster();
   let rows: any[][];
+  // ONE metadata call serves both jobs: which tab holds the master, and which asset-class tabs
+  // exist at all. Fetching it twice would give back the request the batching below just saved.
+  let info: SheetInfo;
   try {
-    const tab = await firstSheetTitle(spreadsheetId);
+    info = await sheetInfo(spreadsheetId, !!opts?.force);
     const res: any = await sheetsBackoff(() => (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${quoteTab(tab)}!A1:Z50000`,  // wide enough for BSE Code / Tally Name / Industry / Price Exception extras
+      range: `${quoteTab(info.first)}!A1:Z50000`,  // wide enough for BSE Code / Tally Name / Industry / Price Exception extras
     }));
     rows = res?.result?.values || [];
   } catch (e: any) {
@@ -255,11 +356,12 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
       // The FIRST name-like column wins: user-added extras like "Tally Name" must
       // not steal ci.name (a hijacked, mostly-blank name column made every entry's
       // canonical name fall back to its ISIN). Any unrecognised column is ignored.
-      const ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: 4, bsecode: -1, industry: -1, except: -1 };
+      const ci = { isin: 0, name: 1, bse: 2, nse: 3, alias: 4, bsecode: -1, industry: -1, except: -1, sttRemoved: -1 };
       if (hasHeader) {
         let nameSet = false;
         header.forEach((h: string, idx: number) => {
           if (/exception|exclud/.test(h)) ci.except = idx;   // "Price Exception" — must beat the name test (no name token anyway)
+          else if (/stt/.test(h)) ci.sttRemoved = idx;      // "STT Removed" — before the name test, which "…Removed" would not hit anyway
           else if (/isin/.test(h)) ci.isin = idx;
           else if (/alias/.test(h)) ci.alias = idx;
           else if (/industry|sector/.test(h)) ci.industry = idx;
@@ -316,6 +418,11 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
           const ex = (r[ci.except] || "").toString().trim().toLowerCase();
           if (/^(x|yes|y|true|1|✓|✔)$/.test(ex)) entry.priceExcept = true;
         }
+        // "STT Removed" — same truthy marks, same fold-any-row-wins rule.
+        if (ci.sttRemoved >= 0) {
+          const sr = (r[ci.sttRemoved] || "").toString().trim().toLowerCase();
+          if (/^(x|yes|y|true|1|✓|✔)$/.test(sr)) entry.sttRemoved = true;
+        }
       }
     }
   }
@@ -328,17 +435,7 @@ export async function loadScripMaster(spreadsheetId: string, opts?: { force?: bo
   // folded in, and one that 500s must not mark the others failed. `peFailed` stays a single flag
   // because every consumer of it asks the same question - "can this book's non-listed holdings
   // be identified at all" - and the answer is no if ANY class could not be read.
-  for (const id of ASSET_CLASS_IDS) {
-    try {
-      foldAssetClass(master, await loadAssetClass(spreadsheetId, id, opts));
-    } catch (e) {
-      master.peFailed = true;
-      console.warn(
-        `Could not read the "${ASSET_CLASSES[id].tab}" tab — its holdings will show as ordinary `
-        + `unpriced equities, and their capital gains will be classified as LISTED:`, e,
-      );
-    }
-  }
+  await foldAllAssetClasses(master, spreadsheetId, info, opts);
 
   computeGenericTokens(master);   // which single tokens are too common to carry a fuzzy match
   master.dirty = false;
@@ -568,6 +665,21 @@ export function lookupScrip(master: ScripMaster, isin: string, name: string): Sc
 export function isPriceExcepted(master: ScripMaster, isin: string, name: string): boolean {
   const e = lookupScrip(master, isin, name).entry;
   return !!(e && e.priceExcept);
+}
+
+/**
+ * True if this scrip is flagged in the "STT Removed" column of the scrip master.
+ *
+ * It does NOT change any gain. Every capital-gains figure in this app is computed on TURNOVER,
+ * which is charge-free — see the P/L in `trxRegister`. What the flag suppresses is STT appearing
+ * in the nine-column charge block on a capital-gains tab, where a reader (or a CA) reasonably
+ * takes that block to be expenses claimed against the gain. Under s.48 STT is not deductible,
+ * so showing it there is misleading. Marked for ETFs.
+ */
+export function isSttRemoved(master: ScripMaster | null, isin: string, name: string): boolean {
+  if (!master) return false;
+  const e = lookupScrip(master, isin, name).entry;
+  return !!(e && e.sttRemoved);
 }
 
 /** A normalized name string that maps to MORE THAN ONE distinct master entry — so a

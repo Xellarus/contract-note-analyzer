@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 const ROOT = 'c:/Users/Priti/Desktop/remix_-contract-note-analyzer';
 const esbuild = await import(pathToFileURL(`${ROOT}/node_modules/esbuild/lib/main.js`).href);
 
+globalThis.__reads = { get: 0, batchGet: 0, meta: 0, ranges: [], batched: [] };
+
 const GAPI_STUB = [
   'const g = globalThis;',
   'const err = (code, message) => { const e = new Error(message); e.result = { error: { code, message } }; e.status = code; return e; };',
@@ -13,14 +15,28 @@ const GAPI_STUB = [
   '  client: {',
   '    sheets: {',
   '      spreadsheets: {',
-  '        get: async () => ({ result: { sheets: (g.__sheetTabs || ["Sheet1"]).map((t, i) => ({ properties: { title: t, sheetId: i } })) } }),',
+  '        get: async () => { g.__reads.meta++; return { result: { sheets: (g.__sheetTabs || ["Sheet1"]).map((t, i) => ({ properties: { title: t, sheetId: i } })) } }; },',
   '        values: {',
   '          get: async ({ range }) => {',
+  '            g.__reads.get++; g.__reads.ranges.push(range);',
   '            if (g.__failRange && range === g.__failRange) throw err(500, "Internal error");',
   '            if (g.__missingRange && range === g.__missingRange) throw err(400, "Unable to parse range: " + range);',
   '            const vals = (g.__ranges || {})[range];',
   '            if (vals === undefined) throw err(400, "Unable to parse range: " + range);',
   '            return { result: { values: vals } };',
+  '          },',
+  // ONE request, many ranges. Modelled on the real API in the way that matters here: a single
+  // bad range rejects the WHOLE call, which is why absent tabs must never enter `ranges`.
+  '          batchGet: async ({ ranges }) => {',
+  '            g.__reads.batchGet++; g.__reads.batched.push([...ranges]);',
+  '            if (g.__failBatch) throw err(500, "Internal error");',
+  '            const valueRanges = ranges.map((range) => {',
+  '              if (g.__failRange && range === g.__failRange) throw err(500, "Internal error");',
+  '              const vals = (g.__ranges || {})[range];',
+  '              if (vals === undefined) throw err(400, "Unable to parse range: " + range);',
+  '              return { range, values: vals };',
+  '            });',
+  '            return { result: { valueRanges } };',
   '          },',
   '          append: async (req) => { (g.__appended = g.__appended || []).push(req); return { result: {} }; },',
   '          update: async (req) => { (g.__updated = g.__updated || []).push(req); return { result: {} }; },',

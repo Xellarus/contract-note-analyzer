@@ -25,9 +25,9 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
-| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API (27) |
+| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (84) |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal (110; 111 with `TRX_BASELINE` set) |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, and the "STT Removed" flag (117; 118 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -108,6 +108,52 @@ Two rules that follow from that, and both have already broken the whole register
 The transaction statement is built from the parsed `trades`, **not** from the capital-gains
 blocks: a no-rule sale never reaches `Block.sales`, so a block-derived statement would silently
 omit every mutual-fund and bond sale — the rows those tabs exist to surface.
+
+**Google's Sheets quota is 60 READ REQUESTS PER MINUTE PER USER, and nothing counts them.**
+Crossing it does not merely error: the backoff sleeps 1.2s, 2.4s, 3.6s… so the app gets slower
+exactly when it is already struggling, the user reloads, and the reload spends another 60.
+
+The trap is that **adding a feature can add a request to a hot path invisibly**. `loadScripMaster`
+looped `ASSET_CLASS_IDS` and `await`ed one `values.get` per class: one request when only Private
+Equities existed, **four** once AIF, Mutual Fund and Bonds were added — serially, from 29 call
+sites, 11 of which pass `force: true` and skip the 90s cache. That alone produced
+"quota exceeded" plus two-minute AUM loads.
+
+- **`values.batchGet` reads many ranges from ONE spreadsheet in ONE request** and counts as one.
+  The class tabs now go in a single batch. `tmp-pe-fold-run.mjs` **counts the requests**, because
+  a regression here is invisible to every other kind of test.
+- **`batchGet` cannot cross spreadsheets.** The 13 portfolios are 13 separate spreadsheets, so
+  the 13-way fan-outs (`Holdings.tsx` `fetchPortfolioTotal`, `crossHoldings`, `navTimeline`)
+  cannot be batched away — only coalesced or throttled, which is not done yet.
+- **ONE bad range rejects an ENTIRE batchGet**, so a tab that may not exist must never enter
+  `ranges`. The tab list from `spreadsheets.get` keeps it out.
+- **That tab list is an OPTIMISATION, NEVER AN AUTHORITY.** It may move a tab onto the fast path;
+  it may not conclude a tab is empty. Treating "not listed" as "no rows" seeds the class empty
+  with no request at all — turning PE holdings into ordinary listed equities, filing their gains
+  as LISTED, and setting no `peFailed` for anyone to notice. Asking is self-verifying: the answer
+  comes from the same request that would have returned the data. Asserted in the suite.
+- **A failed batch falls back to per-class reads**, because one batch means one failure loses all
+  four, and an AIF tab that 500s must not stop Private Equities folding in.
+- `invalidateScripCache()` clears the tab list too — otherwise a newly created tab stays invisible.
+- Only **3 of 58** read sites have any backoff at all, and ~40 swallow their errors.
+
+**"STT Removed" (scrip master column).** A truthy cell (`x` / `yes` / `1` / ✓) suppresses STT in
+the nine-column charge block on the capital-gains tabs — marked for ETFs.
+
+**It changes no gain, and cannot.** Every capital-gains figure in this app is computed on
+TURNOVER, which is charge-free: `gain = sale turnover − purchase turnover` in the register
+(`trxRegister.ts`, delivery and intraday alike) and `saleAmt − acqCost` in `holdingsCalc`. No
+charge of any kind has ever entered a P/L. The flag exists because the charge block *reads* as
+"expenses claimed against this gain", and under **s.48 STT is not a deductible expense** — so
+listing it there states a claim nobody is making. Fixture G proves the point by running one
+fixture twice and diffing: flipping the flag moves the STT column and the expenses total, by the
+same amount, and **nothing else**.
+
+Everything on a gains tab goes through `cgCharges(key, c)`, **including the conservation guard's
+`expect`** — same discipline as `keyHasLtRule`. Drop a charge from the tabs without dropping it
+from what is expected on them and the guard sees drift and writes **no register at all**. The
+transaction and holding statements deliberately do NOT go through it: they are a record of what
+was transacted, they are not in the guard's sum, and they must still tie to the contract note.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

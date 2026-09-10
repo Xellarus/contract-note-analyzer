@@ -2,7 +2,7 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
   normName, loadScripMaster, resolveScrip, ScripMaster,
-  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor, assetClassOf,
+  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor, assetClassOf, isSttRemoved,
 } from "./scripMaster";
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from "./privateEquities";
 import { loadCorporateActions, CORP_ACTIONS_TAB } from "./corporateActions";
@@ -467,6 +467,41 @@ export async function generateTrxRegister(
     return !c || ASSET_CLASSES[c].ltDays !== null;
   };
 
+  /**
+   * Is STT suppressed on the capital-gains tabs for this scrip? ("STT Removed" in the master.)
+   *
+   * Memoised like `classOfKey` for the same reason: the lookup can fall through to a
+   * token-subset rescan of every master entry, and this is asked once per emitted row.
+   */
+  const sttOffByKey = new Map<string, boolean>();
+  const sttOffForKey = (key: string): boolean => {
+    const hit = sttOffByKey.get(key);
+    if (hit !== undefined) return hit;
+    const off = isSttRemoved(master, isinByKey.get(key) || "", nameByKey.get(key) || key);
+    sttOffByKey.set(key, off);
+    return off;
+  };
+
+  /**
+   * The charges AS THEY APPEAR ON A CAPITAL-GAINS TAB.
+   *
+   * This does not change any gain: the P/L is `sale turnover - purchase turnover`, and turnover
+   * is charge-free, so STT has never been part of it. What it changes is the nine-column charge
+   * block, which a reader takes to be the expenses claimed against that gain - and under s.48
+   * STT is not a deductible expense, so listing it there is a claim nobody is making.
+   *
+   * Everything on a gains tab goes through here, INCLUDING the charge-conservation guard's
+   * `expect`. That is the whole discipline, and the same one `keyHasLtRule` follows: whatever is
+   * dropped from the tabs must be dropped from what is expected on them, keyed on the identical
+   * test, or the guard sees drift and refuses to write the register AT ALL.
+   *
+   * The transaction and holding statements deliberately do NOT go through here. They are a
+   * record of what was transacted, they are not in the guard's sum, and they must still tie back
+   * to the broker's contract note.
+   */
+  const cgCharges = (key: string, c: Charges): Charges =>
+    (sttOffForKey(key) ? { ...c, stt: 0 } : c);
+
   // ── 3b. Automatic intraday reconciliation per (scrip, day) — ALWAYS ON, tag-independent.
   // A same-day buy+sell of the same scrip is an intraday round-trip by definition, so we
   // match the min(buyQty, sellQty) as speculative regardless of the broker's Trade Class
@@ -917,7 +952,7 @@ export async function generateTrxRegister(
         const row = blankRow();
         row[COL.pDate] = fmtDate(p.ts); row[COL.pQty] = p.qty;
         row[COL.pRate] = r6(p.avgPrice); row[COL.pAmt] = r2(p.turnover);
-        chargeCells(row, p.charges);
+        chargeCells(row, cgCharges(b.key, p.charges));
         out.push(row);
       }
 
@@ -964,7 +999,7 @@ export async function generateTrxRegister(
         const bk = BUCKET_PL[s.category];
         if (grandPnl[bk] === undefined) throw new Error(`Register bug: a ${s.category} sale reached the ${L.id} tab.`);
         grandPnl[bk]! += s.pnl;
-        chargeCells(row, s.charges);
+        chargeCells(row, cgCharges(b.key, s.charges));
         out.push(row);
       }
 
@@ -1269,9 +1304,11 @@ export async function generateTrxRegister(
     // Same three sources the emission draws from: unpaired trades, the residual legs of a
     // partial round trip, and the round trips themselves. Transfers realise nothing and
     // never reach a purchase or sale row, so their charges are not expected on either tab.
-    for (const t of trades) if (!pairedIdx.has(t.idx) && inFy(t.ts) && !t.xfer && hasRule(t.isin, t.name)) add(t.charges);
-    for (const t of residualTrades) if (inFy(t.ts) && hasRule(t.isin, t.name)) add(t.charges);
-    for (const rt of intradayRTs) if (inFy(rt.ts)) { add(rt.buyCharges); add(rt.sellCharges); }
+    // Through cgCharges, exactly as the emission is. A charge suppressed on the tabs must not
+    // be expected on them - the guard compares the two, and any gap means no register is written.
+    for (const t of trades) if (!pairedIdx.has(t.idx) && inFy(t.ts) && !t.xfer && hasRule(t.isin, t.name)) add(cgCharges(t.key, t.charges));
+    for (const t of residualTrades) if (inFy(t.ts) && hasRule(t.isin, t.name)) add(cgCharges(t.key, t.charges));
+    for (const rt of intradayRTs) if (inFy(rt.ts)) { add(cgCharges(rt.key, rt.buyCharges)); add(cgCharges(rt.key, rt.sellCharges)); }
 
     const keys: (keyof Charges)[] = ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf", "dmat"];
     // Sums EVERY capital-gains tab, not just the two original ones. Splitting the output by
