@@ -241,6 +241,23 @@ Rules that have each already cost something:
   from below (and `l`) leaves the tab stop pointing at a row that is not the focused one — after
   which the next ArrowDown jumps.
 
+**The trade book's row gestures.** Outside edit mode the expense/note breakdown opens on
+**double-click**, not click — it used to fire while simply reading down the ledger. Edit mode
+keeps its SINGLE click (selecting rows and opening the row editor are the point of that mode;
+double-clicking a checkbox would be absurd). **Enter still opens the breakdown from the keyboard**
+and must stay: there is no keyboard double-click, so binding it to `onDoubleClick` alone makes the
+breakdown mouse-only and quietly undoes the keyboard-navigation work above.
+
+**Edit Entry, opening lots: Amount ↔ Cost/Share.** They update each other through Quantity.
+`Amount ÷ Qty → cost/share at r6`; `Qty × cost/share → amount at r2` — the asymmetry is the
+convention, not an oversight: rounding a RATE to paise drifts the whole FIFO basis and the drift
+only surfaces later as a wrong gain. A quantity edit recomputes whichever money field was NOT
+typed last, so correcting a qty typo keeps the figure just entered. Two things it must not do:
+divide by a blank/zero quantity (that puts `Infinity`/`NaN` in the form and then the sheet), and
+re-derive cost/share on open — Amount is seeded for display only, because a 2-dp money figure
+divided back does not generally return the r6 rate it came from. The save path is unchanged: only
+`qty` and `costPerShare` are written.
+
 The **trade book** deliberately uses plain tab stops instead of the hook: `sortedTxs` is computed
 inside `renderStockDetailView`, *below* the `if (selectedStock)` early return, so a hook keyed on
 its length cannot be declared without hoisting state out of the largest component in the app. It

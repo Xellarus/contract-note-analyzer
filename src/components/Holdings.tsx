@@ -95,6 +95,11 @@ const TE_EXPENSE_FIELDS: { key: string; label: string; header: string }[] = [
   { key: 'stamp', label: 'Stamp Duty', header: 'Stamp Duty' },
 ];
 const numCell = (v: any): number => { const n = parseFloat((v ?? '').toString().replace(/,/g, '')); return isNaN(n) ? 0 : n; };
+/** Money, to paise. Blank for a non-finite result rather than "NaN"/"Infinity" in an input. */
+const moneyStr = (n: number): string => (isFinite(n) ? String(Number(n.toFixed(2))) : '');
+/** A RATE - six decimals, never two [[no-rounding-cost-basis]]. Rounding cost/share to paise
+ *  drifts the whole FIFO basis, and the drift is invisible until a gain is computed from it. */
+const rateStr = (n: number): string => (isFinite(n) ? String(Number(n.toFixed(6))) : '');
 
 interface HoldingsProps {
   holdings: PortfolioHolding[];
@@ -513,6 +518,12 @@ export default function Holdings({
   const [expenseTx, setExpenseTx] = useState<Transaction | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [savingEdit, setSavingEdit] = useState(false);
+  // Which of the two linked money fields on the OPENING-lot form the user typed last.
+  // It decides what a QUANTITY edit recomputes: having just typed a total outlay, fixing a
+  // quantity typo should keep that amount and move cost/share - not silently overwrite the
+  // number just entered. Null until a money field is touched, so the default is the natural
+  // reading of the form's own footnote: Amount = Quantity x Cost/Share.
+  const [openingMoneyEdit, setOpeningMoneyEdit] = useState<'amount' | 'price' | null>(null);
   const [deletingEdit, setDeletingEdit] = useState(false);
   // Corporate-action row being edited (its own popup — the inline row editor is built for
   // qty/price/charges, none of which a merger/demerger has).
@@ -1479,6 +1490,10 @@ export default function Holdings({
       form.tradeDate = t.tradeDate;
       form.quantity = String(t.quantity);
       form.price = String(t.price);          // cost/share
+      // DERIVED, display-only. The sheet stores qty + cost/share and `updateOpeningHoldingRow`
+      // writes only those two, so this cannot round-trip the stored cost/share through a 2-dp
+      // money figure: open-and-save with no edits saves the cost/share byte-for-byte.
+      form.amount = moneyStr(t.quantity * t.price);
       form.longTerm = t.longTerm ? 'yes' : '';
     } else {
       form.tradeDate = t.tradeDate;
@@ -1493,6 +1508,7 @@ export default function Holdings({
       }
     }
     setEditForm(form);
+    setOpeningMoneyEdit(null);
     setEditingTx(t);
   };
 
@@ -1903,12 +1919,44 @@ export default function Holdings({
                 </label>
                 <label className="block">
                   <span className="text-[10px] font-bold uppercase text-slate-500">Quantity</span>
-                  <input type="number" step="any" value={editForm.quantity ?? ''} onChange={e => setEditForm(p => ({ ...p, quantity: e.target.value }))}
+                  <input type="number" step="any" value={editForm.quantity ?? ''} onChange={e => setEditForm(p => {
+                    // Recompute whichever money field the user did NOT type last, so the figure
+                    // they just entered survives a quantity correction. A blank or <= 0 quantity
+                    // recomputes NOTHING - dividing by it would put Infinity/NaN in the form and
+                    // then into the sheet.
+                    const q = numCell(e.target.value);
+                    if (!(q > 0)) return { ...p, quantity: e.target.value };
+                    return openingMoneyEdit === 'amount'
+                      ? { ...p, quantity: e.target.value, price: rateStr(numCell(p.amount) / q) }
+                      : { ...p, quantity: e.target.value, amount: moneyStr(q * numCell(p.price)) };
+                  })}
                     className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
                 </label>
                 <label className="block">
                   <span className="text-[10px] font-bold uppercase text-slate-500">Cost / Share</span>
-                  <input type="number" step="any" value={editForm.price ?? ''} onChange={e => setEditForm(p => ({ ...p, price: e.target.value }))}
+                  <input type="number" step="any" value={editForm.price ?? ''} onChange={e => {
+                    setOpeningMoneyEdit('price');
+                    setEditForm(p => {
+                      const q = numCell(p.quantity);
+                      return q > 0
+                        ? { ...p, price: e.target.value, amount: moneyStr(q * numCell(e.target.value)) }
+                        : { ...p, price: e.target.value };
+                    });
+                  }}
+                    className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-bold uppercase text-slate-500">Amount</span>
+                  <input type="number" step="any" value={editForm.amount ?? ''} onChange={e => {
+                    setOpeningMoneyEdit('amount');
+                    setEditForm(p => {
+                      const q = numCell(p.quantity);
+                      // An EMPTY amount leaves cost/share alone. Clearing a field to retype it
+                      // must not zero the basis on the keystroke in between.
+                      if (e.target.value.trim() === '' || !(q > 0)) return { ...p, amount: e.target.value };
+                      return { ...p, amount: e.target.value, price: rateStr(numCell(e.target.value) / q) };
+                    });
+                  }}
                     className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
                 </label>
                 <label className="col-span-2 flex items-center gap-2 mt-1 cursor-pointer">
@@ -1916,7 +1964,7 @@ export default function Holdings({
                     className="w-4 h-4 accent-indigo-600" />
                   <span className="text-[12px] font-medium text-slate-700">Long-term (acquired before 1-Apr-2024)</span>
                 </label>
-                <p className="col-span-2 text-[11px] text-slate-400">Invested is recomputed as Quantity × Cost/Share on save.</p>
+                <p className="col-span-2 text-[11px] text-slate-400">Amount and Cost/Share update each other through Quantity. Only Quantity and Cost/Share are saved; invested is recomputed as Quantity × Cost/Share.</p>
               </div>
             ) : (
               <>
@@ -3837,12 +3885,23 @@ export default function Holdings({
                                 if (!editable) return;
                                 if (selecting) toggleRowSel(t); else openEdit(t);
                               }}
-                              onClick={editMode
-                                ? (editable ? () => { selecting ? toggleRowSel(t) : openEdit(t); } : undefined)
-                                : () => setExpenseTx(t)}
+                              // EDIT MODE keeps its single click: selecting rows and opening the
+                              // row editor are the point of that mode, and a double-click to tick
+                              // a checkbox would be absurd. Outside it, the expense breakdown is
+                              // something you open deliberately, not something that should jump
+                              // out while you are reading down the ledger - so it wants a
+                              // DOUBLE-click.
+                              onClick={editMode && editable
+                                ? () => { selecting ? toggleRowSel(t) : openEdit(t); }
+                                : undefined}
+                              // Enter still opens it from the keyboard (see onKeyDown above):
+                              // there is no keyboard double-click, so binding this to dblclick
+                              // ALONE would make the breakdown mouse-only and undo the
+                              // keyboard-navigation work.
+                              onDoubleClick={!editMode ? () => setExpenseTx(t) : undefined}
                               title={editMode
                                 ? (selecting ? 'Click, or press Space, to select / deselect this row' : undefined)
-                                : 'View expense breakdown'}
+                                : 'Double-click, or press Enter, to view the expense breakdown'}
                               // Rose tint from the row where the running balance first goes
                               // negative onward — the eye lands straight on where the ledger broke,
                               // instead of having to scan the Bal Qty column for a minus sign.
