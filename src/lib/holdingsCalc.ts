@@ -630,7 +630,11 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
 
   // ── 2. Resolve every (isin, name) to one canonical key via the shared Scrip
   // Master, so short codes ("GOODLUCK") and full names ("Goodluck India Ltd") merge. ──
-  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+  // FORCED, not cached - see the note in `generateTrxRegister`. This WRITES a tab from the
+  // hand-maintained master, and the owner's workflow is "fix the scrip master, click this".
+  // The 90s cache would hand back the master as it was BEFORE that fix, rewrite the tab from
+  // it, and look exactly like the fix not working.
+  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true });
   const byKey = new Map<string, HoldingAcc>();
   const unresolvedMap = new Map<string, UnresolvedScrip>();
 
@@ -1118,7 +1122,11 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   // Resolve every (isin, name) to one canonical key via the shared Scrip Master
   // so short codes ("GOODLUCK") and full names ("Goodluck India Ltd") map to the
   // same FIFO bucket. Unresolved/ambiguous names are collected for review.
-  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+  // FORCED, not cached - see the note in `generateTrxRegister`. This WRITES a tab from the
+  // hand-maintained master, and the owner's workflow is "fix the scrip master, click this".
+  // The 90s cache would hand back the master as it was BEFORE that fix, rewrite the tab from
+  // it, and look exactly like the fix not working.
+  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true });
 
   // REFUSE to write the tax ledger when we cannot tell listed from unlisted.
   //

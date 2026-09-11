@@ -266,6 +266,18 @@ export interface TrxRegisterResult {
   /** FY sales omitted from BOTH P/L columns because their asset class has no decided
    *  holding-period rule (currently: mutual funds). Reported so the gap is stated. */
   unclassified: { name: string; isin: string; qty: number; ts: number }[];
+  /**
+   * DIAGNOSTIC for the "STT Removed" flag, because its failure mode is SILENT: a tab that
+   * still shows STT looks identical whether the master was never read, the scrip never
+   * matched, or the owner is looking at a tab this run did not write.
+   *
+   * `sttFlaggedInMaster` counts entries carrying the flag in the master AS LOADED BY THIS RUN
+   * - so 0 means the column was not seen at all (wrong tab, stale bundle, unread range) and
+   * the lookup is not even in question. `sttSuppressed` names the scrips this run actually
+   * blanked STT for. The two together separate three causes that otherwise look the same.
+   */
+  sttFlaggedInMaster: number;
+  sttSuppressed: string[];
   scrips: number;
   buyRows: number;
   sellRows: number;
@@ -352,7 +364,14 @@ export async function generateTrxRegister(
   const num = (r: any[], i: number) => (i >= 0 ? (toNum(r[i]) || 0) : 0);
 
   // ── 2. Resolve scrips via the shared master (short code + full name → one key) ──
-  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+  // FORCED, not cached. The master carries HAND-MAINTAINED classification the owner edits in the
+  // sheet and then immediately clicks this button to apply: the asset-class tabs, "Price
+  // Exception", "STT Removed", aliases. `loadScripMaster` caches for 90s and the read-only hot
+  // paths keep the cache warm, so an unforced read here returns the master AS IT WAS BEFORE THE
+  // EDIT and writes a register/tab that silently ignores it - the "I marked it and nothing
+  // happened" bug, indistinguishable from a broken feature. Only the explicitly-clicked WRITE
+  // actions force; forcing the read-only paths would re-open the read-quota problem.
+  const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true });
 
   // Same refusal as `syncCapitalGains`, for the same reason: this register splits every sale
   // into short and long term at `ltDaysFor`, which is 730 days for an unlisted company. With
@@ -1688,6 +1707,14 @@ export async function generateTrxRegister(
     buyRows: delivery.buyRows + intraday.buyRows + classCg.reduce((s, c) => s + c.em.buyRows, 0),
     sellRows: delivery.sellRows + intraday.sellRows + classCg.reduce((s, c) => s + c.em.sellRows, 0),
     unresolved: [...unresolvedMap.values()], master,
+    // Counted off the master THIS run loaded, not off the sheet - the whole point is to show
+    // what the code saw. `sttOffByKey` only holds keys the emission actually asked about, so
+    // its true entries are exactly the scrips whose STT was blanked on a gains tab.
+    sttFlaggedInMaster: master.entries.filter((e) => e.sttRemoved).length,
+    sttSuppressed: [...sttOffByKey.entries()]
+      .filter(([, off]) => off)
+      .map(([k]) => nameByKey.get(k) || k)
+      .sort((a, b) => a.localeCompare(b)),
     unclassified: unclassifiedSales,
   };
 }

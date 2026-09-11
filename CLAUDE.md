@@ -27,7 +27,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (84) |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, and the "STT Removed" flag (117; 118 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, and fixture H's REAL no-ISIN ledger header (146; 147 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -137,6 +137,18 @@ sites, 11 of which pass `force: true` and skip the 90s cache. That alone produce
 - `invalidateScripCache()` clears the tab list too — otherwise a newly created tab stays invisible.
 - Only **3 of 58** read sites have any backoff at all, and ~40 swallow their errors.
 
+**The 90s master cache is WRONG for a sheet-writing action, and that is not a quota question.**
+The master carries **hand-maintained** classification — the asset-class tabs, `Price Exception`,
+`STT Removed`, aliases — and the owner's workflow is literally *edit the sheet, then click the
+button*. The read-only hot paths keep the cache warm, so an unforced read inside a write action
+returns the master **as it was before the edit**, writes the tab from it, and looks exactly like
+the feature being broken. It is how the first "STT Removed" run came out with STT still on the
+tab, and it is a second, independent reason a scrip-master fix appears to do nothing after
+Rebuild Holding. `generateTrxRegister`, `rebuildHoldingTab` and `syncCapitalGains` therefore pass
+`{ force: true }`; `computeAum`, `computeIndustryAllocation` and `computeHoldingsAsOf` must NOT —
+they fan out over 13 spreadsheets and forcing them is the doom loop again. Both directions are
+asserted in `tmp-trx-run.mjs`, and both were probed by injecting the opposite.
+
 **"STT Removed" (scrip master column).** A truthy cell (`x` / `yes` / `1` / ✓) suppresses STT in
 the nine-column charge block on the capital-gains tabs — marked for ETFs.
 
@@ -148,6 +160,33 @@ charge of any kind has ever entered a P/L. The flag exists because the charge bl
 listing it there states a claim nobody is making. Fixture G proves the point by running one
 fixture twice and diffing: flipping the flag moves the STT column and the expenses total, by the
 same amount, and **nothing else**.
+
+**The suite's True Entry header is NOT the app's.** Every fixture but H feeds a ledger whose
+header carries `ISIN`; the real one, written by `manualTrades.ts` `DEFAULT_HEADER` and `App.tsx`,
+does **not** — it is read as `ci("ISIN", -1)`. So the suite exercised `lookupScrip`'s ISIN-first
+branch while production runs the **name-only** one: the classic shape of a suite that stays green
+while the app fails. **Fixture H** pins the flag on the real header with the owner's own master
+row and figures, plus a control that clears the flag and asserts STT comes BACK — without that
+control the fixture would pass just as happily if nothing were emitted at all.
+
+**The flag fails SILENTLY, so the register reports itself.** A tab that still shows STT looks
+identical whether the master was never read, the scrip never matched, or the tab on screen is not
+one this run wrote. `TrxRegisterResult` therefore carries `sttFlaggedInMaster` (entries carrying
+the flag in the master AS THIS RUN LOADED IT) and `sttSuppressed` (the scrips actually blanked),
+both surfaced on the register badge and its tooltip in `Holdings.tsx` (authored in violet, which
+the theme repaints BRASS — describing it to the owner as "the violet badge" cost a round trip). `0 flagged` means the column
+was never read and the lookup is not even in question; `flagged > 0` with nothing suppressed means
+it was read and the scrip did not match; no STT line at all means the browser is on an **older
+bundle**. Fixture G asserts both numbers in both directions — a diagnostic that lies is worse than
+none, because it sends the next session down the wrong branch.
+
+**Confirmed working on the live sheet, 11-Sep-2026** — the badge read `STT off` and STT left the
+capital-gains tab. The cause of the three failed attempts was a **stale browser bundle**: the
+suppression had been correct in source since the first attempt, and the only behavioural change
+between "still showing STT" and "gone" was a hard reload (the diagnostic itself alters nothing).
+The lesson is the ordering: **before debugging a feature that tests green, establish that the
+running page is the code you edited.** Nothing above was wasted — the forced master read and the
+batched class-tab read are real fixes — but all three diagnoses were of a bug that was not there.
 
 Everything on a gains tab goes through `cgCharges(key, c)`, **including the conservation guard's
 `expect`** — same discipline as `keyHasLtRule`. Drop a charge from the tabs without dropping it

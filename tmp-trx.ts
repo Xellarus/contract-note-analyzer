@@ -753,7 +753,7 @@ export async function run() {
     (tab || []).reduce((sum, r) => sum + (typeof r[c] === 'number' ? r[c] : 0), 0);
 
   install(FIXTURE_G);
-  await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+  const resPlain = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
   const plain = written(CG_TAB);
 
   install(FIXTURE_G);
@@ -761,10 +761,20 @@ export async function run() {
   // If the emission dropped STT but the conservation guard still EXPECTED it, this throws and
   // no register is written at all — the failure CLAUDE.md records twice. So reaching the next
   // line is itself the assertion that both sides were keyed off the same flag.
-  await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+  const resFlagged = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
   const flagged = written(CG_TAB);
 
   ok('the register still writes with a scrip flagged', !!flagged);
+
+  // The DIAGNOSTIC the badge tooltip reports. A diagnostic that lies is worse than none:
+  // it would send the next debugging session down the wrong branch. Both numbers are
+  // asserted in both directions, off the SAME runs the cell-diff above asserts on.
+  eq('diagnostic: no scrip flagged in the unmarked master', resPlain.sttFlaggedInMaster, 0);
+  eq('diagnostic: nothing suppressed in the unmarked run', resPlain.sttSuppressed.length, 0);
+  eq('diagnostic: exactly one scrip flagged in the marked master', resFlagged.sttFlaggedInMaster, 1);
+  ok('diagnostic: the suppressed list names the flagged scrip, and only it',
+    resFlagged.sttSuppressed.length === 1 && /GAMMA/i.test(resFlagged.sttSuppressed[0]),
+    JSON.stringify(resFlagged.sttSuppressed));
 
   const sttCol = colOf(plain, 'STT');
   ok('the gains tab has an STT column to begin with', sttCol >= 0);
@@ -801,6 +811,148 @@ export async function run() {
 
   eq('stamp duty is untouched - it IS deductible under s.48',
     colTotal(flagged, stampCol), colTotal(plain, stampCol));
+  }
+
+  // ── Fixture H. The REAL ledger shape: True Entry has NO ISIN column ─────────
+  //
+  // Every other fixture in this file feeds a True Entry whose header carries "ISIN".
+  // The REAL one does not - `manualTrades.ts` DEFAULT_HEADER and App.tsx both write
+  // `Trade Date | Stock Name | Transaction Type | ...`, and the reader asks for it as
+  // `ci("ISIN", -1)`. So every assertion above exercises the ISIN-FIRST branch of
+  // lookupScrip while production runs the NAME-ONLY one. That is the exact shape of a
+  // suite that stays green while the app fails, so the flag is pinned here on the real
+  // header, with the owner's own scrip-master row and his own figures.
+  {
+    const REAL_TE_HEADER = [
+      'Trade Date', 'Stock Name', 'Transaction Type', 'Number of Shares', 'Avg Price',
+      'Total Amount (Turnover)', 'Total Amount with Expense (Incl STT)', 'Trade Class', 'Notes',
+      'Total Brokerage', 'STT', 'IGST', 'Exchange Turnover Charges', 'Stamp Duty',
+      'SEBI Turnover Fees', 'IPF Charges', 'Demat Charges',
+    ];
+    ok('the real ledger header genuinely carries no ISIN column',
+      REAL_TE_HEADER.indexOf('ISIN') < 0);
+    ok('...unlike the header every other fixture here uses', TE_HEADER.indexOf('ISIN') >= 0);
+
+    const ETF = 'ADITYA BIRLA Sun ETF';
+    const OWNER_MASTER = [
+      ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name', 'Tally Name', 'Price Exception', 'STT Removed'],
+      ['INF209KB19F6', ETF, '', '', 'ADITYA BIRLA', '', '', 'x'],
+      ['INE674K01013', 'ADITYA BIRLA CAPITAL LIMITED', 'ABCAPITAL | 540691', 'ABCAPITAL', '', '', '', ''],
+      ['INE388Y01029', 'ADITYA BIRLA SUN LIFE AMC LIMITED', 'ABSLAMC | 543374', 'ABSLAMC', '', '', '', ''],
+    ];
+    // The owner's actual trades, to the paise. STT is 0.1% of turnover on both sides.
+    const teNoIsin = (d: [number, number, number], type: 'Buy' | 'Sell',
+                      qty: number, price: number, brok: number, stt: number) => [
+      serial(...d), ETF, type, qty, price, qty * price,
+      type === 'Buy' ? qty * price + brok + stt : qty * price - brok - stt,
+      'Delivery', '', brok, stt, 0, 0, 0, 0, 0, 0,
+    ];
+    const FIXTURE_H = [
+      REAL_TE_HEADER,
+      teNoIsin([2025, 6, 6], 'Buy', 50000, 106.62, 2000, 5331.00),
+      teNoIsin([2025, 7, 21], 'Sell', 30355, 113.902127, 1517.75, 3457.50),
+      teNoIsin([2025, 7, 24], 'Sell', 19645, 115.064548, 982.25, 2260.44),
+    ];
+
+    install(FIXTURE_H);
+    g.__ranges[`${SCRIP_MASTER_SPREADSHEET_ID}::'${MASTER_TAB}'!A1:Z50000`] = OWNER_MASTER;
+    // Reaching the next line at all means the conservation guard did NOT fire: the emission
+    // and `expect` agreed about the suppressed STT on the name-only path too.
+    const resH = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const tabH = written(CG_TAB);
+    ok('name-only path: the register writes', !!tabH);
+
+    const sttColH = (() => {
+      for (const r of tabH || []) { const i = r.indexOf('STT'); if (i >= 0) return i; }
+      return -1;
+    })();
+    ok('name-only path: the tab has an STT column', sttColH >= 0);
+
+    const sttCells = (tabH || [])
+      .map((r) => r[sttColH])
+      .filter((v) => typeof v === 'number' && v !== 0);
+    eq('name-only path: NO non-zero STT cell survives anywhere on the tab', sttCells.length, 0);
+
+    eq('name-only path: the master flag is seen', resH.sttFlaggedInMaster, 1);
+    ok('name-only path: the ETF is reported suppressed',
+      resH.sttSuppressed.length === 1 && /ADITYA/i.test(resH.sttSuppressed[0]),
+      JSON.stringify(resH.sttSuppressed));
+    eq('name-only path: the scrip resolved (nothing left unresolved)', resH.unresolved.length, 0);
+
+    // And the control: same ledger, same everything, flag cleared -> STT comes back.
+    const CLEARED = OWNER_MASTER.map((r, i) => (i === 1 ? [...r.slice(0, 7), ''] : r));
+    install(FIXTURE_H);
+    g.__ranges[`${SCRIP_MASTER_SPREADSHEET_ID}::'${MASTER_TAB}'!A1:Z50000`] = CLEARED;
+    const resH2 = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const tabH2 = written(CG_TAB);
+    const sttCells2 = (tabH2 || [])
+      .map((r) => r[sttColH])
+      .filter((v) => typeof v === 'number' && v !== 0);
+    eq('control: with the flag cleared the master reports none flagged', resH2.sttFlaggedInMaster, 0);
+    ok('control: with the flag cleared STT IS present on the tab', sttCells2.length > 0,
+      `found ${sttCells2.length} non-zero STT cells`);
+  }
+
+  // ── I. The sheet-WRITING engines must read the master FORCED ─────────────────
+  //
+  // The master carries hand-maintained classification - the asset-class tabs, "Price Exception",
+  // "STT Removed", aliases - and the owner's workflow is literally "edit the sheet, click the
+  // button". `loadScripMaster` caches for 90s and the read-only hot paths keep that cache warm,
+  // so an unforced read inside a write action returns the master AS IT WAS BEFORE THE EDIT and
+  // writes a tab that ignores it. That is indistinguishable from the feature being broken, and
+  // it is how the first "STT Removed" run came out with STT still on the tab.
+  //
+  // The inverse matters just as much: forcing a READ-ONLY hot path re-opens the read-quota
+  // problem, so those are asserted to stay on the cache.
+  {
+    const fs = await import('node:fs');
+    // Comments stripped first - the rule is stated in a comment beside each call site, so a
+    // naive scan reports its own documentation.
+    const decomment = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' ')).replace(/\/\/[^\n]*/g, '');
+
+    const bodyOf = (src: string, sig: string): string => {
+      const i = src.indexOf(sig);
+      if (i < 0) return '';
+      const end = src.indexOf('\n}', i);
+      return src.slice(i, end < 0 ? src.length : end);
+    };
+
+    const trxSrc = decomment(fs.readFileSync('src/lib/trxRegister.ts', 'utf8'));
+    const hcSrc = decomment(fs.readFileSync('src/lib/holdingsCalc.ts', 'utf8'));
+
+    const CALL = /loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID([^)]*)\)/g;
+    const forcedIn = (body: string) => {
+      const found = [...body.matchAll(CALL)];
+      return { n: found.length, allForced: found.length > 0 && found.every((m) => /force:\s*true/.test(m[1])) };
+    };
+
+    const WRITERS: Array<[string, string, string]> = [
+      ['generateTrxRegister', trxSrc, 'export async function generateTrxRegister('],
+      ['rebuildHoldingTab', hcSrc, 'export async function rebuildHoldingTab('],
+      ['syncCapitalGains', hcSrc, 'export async function syncCapitalGains('],
+    ];
+    for (const [name, src, sig] of WRITERS) {
+      const body = bodyOf(src, sig);
+      ok(`${name}: found in source`, body.length > 0);
+      const r = forcedIn(body);
+      ok(`${name}: loads the master exactly once`, r.n === 1, `found ${r.n}`);
+      ok(`${name}: forces it - a 90s-stale master would write the tab from PRE-EDIT data`, r.allForced);
+    }
+
+    // Read-only hot paths stay cached: these run per portfolio over 13 spreadsheets, and
+    // forcing them is the read-quota doom loop all over again.
+    const READERS: Array<[string, string]> = [
+      ['computeAum', 'export async function computeAum('],
+      ['computeIndustryAllocation', 'export async function computeIndustryAllocation('],
+      ['computeHoldingsAsOf', 'export async function computeHoldingsAsOf('],
+    ];
+    for (const [name, sig] of READERS) {
+      const body = bodyOf(hcSrc, sig);
+      ok(`${name}: found in source`, body.length > 0);
+      ok(`${name}: does NOT force - read-only hot path, must keep the 90s cache`,
+        [...body.matchAll(CALL)].every((m) => !/force:\s*true/.test(m[1])));
+    }
   }
 
   // ── report ────────────────────────────────────────────────────────────────

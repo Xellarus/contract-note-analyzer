@@ -4484,8 +4484,27 @@ export default function Holdings({
                         // would read as though the PE tabs had not been written.
                         ...[trx.result.tabName, trx.result.intradayTabName, trx.result.holdingTabName],
                         ...(trx.result.classTabs || []).flatMap(c => [c.cgTab, c.txnTab].filter(Boolean) as string[]),
-                      ].map(t => `"${t}"`).join(' + ') + ` — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`}>
+                      ].map(t => `"${t}"`).join(' + ') + ` — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`
+                        // "STT Removed" fails silently: the tab just still shows STT. Naming
+                        // both numbers here turns three indistinguishable causes into three
+                        // different readings - 0 flagged means the column was never read,
+                        // flagged-but-none-suppressed means the scrip did not match, and
+                        // suppressed-but-still-visible means the tab on screen is not one of
+                        // the tabs named above.
+                        + `
+STT Removed: ${trx.result.sttFlaggedInMaster} flagged in master`
+                        + (trx.result.sttSuppressed.length
+                          ? `, suppressed on ${trx.result.sttSuppressed.length}: ${trx.result.sttSuppressed.join(', ')}`
+                          : ', suppressed on none')}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
+                        {/* Shown only when the master actually carries the flag, so the badge
+                            stays unchanged for everyone who does not use it. "0 of N" is the
+                            loud case: the column WAS read and the scrip still did not match. */}
+                        {trx.result.sttFlaggedInMaster > 0 && (
+                          <> · STT off: {trx.result.sttSuppressed.length}
+                            {trx.result.sttSuppressed.length === 0 && ` of ${trx.result.sttFlaggedInMaster} flagged`}
+                          </>
+                        )}
                       </span>
                     ) : (
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={trx.error}>✗ Capital Gains failed</span>
