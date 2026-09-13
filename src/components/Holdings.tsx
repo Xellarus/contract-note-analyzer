@@ -2984,9 +2984,16 @@ export default function Holdings({
         const ca = t.corpAction;
         const when = new Date(parseDateStr(t.tradeDate));
         if (ca.role === 'in') {
-          // Acquirer / NewCo: a fresh lot at the carried cost. Its acquisition date is the
-          // ACTION date, so the holding-period clock restarts — the documented trade-off of
-          // typing the cost manually rather than carrying each original lot's date.
+          // Acquirer / NewCo: a lot at the carried cost, dated the ACTION date.
+          //
+          // KNOWN DIVERGENCE, deliberate. Both tax engines now CARRY the parent lots'
+          // acquisition dates through a merger/demerger (s.2(42A) Expl 1(i)(g) and 1(i)(b) -
+          // see `carryLots` in holdingsCalc.ts), so the register and the LTST tab may call
+          // these shares LONG TERM while the badge on this page still counts them short.
+          // This page replays ONE stock: `fetchTransactionsForStock` never loads the parent's
+          // history, so the dates to inherit are not in scope here and reconstructing them
+          // would cost another Sheets read per action on a page that already fans out.
+          // The TAX documents are the authority; this badge is indicative.
           const px = ca.sharesIn > 0 ? ca.cost / ca.sharesIn : 0;
           totalBuyAmount += ca.cost;
           corpFlows.push({ date: when, amount: -ca.cost });
@@ -4021,7 +4028,12 @@ export default function Holdings({
                           // 365 days listed, 730 for an unlisted company (see ltDays).
                           // An undecided rule shows as neither long nor short: the lot is real,
                           // its classification is not ours to invent.
-                          const isLong = lot.isOpening ? !!lot.longTerm : (ltKnown && ageDays > ltDays!);
+                          // `>=`, matching BOTH tax engines (trxRegister.ts:825 and
+                          // holdingsCalc.ts:1507). It read `>` here, so a lot exactly ltDays
+                          // old showed SHORT on screen and LONG on the tax tabs - a one-day
+                          // disagreement that predates the carry-over work and is fixed with it
+                          // so nobody attributes it to the inheritance.
+                          const isLong = lot.isOpening ? !!lot.longTerm : (ltKnown && ageDays >= ltDays!);
 
                           return (
                             <tr key={idx} className="hover:bg-slate-50/50 transition-colors">

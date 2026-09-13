@@ -19,6 +19,7 @@
 import { generateTrxRegister } from './src/lib/trxRegister';
 import { SCRIP_MASTER_SPREADSHEET_ID, invalidateScripCache } from './src/lib/scripMaster';
 import { invalidatePrivateEquityCache } from './src/lib/privateEquities';
+import { carryLots } from './src/lib/holdingsCalc';
 
 // ── tiny assert harness (same shape as the other tmp-* suites) ──────────────
 let passed = 0;
@@ -811,6 +812,106 @@ export async function run() {
 
   eq('stamp duty is untouched - it IS deductible under s.48',
     colTotal(flagged, stampCol), colTotal(plain, stampCol));
+  }
+
+  // ── Fixture J. The holding period CARRIES through a merger / demerger ───────
+  //
+  // s.2(42A) Expl 1(i)(g) (demerger) and 1(i)(b) (s.47(vii) amalgamation): the period the
+  // PARENT's shares were held counts towards the received shares. Until 12-Sep-2026 both
+  // engines stamped the action date, filing a long-term parent's spin-off as short-term.
+  //
+  // The two scenarios are chosen so OLD and NEW behaviour are DISJOINT - there is no overlap
+  // to pass by luck:
+  //   J1 inheritance   GAMMA opening lot 01-Apr-2020, demerged 01-Jun-2025 into DELTA,
+  //                    DELTA sold 01-Aug-2025. Old: 61 days -> SHORT 60,000.
+  //                    New: inherited 2020 date -> LONG 60,000.
+  //   J2 queue order   BETA bought on the market 01-May-2025 500 @ 300; ALPHA (opening lot
+  //                    01-Apr-2019 @ 10) merges into BETA 01-Jun-2025, 500 shares carrying
+  //                    10,000 of basis. BETA 500 sold 01-Jul-2025 @ 400.
+  //                    Old (push -> unsorted queue): eats the May lot, SHORT 50,000.
+  //                    New (insertLotByTs): eats the 2019 lot, LONG 190,000.
+  // So the whole tab is ST 110,000 / LT 0 under the old code and ST 0 / LT 250,000 under the
+  // new one. Fixture C could not see this change at all: its inherited dates land on the same
+  // side of the 365-day line, and it never sells a received security into a pre-existing lot.
+  {
+    const TE_J: any[][] = [
+      TE_HEADER,
+      te([2025, 5, 1], 'BETA MOTORS LIMITED', 'INE002A01018', 'Buy', 500, 300, { brok: 0, stt: 0, gst: 0 }),
+      te([2025, 7, 1], 'BETA MOTORS LIMITED', 'INE002A01018', 'Sell', 500, 400, { brok: 0, stt: 0, gst: 0 }),
+      te([2025, 8, 1], 'DELTA POWER LIMITED', 'INE004A01012', 'Sell', 1000, 80, { brok: 0, stt: 0, gst: 0 }),
+    ];
+    const OPEN_J: any[][] = [
+      ['Security', 'ISIN', 'Acquisition Date', 'Quantity', 'Cost Per Share', 'Total Cost', '', ''],
+      ['GAMMA TECH LIMITED', 'INE003A01015', serial(2020, 4, 1), 1000, 50, 50000, '', ''],
+      ['ALPHA INDUSTRIES LIMITED', 'INE001A01011', serial(2019, 4, 1), 1000, 10, 10000, '', ''],
+    ];
+    const CORP_J: any[][] = [
+      ['Date', 'Type', 'From', 'To', 'Shares In', 'Cost', 'Notes'],
+      ['01/06/2025', 'Demerger', 'GAMMA TECH LIMITED', 'DELTA POWER LIMITED', 1000, 20000, ''],
+      ['01/06/2025', 'Merger', 'ALPHA INDUSTRIES LIMITED', 'BETA MOTORS LIMITED', 500, 10000, ''],
+    ];
+
+    install(TE_J, OPEN_J, CORP_J);
+    // Reaching the next line is itself an assertion: the charge-conservation guard did not fire.
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const tabJ = written(CG_TAB);
+    ok('J: the register writes with carried-over holding periods', !!tabJ);
+
+    const colJ = (h: string) => { for (const r of tabJ || []) { const i = r.indexOf(h); if (i >= 0) return i; } return -1; };
+    const stCol = colJ('Short term'), ltCol = colJ('Long term');
+    ok('J: the tab has both P/L columns', stCol >= 0 && ltCol >= 0, `st=${stCol} lt=${ltCol}`);
+
+    const grand = (tabJ || []).find((r) => String(r[1] ?? '') === 'GRAND TOTAL');
+    ok('J: a GRAND TOTAL row exists', !!grand);
+    const numOf = (v: any) => (typeof v === 'number' ? v : 0);
+
+    // The decisive pair. Under the pre-12-Sep-2026 behaviour these read 110000 / 0.
+    eq('J: NOTHING is short term - both received parcels inherited a long-term parent',
+      numOf(grand?.[stCol]), 0);
+    eq('J: the whole 250,000 lands in LONG TERM (60,000 demerger + 190,000 merger)',
+      numOf(grand?.[ltCol]), 250000);
+  }
+
+  // ── carryLots, directly ─────────────────────────────────────────────────────
+  // The apportionment is shared by all four replay sites, so its edge cases are pinned once
+  // here rather than four times through fixtures that can only observe them indirectly.
+  {
+    const src = [
+      { ts: Date.UTC(2019, 3, 1), qty: 100, cost: 1000 },
+      { ts: Date.UTC(2024, 3, 1), qty: 100, cost: 9000 },
+    ];
+    const out = carryLots(src, 200, 10000, Date.UTC(2025, 5, 1));
+    eq('carryLots: one parcel per parent lot', out.length, 2);
+    eq('carryLots: quantities sum to sharesIn EXACTLY', out.reduce((a, b) => a + b.qty, 0), 200);
+    eq('carryLots: costs sum to the action cost EXACTLY', out.reduce((a, b) => a + b.cost, 0), 10000);
+    eq('carryLots: shares split by QUANTITY', out[0]?.qty, 100);
+    eq('carryLots: cost splits by BASIS SURRENDERED, not by quantity', out[0]?.cost, 1000);
+    // Guarded: a regression that returns FEWER parcels must report as a FAIL, not throw and
+    // abort the run before the report prints (which would hide every assertion after it).
+    ok('carryLots: parcels come back oldest-first for the O(1) insert path',
+      out.length === 2 && out[0].ts < out[1].ts);
+    ok('carryLots: each parcel keeps its parent lot date',
+      out.length === 2 && out[0].ts === src[0].ts && out[1].ts === src[1].ts);
+
+    // Whole share counts: every qty column on the register is formatted INT, so 166.667 would
+    // PRINT as 167 and three of them would foot to 501 under a subtotal of 500.
+    const thirds = carryLots(
+      [{ ts: 1, qty: 1000, cost: 1 }, { ts: 2, qty: 1000, cost: 1 }, { ts: 3, qty: 1000, cost: 1 }],
+      500, 999, 0);
+    ok('carryLots: integer sharesIn yields whole shares', thirds.every((o) => Number.isInteger(o.qty)),
+      JSON.stringify(thirds.map((o) => o.qty)));
+    eq('carryLots: ...that still sum to sharesIn', thirds.reduce((a, b) => a + b.qty, 0), 500);
+    eq('carryLots: ...and costs that still sum exactly', thirds.reduce((a, b) => a + b.cost, 0), 999);
+
+    // NOTHING TO INHERIT FROM. Corporate actions key on NAME only, so an unmatched parent, or a
+    // parent sold out before the action, is reachable - and must not delete the received shares.
+    const none = carryLots([], 300, 7000, 12345);
+    eq('carryLots: empty parent falls back to ONE parcel', none.length, 1);
+    eq('carryLots: ...at the action date', none[0]?.ts, 12345);
+    eq('carryLots: ...keeping every share', none[0]?.qty, 300);
+    eq('carryLots: ...and the whole cost, never dropped', none[0]?.cost, 7000);
+    const sold = carryLots([{ ts: 1, qty: 0, cost: 0 }], 300, 7000, 999);
+    eq('carryLots: a fully-sold parent is the same fallback', sold[0]?.ts, 999);
   }
 
   // ── Fixture H. The REAL ledger shape: True Entry has NO ISIN column ─────────

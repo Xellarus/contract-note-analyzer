@@ -27,7 +27,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (84) |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, and fixture H's REAL no-ISIN ledger header (146; 147 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on (166; 167 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -193,6 +193,48 @@ Everything on a gains tab goes through `cgCharges(key, c)`, **including the cons
 from what is expected on them and the guard sees drift and writes **no register at all**. The
 transaction and holding statements deliberately do NOT go through it: they are a record of what
 was transacted, they are not in the guard's sum, and they must still tie to the contract note.
+
+**A merger / demerger CARRIES the parent's holding period** (changed 12-Sep-2026). s.2(42A)
+Explanation 1(i)(g) includes the period the demerged company's shares were held in the resulting
+company's shares; 1(i)(b) does the same for an amalgamated Indian company under s.47(vii). Both
+engines used to stamp the ACTION date, so a long-term parent's spin-off was filed SHORT term —
+slab instead of 12.5%. `corporateActions.ts` documented that as intended; it was wrong.
+
+`carryLots` (`holdingsCalc.ts`) is the ONE shared apportionment, called from all four replay
+sites: `replayFifoHoldings` (Holding tab / as-of report), `applyMergerFifo` + `applyDemergerFifo`
+(`syncCapitalGains` → LTST), and the register's `ev.kind === "ca"` branch. Rules, each of which
+is a way to get it silently wrong:
+
+- **Quantity splits by QUANTITY, cost by BASIS SURRENDERED.** Different weights on purpose: a
+  parent holding 100 @ 10 and 100 @ 90 gives up ten times more basis from the expensive lot while
+  both earn the same shares, so a uniform per-share rate would migrate basis between the
+  long- and short-term parcels — the exact split this change exists to fix.
+- **Whole shares.** Every qty column is formatted `INT`, so 166.667 PRINTS as 167 and three of
+  them foot to 501 under a subtotal of 500. Integer `sharesIn` is allocated by largest remainder;
+  the last parcel takes the residual so the totals are exact by construction, not by float luck.
+- **Snapshot the weights BEFORE the branch that destroys them.** A merger zeroes `remaining` and
+  a demerger rewrites `purPrice` — read after, every weight is 0 and the apportionment is NaN.
+- **`insertLotByTs`, NEVER `push`.** The parcels now carry OLD dates. Every queue is consumed in
+  ARRAY order, the only sort runs BEFORE the event loop, and `insertLotByTs`'s binary search
+  assumes sorted input — so one surviving `push` mis-places every later buy of that security too.
+  Fixture J catches exactly this.
+- **An empty parent is reachable** — corporate actions key on NAME only (`keyOf("", ca.from)`),
+  and the parent may be sold out or never keyed. `carryLots` falls back to ONE parcel at the
+  action date; returning nothing would delete the received shares and their basis.
+- **Parcels take `ZERO_CHARGES`.** Built field-by-field, never spread from the parent: inheriting
+  its charges double-counts brokerage and the conservation guard writes **no register at all**.
+
+Known, deliberate gaps: the **stock detail page** still dates received lots at the action date —
+it replays ONE stock, so the parent's history is not in scope without another Sheets read; the
+tax tabs are the authority and the divergence is commented there. And **`openingBasis.ts` knows
+only BONUS / SPLIT / RIGHT**, so once an action is old enough to be seeded from Opening Holdings
+rather than replayed, the NewCo carries whatever date the broker statement shows.
+
+Fixture J is the ONLY thing that can see any of this — fixture C's inherited dates land on the
+same side of the 365-day line and it never sells a received security into a pre-existing lot, so
+the suite stayed green either way. J is built so old and new behaviour are DISJOINT
+(ST 110,000 / LT 0 versus ST 0 / LT 250,000) and was probed in both directions: disabling the
+inheritance yields exactly 110,000/0, and swapping `insertLotByTs` back to `push` yields 50,000/60,000.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

@@ -188,6 +188,89 @@ export function insertLotByTs<T>(arr: T[], lot: T, ts: (l: T) => number): void {
   arr.splice(lo, 0, lot);
 }
 
+/**
+ * A parent lot feeding a merger / demerger, and a lot spun off from it.
+ * `cost` on the source is the basis that lot SURRENDERS to the receiving security.
+ */
+export interface CarrySource { ts: number; qty: number; cost: number }
+export interface CarriedLot { ts: number; qty: number; cost: number }
+
+/**
+ * Apportion `sharesIn` / `totalCost` across the lots a merger or demerger draws from, so each
+ * spun-off parcel CARRIES ITS PARENT LOT'S ACQUISITION DATE.
+ *
+ * WHY THE DATE MOVES. s.2(42A) Explanation 1(i)(g): the holding period of shares in the
+ * resulting company on a demerger INCLUDES the period the demerged company's shares were held.
+ * Explanation 1(i)(b) does the same for shares in an amalgamated Indian company received in a
+ * s.47(vii) scheme. Stamping the action date instead — which this app did until 12-Sep-2026 —
+ * files a long-term parent's spin-off as SHORT TERM, at slab instead of 12.5%.
+ *
+ * QUANTITY is apportioned by QUANTITY (the entitlement is per share held) and COST by COST
+ * SURRENDERED (s.49(2C) scales each lot's own basis). Those are different weights on purpose:
+ * a parent holding 100 @ 10 and 100 @ 90 surrenders ten times as much basis from the expensive
+ * lot while both receive the same number of shares, so a uniform per-share rate would migrate
+ * basis between the long- and short-term parcels — the very split this change exists to get right.
+ *
+ * INTEGER SHARES. Every quantity column on the register is formatted INT, so a lot of 166.667
+ * PRINTS as 167 and three of them foot to 501 under a subtotal of 500. Whole `sharesIn` is
+ * therefore allocated by largest remainder; a fractional `sharesIn` (units, not shares) keeps
+ * full precision. Either way the LAST parcel takes the residual, so the totals are exact by
+ * construction rather than by luck of the float.
+ *
+ * NOTHING TO INHERIT FROM is a real, reachable state: corporate actions key on NAME ONLY
+ * (`keyOf("", ca.from)`), the parent may have been sold out before the action date, or the row
+ * may name a scrip the ledger never had. Returning nothing there would delete the received
+ * shares and their basis outright, so it falls back to ONE parcel at the action date — exactly
+ * what this app did before — and the caller surfaces it.
+ *
+ * Returned OLDEST FIRST so callers can feed `insertLotByTs` on its O(1) tail path.
+ */
+export function carryLots(
+  src: CarrySource[], sharesIn: number, totalCost: number, fallbackTs: number,
+): CarriedLot[] {
+  const live = src.filter((l) => l.qty > 1e-9).sort((a, b) => a.ts - b.ts);
+  const Q = live.reduce((s2, l) => s2 + l.qty, 0);
+  if (live.length === 0 || !(Q > 1e-9) || !(sharesIn > 0)) {
+    return [{ ts: fallbackTs, qty: sharesIn, cost: totalCost }];
+  }
+
+  // ── quantity ──
+  let qtys: number[];
+  if (Number.isInteger(sharesIn)) {
+    // Largest remainder: floor every share, then hand the leftover units to the biggest
+    // fractional parts. Σ is sharesIn exactly and every parcel is a whole share.
+    const exact = live.map((l) => (sharesIn * l.qty) / Q);
+    qtys = exact.map(Math.floor);
+    let left = sharesIn - qtys.reduce((s2, q) => s2 + q, 0);
+    const order = exact
+      .map((e, i) => ({ i, frac: e - Math.floor(e) }))
+      .sort((a, b) => b.frac - a.frac);
+    for (let k = 0; left > 0 && k < order.length; k++, left--) qtys[order[k].i]++;
+    // A parent lot too small to earn a whole share drops out entirely; its basis is
+    // redistributed below, so no cost is lost with it.
+  } else {
+    qtys = live.map((l) => (sharesIn * l.qty) / Q);
+    const used = qtys.slice(0, -1).reduce((s2, q) => s2 + q, 0);
+    qtys[qtys.length - 1] = sharesIn - used;
+  }
+
+  const kept = live.map((l, i) => ({ l, qty: qtys[i] })).filter((x) => x.qty > 1e-9);
+  if (kept.length === 0) return [{ ts: fallbackTs, qty: sharesIn, cost: totalCost }];
+
+  // ── cost ──
+  // Weighted by basis surrendered; if the caller has no cost weights (all zero), fall back to
+  // quantity so the total still lands somewhere sensible rather than on one arbitrary parcel.
+  let wTotal = kept.reduce((s2, x) => s2 + Math.max(0, x.l.cost), 0);
+  const weights = wTotal > 1e-9
+    ? kept.map((x) => Math.max(0, x.l.cost) / wTotal)
+    : kept.map((x) => x.qty / kept.reduce((s2, y) => s2 + y.qty, 0));
+
+  const out: CarriedLot[] = kept.map((x, i) => ({ ts: x.l.ts, qty: x.qty, cost: totalCost * weights[i] }));
+  const spent = out.slice(0, -1).reduce((s2, o) => s2 + o.cost, 0);
+  out[out.length - 1].cost = totalCost - spent;   // residual — Σ cost is exact
+  return out;
+}
+
 export function replayFifoHoldings(
   seed: Map<string, FifoSeedLot[]>,
   events: FifoHoldingEvent[],
@@ -238,18 +321,31 @@ export function replayFifoHoldings(
         bump(e.key, e.qty);
       }
     } else if (e.kind === "MERGER") {
-      for (const l of getLots(e.fromKey)) l.remaining = 0;   // target absorbed
+      // The received lots CARRY the target's acquisition dates (see `carryLots`). This engine
+      // reports only qty and cost, so no date of its own reaches a screen - but lot ORDER
+      // decides which lots a later sale consumes, and the parcels now carry OLD dates, so they
+      // must be INSERTED in date order, never pushed. `invested` moves if they are not.
+      const from = getLots(e.fromKey);
+      // Snapshot the weights BEFORE the next line zeroes the very field they are read from.
+      const src = from.map((l) => ({ ts: l.ts, qty: l.remaining, cost: l.remaining * l.price }));
+      for (const l of from) l.remaining = 0;   // target absorbed
       netQty.set(e.fromKey, 0);
-      const px = e.sharesIn > 0 ? e.cost / e.sharesIn : 0;
-      getLots(e.toKey).push({ remaining: e.sharesIn, price: px, ts: e.ts });
+      for (const c of carryLots(src, e.sharesIn, e.cost, e.ts)) {
+        insertLotByTs(getLots(e.toKey),
+          { remaining: c.qty, price: c.qty > 1e-9 ? c.cost / c.qty : 0, ts: c.ts }, (l) => l.ts);
+      }
       bump(e.toKey, e.sharesIn);
-    } else {   // DEMERGER — reduce parent lots' cost, spin off a fresh NewCo lot
+    } else {   // DEMERGER — reduce parent lots' cost, spin off dated parcels
       const a = getLots(e.fromKey);
       const remCost = a.reduce((s, l) => s + l.remaining * l.price, 0);
       const f = remCost > 0 ? Math.max(0, (remCost - e.cost) / remCost) : 1;
+      // Basis each lot SURRENDERS, read before the shrink below consumes it.
+      const src = a.map((l) => ({ ts: l.ts, qty: l.remaining, cost: l.remaining * l.price * (1 - f) }));
       for (const l of a) l.price = l.price * f;
-      const px = e.sharesIn > 0 ? e.cost / e.sharesIn : 0;
-      getLots(e.toKey).push({ remaining: e.sharesIn, price: px, ts: e.ts });
+      for (const c of carryLots(src, e.sharesIn, e.cost, e.ts)) {
+        insertLotByTs(getLots(e.toKey),
+          { remaining: c.qty, price: c.qty > 1e-9 ? c.cost / c.qty : 0, ts: c.ts }, (l) => l.ts);
+      }
       bump(e.toKey, e.sharesIn);
     }
   }
@@ -1282,28 +1378,47 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   deliverySells.sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
 
   // Corporate actions transform the delivery lot queues at their date — a merger
-  // removes Target's lots (no gain) and adds a fresh Acquirer lot at the carried
-  // cost; a demerger reduces Parent's remaining-lot cost and spins off a fresh
-  // NewCo lot. New shares take the action date as acquisition date (holding-period
-  // clock restarts there, per the manual-cost design).
+  // removes Target's lots (no gain) and carries their cost into the Acquirer; a demerger
+  // reduces Parent's remaining-lot cost and spins the surrendered basis off into NewCo.
+  //
+  // The received parcels CARRY THE PARENT LOTS' ACQUISITION DATES (s.2(42A) Expl 1(i)(g) for a
+  // demerger, 1(i)(b) for a s.47(vii) amalgamation) — see `carryLots`. Until 12-Sep-2026 they
+  // were stamped with the action date, which filed a long-term parent's spin-off as short-term.
+  // Because the parcels now carry OLD dates they must be INSERTED in date order: this queue is
+  // consumed in array order, so a push would hand the next sale the wrong lot.
   const corpActions = await loadCorporateActions(spreadsheetId);
+  const carryInto = (key: string, name: string, from: FifoLot[], src: CarrySource[], ca: CorpAction, when: Date) => {
+    if (!fifo[key]) fifo[key] = [];
+    // Keep the PARENT lot's own date string rather than reformatting the timestamp - the ledger
+    // wrote it, and re-deriving it would drift from whatever format that row actually used.
+    const labelOf = new Map<number, string>();
+    for (const l of from) if (!labelOf.has(l.buyDate.getTime())) labelOf.set(l.buyDate.getTime(), l.buyDateStr);
+    for (const c of carryLots(src, ca.sharesIn, ca.cost, when.getTime())) {
+      insertLotByTs(fifo[key], {
+        stockName: name, isin: "", buyDate: new Date(c.ts), buyDateStr: labelOf.get(c.ts) || ca.dateStr,
+        qty: c.qty, remaining: c.qty, purPrice: c.qty > 1e-9 ? r6(c.cost / c.qty) : 0, isOpening: false,
+      }, (l) => l.buyDate.getTime());
+    }
+  };
   const applyMergerFifo = (ca: CorpAction, when: Date) => {
-    for (const lot of (fifo[secKey("", ca.from)] || [])) lot.remaining = 0;
-    const ak = secKey("", ca.to); if (!fifo[ak]) fifo[ak] = [];
-    const px = ca.sharesIn > 0 ? ca.cost / ca.sharesIn : 0;
-    fifo[ak].push({ stockName: ca.to, isin: "", buyDate: when, buyDateStr: ca.dateStr, qty: ca.sharesIn, remaining: ca.sharesIn, purPrice: px, isOpening: false });
+    const lots = fifo[secKey("", ca.from)] || [];
+    // Snapshot BEFORE zeroing — the weights are read from the field the next line clears.
+    const src = lots.map((l) => ({ ts: l.buyDate.getTime(), qty: l.remaining, cost: l.remaining * l.purPrice }));
+    for (const lot of lots) lot.remaining = 0;
+    carryInto(secKey("", ca.to), ca.to, lots, src, ca, when);
   };
   const applyDemergerFifo = (ca: CorpAction, when: Date) => {
     const lots = fifo[secKey("", ca.from)] || [];
     const remCost = lots.reduce((s, l) => s + l.remaining * l.purPrice, 0);
     const factor = remCost > 0 ? Math.max(0, (remCost - ca.cost) / remCost) : 1;
+    // Basis each lot SURRENDERS, read before the shrink consumes it. Quantity is apportioned by
+    // quantity and cost by THIS — different weights on purpose, see `carryLots`.
+    const src = lots.map((l) => ({ ts: l.buyDate.getTime(), qty: l.remaining, cost: l.remaining * l.purPrice * (1 - factor) }));
     // r6, not r2 — see the matching note in trxRegister's demerger branch. Rounding a
     // cost-per-share to paise loses basis in proportion to the quantity. These two must
     // change together or the register and the LTST tab stop agreeing.
     for (const l of lots) l.purPrice = r6(l.purPrice * factor);
-    const nk = secKey("", ca.to); if (!fifo[nk]) fifo[nk] = [];
-    const px = ca.sharesIn > 0 ? ca.cost / ca.sharesIn : 0;
-    fifo[nk].push({ stockName: ca.to, isin: "", buyDate: when, buyDateStr: ca.dateStr, qty: ca.sharesIn, remaining: ca.sharesIn, purPrice: px, isOpening: false });
+    carryInto(secKey("", ca.to), ca.to, lots, src, ca, when);
   };
 
   // A Split subdivides every lot held on its date: qty ×factor, cost/share ÷factor,

@@ -11,8 +11,22 @@ import { ensureSheetTabs } from "./sheetTabs";
  *   • Merger  — total cost carried from `from` (Target) into `to` (Acquirer).
  *   • Demerger — cost moved out of `from` (Parent) into `to` (NewCo); the Parent's
  *     total cost is reduced by exactly this amount.
- * The new (Acquirer / NewCo) shares get a fresh acquisition date at the action
- * date, so their capital-gains holding period restarts there (documented).
+ * HOLDING PERIOD IS INHERITED, not restarted (changed 12-Sep-2026). The received shares carry
+ * the PARENT lots' acquisition dates: s.2(42A) Explanation 1(i)(g) includes the period the
+ * demerged company's shares were held, and 1(i)(b) does the same for shares in an amalgamated
+ * Indian company received in a s.47(vii) scheme. Until that date both engines stamped the action
+ * date, which filed a long-term parent's spin-off as SHORT term - slab instead of 12.5%.
+ * The apportionment lives in one shared helper, `carryLots` in holdingsCalc.ts; quantity is
+ * split by quantity and cost by the basis each lot surrenders.
+ *
+ * A `Merger` row therefore asserts a s.47(vii) scheme - amalgamation into an Indian company,
+ * no cash consideration. The engines already book NO gain on the target, which is the same
+ * assumption; a cash buyout is a SALE and must be entered in the ledger as one, not here.
+ *
+ * KNOWN LIMIT: `openingBasis.ts` rebuilds Opening Holdings from a transaction statement and
+ * knows only BONUS / SPLIT / RIGHT - never these rows. So the inheritance holds for as long as
+ * the action is replayed from this tab; a NewCo whose opening lot is seeded from a broker
+ * statement carries whatever date that statement shows (usually allotment).
  */
 export const CORP_ACTIONS_TAB = "Corporate Actions";
 export type CorpActionType = "Merger" | "Demerger";

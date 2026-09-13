@@ -7,7 +7,7 @@ import {
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from "./privateEquities";
 import { loadCorporateActions, CORP_ACTIONS_TAB } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
-import { UnresolvedScrip, insertLotByTs } from "./holdingsCalc";
+import { UnresolvedScrip, insertLotByTs, carryLots, CarrySource } from "./holdingsCalc";
 import { ledgerSide, isSplitType, isTransferType } from "./tradeRowSchema";
 
 /**
@@ -637,7 +637,12 @@ export async function generateTrxRegister(
 
     if (ev.kind === "ca") {
       const lots = fifo.get(ev.fromKey) || [];
+      // Weights for the parcels handed to the receiving security. SNAPSHOTTED here because both
+      // branches below overwrite the very fields they are read from - the merger zeroes
+      // `remaining` on the next line, and the demerger rewrites `purPrice`.
+      let carrySrc: CarrySource[] = [];
       if (ev.caType === "Merger") {
+        carrySrc = lots.map((l) => ({ ts: l.buyTs, qty: l.remaining, cost: l.remaining * l.purPrice }));
         for (const l of lots) l.remaining = 0;             // target absorbed
       } else {                                             // Demerger: shrink parent cost pro-rata
         const remCost = lots.reduce((s, l) => s + l.remaining * l.purPrice, 0);
@@ -647,12 +652,31 @@ export async function generateTrxRegister(
         // unable to add up to the printed P/L. Cost per share is a RATE, and the project rule
         // is full precision on rates; only money amounts round to paise. Changed in lockstep
         // with syncCapitalGains so the register still equals the LTST tab.
+        // Basis each lot SURRENDERS - read before the shrink consumes it. Quantity is
+        // apportioned by quantity and cost by this; different weights on purpose (`carryLots`).
+        carrySrc = lots.map((l) => ({ ts: l.buyTs, qty: l.remaining, cost: l.remaining * l.purPrice * (1 - factor) }));
         for (const l of lots) { l.purPrice = r6(l.purPrice * factor); l.inclPrice = r6(l.inclPrice * factor); }
       }
-      if (ev.sharesIn > 0) {                               // acquirer / new-co lot at the action date
-        const per = ev.cost / ev.sharesIn;
+      if (ev.sharesIn > 0) {
+        // The received shares CARRY THE PARENT LOTS' ACQUISITION DATES - s.2(42A) Expl 1(i)(g)
+        // for a demerger, 1(i)(b) for a s.47(vii) amalgamation. Until 12-Sep-2026 this stamped
+        // ev.ts, which filed a long-term parent's spin-off as short term.
+        //
+        // INSERTED, never pushed: this queue is consumed in array order (the sale loop below),
+        // the only sort runs BEFORE the event loop, and these parcels now carry OLD dates. A
+        // push would leave the queue unsorted, hand the next sale the wrong lot, and - because
+        // `insertLotByTs`'s binary search assumes sorted input - mis-place every later buy too.
+        //
+        // Built field-by-field rather than spread from the parent: the parcels take ZERO_CHARGES.
+        // Inheriting the parent's charges would count the same brokerage twice, and the
+        // charge-conservation guard would throw rather than write ANY register.
         const arr = fifo.get(ev.toKey) || [];
-        arr.push({ buyTs: ev.ts, qty: ev.sharesIn, remaining: ev.sharesIn, purPrice: per, inclPrice: per, charges: { ...ZERO_CHARGES } });
+        for (const c of carryLots(carrySrc, ev.sharesIn, ev.cost, ev.ts)) {
+          const per = c.qty > 1e-9 ? r6(c.cost / c.qty) : 0;
+          insertLotByTs(arr,
+            { buyTs: c.ts, qty: c.qty, remaining: c.qty, purPrice: per, inclPrice: per, charges: { ...ZERO_CHARGES } },
+            (l) => l.buyTs);
+        }
         fifo.set(ev.toKey, arr);
       }
       if (inFY) {
