@@ -35,6 +35,13 @@ export interface ManualTradeLine {
   gst: number;              // IGST / total GST
   ipf: number;
   notes?: string;           // free-text note (optional) — shown in the Trade Book entry popup
+  /**
+   * Bonus / Split ONLY: the ratio as `N:M`. THE DURABLE FACT - `quantity` is merely what it
+   * came to against the position on the day, so every engine re-derives that quantity from
+   * this and the holding at the action's own date. Without it a bonus keeps the share count it
+   * was born with even after the buys behind it are edited or deleted.
+   */
+  ratio?: string;
 }
 
 export interface AppendManualResult {
@@ -51,7 +58,7 @@ const DEFAULT_HEADER = [
   "Total Amount (Turnover)", "Brokerage Per Share", "Total Brokerage", "STT",
   "Exchange Turnover Charges", "SEBI Turnover Fees", "IPF Charges", "IGST",
   "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)",
-  "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class", "Notes",
+  "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class", "Ratio", "Notes",
 ];
 
 const r2 = (n: number): number => Math.round((Number(n) || 0) * 100) / 100;
@@ -62,7 +69,7 @@ interface RowRecord {
   turnover: number; brokeragePerShare: number; brokerage: number; stt: number;
   exchangeCharges: number; sebiFees: number; ipf: number; gst: number; stampDuty: number;
   totalExpInclSTT: number; totalExpExclSTT: number; totalWithExpInclSTT: number;
-  totalWithExpExclSTT: number; tradeClass: string; notes: string;
+  totalWithExpExclSTT: number; tradeClass: string; ratio: string; notes: string;
 }
 
 function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMaster | null): RowRecord {
@@ -108,6 +115,9 @@ function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMast
     exchangeCharges, sebiFees, ipf, gst, stampDuty, totalExpInclSTT, totalExpExclSTT,
     totalWithExpInclSTT, totalWithExpExclSTT,
     tradeClass: forceDelivery ? "Delivery" : line.tradeClass,
+    // Only a free-share row carries one; writing it on an ordinary buy would invite a reader
+    // to re-derive a quantity that was never a ratio in the first place.
+    ratio: freeShares ? (line.ratio || "").trim() : "",
     notes: (line.notes || "").trim(),
   };
 }
@@ -131,15 +141,20 @@ export async function appendRecordsToTab(spreadsheetId: string, tab: string, rec
   // Auto-append a "Notes" column if a row carries a note and the sheet doesn't have one
   // yet (existing sheets predate the feature). We add the header cell in place — old rows
   // stay blank in that column — so the note lands in the right column on the appended rows.
-  if (!empty && records.some((r) => (r.notes || "").toString().trim() !== "") && !header.some((h) => headerKey(h) === "notes")) {
-    header = [...header, "Notes"];
+  // Same treatment for "Ratio" - existing sheets predate it, and without the column a bonus
+  // silently falls back to its frozen quantity forever.
+  const appendCol = async (title: string, key: string, has: (r: RowRecord) => boolean) => {
+    if (empty || !records.some(has) || header.some((h) => headerKey(h) === key)) return;
+    header = [...header, title];
     await (gapi.client as any).sheets.spreadsheets.values.update({
       spreadsheetId,
       range: `${tab}!${colA1(header.length - 1)}1`,
       valueInputOption: "USER_ENTERED",
-      resource: { values: [["Notes"]] },
+      resource: { values: [[title]] },
     });
-  }
+  };
+  await appendCol("Ratio", "ratio", (r) => (r.ratio || "").toString().trim() !== "");
+  await appendCol("Notes", "notes", (r) => (r.notes || "").toString().trim() !== "");
 
   const rows = mapRecordsToHeader(header, records);
   const payload = empty ? [header, ...rows] : rows;

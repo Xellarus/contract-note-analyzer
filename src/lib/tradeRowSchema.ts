@@ -74,6 +74,46 @@ export const isFreeShareType = (type: string): boolean => /BONUS|SPLIT/i.test(ty
  *  acquisition dates), rather than adding ₹0 shares like a Bonus. */
 export const isSplitType = (type: string): boolean => /SPLIT/i.test(type || "");
 
+/**
+ * The bonus / split RATIO, as stored in the ledger's "Ratio" column - `N:M`.
+ *
+ * WHY IT IS STORED AT ALL. Until 14-Sep-2026 a bonus or split was written as a plain free-share
+ * QUANTITY, computed once from whatever was held when it was typed. Delete an earlier buy and
+ * that number is silently wrong: a 1:2 bonus entered against 579 shares stays 289.5 even after
+ * the 123-share buy that helped produce it is gone. The ratio is the durable fact; the quantity
+ * is a consequence of it and of the position on the day, so it is re-derived at replay time.
+ *
+ * NOT in the Avg Price column, tempting though that is: `parseFloat("1:2")` is **1**, not NaN,
+ * so a ratio parked there reads as one rupee per share to every numeric consumer and prices
+ * free shares. The sheet keeps a numeric 0 there; the UI renders the ratio over it.
+ */
+export interface FreeShareRatio { num: number; den: number }
+
+/** Parse `N:M` (also `N/M`, `N-M`). Null unless BOTH sides are finite and positive. */
+export function parseRatio(raw: any): FreeShareRatio | null {
+  const m = (raw ?? "").toString().trim().match(/^(\d+(?:\.\d+)?)\s*[:/\-]\s*(\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  const num = parseFloat(m[1]), den = parseFloat(m[2]);
+  if (!(num > 0) || !(den > 0)) return null;
+  return { num, den };
+}
+
+/** Canonical `N:M` for storage and display. */
+export const formatRatio = (r: FreeShareRatio): string => `${r.num}:${r.den}`;
+
+/**
+ * Shares ADDED to a holding of `held` by this free-share action.
+ *   Bonus N:M      - N free for every M held            -> held * N/M
+ *   Split new:old  - each `old` share becomes `new`      -> held * (new/old - 1)
+ * Returns 0 for a non-positive holding: a bonus on nothing is nothing, and it must never
+ * divide by or multiply out of a zero position.
+ */
+export function freeSharesFor(txType: string, r: FreeShareRatio, held: number): number {
+  if (!(held > 1e-9)) return 0;
+  const add = isSplitType(txType) ? held * (r.num / r.den - 1) : held * (r.num / r.den);
+  return add > 1e-9 ? add : 0;
+}
+
 /** Map a sheet header cell to a canonical record key (""/none if unrecognised).
  *  Composite "Total …" columns are matched before the single-charge columns
  *  they contain ("incl STT" literally contains "stt"), so totals never land in
@@ -85,6 +125,9 @@ export function headerKey(header: string): string {
   if (/isin/.test(s)) return "isin";
   if (/stock name|security name|company|scrip name/.test(s)) return "name";
   if (/transaction type/.test(s)) return "txType";
+  // Before the qty rule: "Bonus Ratio" would otherwise be caught by nothing, but a future
+  // "Ratio Qty"-style header would. Kept adjacent to txType because it qualifies the type.
+  if (/^ratio$|bonus ratio|split ratio|ratio \(/.test(s)) return "ratio";
   if (/number of shares|no\.? of shares|^shares$|quantity|qty/.test(s)) return "qty";
   if (/brokerage per share|brokerage\s*\/\s*sh/.test(s)) return "brokeragePerShare";
   if (/total brokerage|^brokerage$/.test(s)) return "brokerage";

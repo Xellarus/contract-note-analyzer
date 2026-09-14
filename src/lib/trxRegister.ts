@@ -8,7 +8,7 @@ import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from "./privateEquities"
 import { loadCorporateActions, CORP_ACTIONS_TAB } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
 import { UnresolvedScrip, insertLotByTs, carryLots, CarrySource } from "./holdingsCalc";
-import { ledgerSide, isSplitType, isTransferType } from "./tradeRowSchema";
+import { ledgerSide, isSplitType, isTransferType, parseRatio, freeSharesFor, FreeShareRatio } from "./tradeRowSchema";
 
 /**
  * Financial-year, scrip-wise TRANSACTION LEDGER — a replica of the accountant's
@@ -203,6 +203,11 @@ interface Trade {
   xfer?: boolean;
   /** Free text from the row's Notes column, used to name the counterparty account. */
   note?: string;
+  /** Bonus ONLY: the stored ratio. Its presence makes the share count DERIVED from the
+   *  position held on the bonus's own date, so editing an earlier buy moves it. */
+  freeRatio?: FreeShareRatio | null;
+  /** The raw ledger action, so Bonus (N per M held) is told from Split (new:old). */
+  rawAction?: string;
 }
 
 // A dated cost lot. purPrice = turnover/qty; inclPrice = Incl-STT/qty. Both bases
@@ -345,6 +350,7 @@ export async function generateTrxRegister(
   const typeIdx = findCol(hdrs, "Transaction Type");
   const qtyIdx = findCol(hdrs, "Number of Shares", "Quantity");
   const priceIdx = findCol(hdrs, "Avg Price");
+  const ratioIdx = findCol(hdrs, "Ratio");   // -1 on every sheet written before 14-Sep-2026
   const turnoverIdx = findCol(hdrs, "Total Amount (Turnover)");
   const inclIdx = findCol(hdrs, "Total Amount with Expense (Incl STT)");
   const classIdx = findCol(hdrs, "Trade Class", "Trade Type");
@@ -398,7 +404,9 @@ export async function generateTrxRegister(
   };
 
   const trades: Trade[] = [];
-  const splitRows: { ts: number; key: string; qty: number }[] = [];   // rescale events (kept out of trades)
+  // `freeRatio` present -> the share count is DERIVED from the position on the action's own
+  // date, so editing an earlier trade moves it. Absent on rows written before 14-Sep-2026.
+  const splitRows: { ts: number; key: string; qty: number; freeRatio?: FreeShareRatio | null }[] = [];
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
     if (!r || r.length === 0) continue;
@@ -409,7 +417,7 @@ export async function generateTrxRegister(
     const isin = isinIdx >= 0 ? (r[isinIdx] || "").toString().trim() : "";
     // A Split rescales the held lots (keeps their acquisition dates) — collect it
     // separately and apply as a dated event; it's NOT a buy.
-    if (isSplitType(rawType)) { splitRows.push({ ts: parseDateTs(r[dateIdx]), key: keyOf(isin, name), qty }); continue; }
+    if (isSplitType(rawType)) { splitRows.push({ ts: parseDateTs(r[dateIdx]), key: keyOf(isin, name), qty, freeRatio: ratioIdx >= 0 ? parseRatio(r[ratioIdx]) : null }); continue; }
     // Everything else → a buy/sell SIDE (Bonus/IPO/Rights are buy-side, ₹0/priced add).
     const type = ledgerSide(rawType);
     if (!type) continue;
@@ -423,6 +431,7 @@ export async function generateTrxRegister(
     trades.push({
       ts: parseDateTs(r[dateIdx]), idx: i, key: keyOf(isin, name), name, isin,
       type: type as "BUY" | "SELL", qty, avgPrice, turnover, inclSTT, isIntraday, xfer, note,
+      freeRatio: ratioIdx >= 0 ? parseRatio(r[ratioIdx]) : null, rawAction: rawType,
       charges: {
         brok: num(r, brokIdx), stt: num(r, sttIdx), gst: num(r, gstIdx), et: num(r, etIdx),
         stamp: num(r, stampIdx), sebi: num(r, sebiIdx), ipf: num(r, ipfIdx), dmat: num(r, dmatIdx),
@@ -572,12 +581,12 @@ export async function generateTrxRegister(
   // ── 4. Single chronological replay: buys add lots, CAs transform, sells consume ──
   type Ev =
     | { ts: number; ord: number; idx: number; kind: "trade"; trade: Trade }
-    | { ts: number; ord: number; idx: number; kind: "split"; key: string; qty: number }
+    | { ts: number; ord: number; idx: number; kind: "split"; key: string; qty: number; freeRatio?: FreeShareRatio | null }
     | { ts: number; ord: number; idx: number; kind: "ca"; fromKey: string; toKey: string; caType: "Merger" | "Demerger"; sharesIn: number; cost: number; from: string; to: string };
   const events: Ev[] = [];
   for (const t of trades) if (!pairedIdx.has(t.idx)) events.push({ ts: t.ts, ord: t.type === "BUY" ? 0 : 2, idx: t.idx, kind: "trade", trade: t });
   for (const t of residualTrades) events.push({ ts: t.ts, ord: t.type === "BUY" ? 0 : 2, idx: t.idx, kind: "trade", trade: t });
-  for (const sp of splitRows) events.push({ ts: sp.ts, ord: 1, idx: 1e9, kind: "split", key: sp.key, qty: sp.qty });
+  for (const sp of splitRows) events.push({ ts: sp.ts, ord: 1, idx: 1e9, kind: "split", key: sp.key, qty: sp.qty, freeRatio: sp.freeRatio });
   for (const ca of corpActions) {
     const caTs = parseDateTs(ca.dateStr);
     if (!caTs) {   // undateable action can't be placed in the timeline — skip rather than stamp an epoch-0 lot (which would force LTCG)
@@ -735,8 +744,10 @@ export async function generateTrxRegister(
       // from the split's added qty over the qty actually held → exact.
       const lots = fifo.get(ev.key) || [];
       const held = lots.reduce((s, l) => s + l.remaining, 0);
-      if (held > 1e-9 && ev.qty > 0) {
-        const factor = (held + ev.qty) / held;
+      // new:old off the ratio when the row carries one; otherwise the stored added-quantity.
+      const addQty = ev.freeRatio ? freeSharesFor("Split", ev.freeRatio, held) : ev.qty;
+      if (held > 1e-9 && addQty > 0) {
+        const factor = (held + addQty) / held;
         for (const l of lots) { l.qty *= factor; l.remaining *= factor; l.purPrice = l.purPrice / factor; l.inclPrice = l.inclPrice / factor; }
         if (inFY) {
           touch(ev.key, ev.ts);
@@ -752,6 +763,17 @@ export async function generateTrxRegister(
 
     const t = ev.trade;
     if (t.type === "BUY") {
+      // A BONUS carrying a ratio re-derives its share count from the position held on its OWN
+      // date, so deleting or editing an earlier buy moves it instead of leaving the number it
+      // was born with. Written back onto `t` deliberately and BEFORE anything reads `t.qty`:
+      // the lot, the printed purchase row and the transaction statement are all built from it,
+      // and each trade is visited exactly once, at the only moment the position is known.
+      if (t.freeRatio) {
+        const heldNow = (fifo.get(t.key) || []).reduce((s2, l) => s2 + Math.max(0, l.remaining), 0);
+        const derived = freeSharesFor(t.rawAction || "Bonus", t.freeRatio, heldNow);
+        if (!(derived > 0)) continue;   // a bonus on nothing is nothing
+        t.qty = derived;
+      }
       const purPrice = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
       const inclPrice = t.qty > 0 && t.inclSTT > 0 ? t.inclSTT / t.qty : purPrice;
       const arr = fifo.get(t.key) || [];

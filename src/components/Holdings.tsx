@@ -31,7 +31,7 @@ import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
 import { useRowNav } from '../lib/rowNav';
 import { onShortcut, HOLDINGS_SEARCH_ID } from '../lib/shortcuts';
-import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount } from '../lib/tradeRowSchema';
+import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount, isFreeShareType, parseRatio, formatRatio, freeSharesFor, FreeShareRatio } from '../lib/tradeRowSchema';
 import { TransferHoldingModal } from './TransferHoldingModal';
 import { formatDMY, formatDMYTime } from '../lib/dates';
 import ScripReviewModal from './ScripReviewModal';
@@ -512,6 +512,14 @@ export default function Holdings({
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
   // True Entry header row for the current drill-down (maps field → column when writing an edit).
   const [trueEntryHeaders, setTrueEntryHeaders] = useState<string[]>([]);
+  /** The bonus/split RATIO off a ledger row, or null. The ratio is the durable fact: the share
+   *  count is re-derived from it and from the position on the action's own date, so editing an
+   *  earlier trade moves it. Absent on rows written before 14-Sep-2026, which keep their qty. */
+  const rowRatio = (t: Transaction): FreeShareRatio | null => {
+    if (!isFreeShareType(t.transactionType)) return null;
+    const i = trueEntryHeaders.indexOf('Ratio');
+    return i >= 0 ? parseRatio((t.rawRow || [])[i]) : null;
+  };
   // "Edit Entry" popup state.
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   // Trade Book row whose bifurcated expenses are shown in the breakdown popup (view mode).
@@ -3019,8 +3027,11 @@ export default function Holdings({
         // Split: subdivide the held lots (qty ×factor, cost/share ÷factor), keeping each
         // lot's acquisition date — NOT a ₹0 add on the split date.
         const held = activeInventory.reduce((s, l) => s + l.remainingQty, 0);
-        if (held > 1e-9 && t.quantity > 0) {
-          const f = (held + t.quantity) / held;
+        // new:old off the ratio when the row carries one; otherwise the stored added-quantity.
+        const sr = rowRatio(t);
+        const addQty = sr ? freeSharesFor(t.transactionType, sr, held) : t.quantity;
+        if (held > 1e-9 && addQty > 0) {
+          const f = (held + addQty) / held;
           for (const l of activeInventory) { l.quantity *= f; l.remainingQty *= f; l.price = l.price / f; }
         }
         continue;
@@ -3034,10 +3045,14 @@ export default function Holdings({
         // opening lot has no rawRow and falls back to its carried cost per share.
         const inclIdx = trueEntryHeaders.indexOf("Total Amount with Expense (Incl STT)");
         const inclAmt = t.rawRow && inclIdx >= 0 ? Number(t.rawRow[inclIdx]) : NaN;
+        // A BONUS carrying a ratio re-derives its share count from what is held on its own date.
+        const br = rowRatio(t);
+        const heldNow = activeInventory.reduce((s2, l) => s2 + Math.max(0, l.remainingQty), 0);
+        const bq = br ? freeSharesFor(t.transactionType, br, heldNow) : t.quantity;
         activeInventory.push({
           date: t.tradeDate,
-          quantity: t.quantity,
-          remainingQty: t.quantity,
+          quantity: bq,
+          remainingQty: bq,
           price: t.price,
           inclPrice: t.quantity > 0 && isFinite(inclAmt) && inclAmt > 0 ? inclAmt / t.quantity : t.price,
           isOpening: t.isOpening,
@@ -3948,9 +3963,13 @@ export default function Holdings({
                                   : isDiv ? '0' : formatNum(t.quantity)}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono text-slate-500">
+                                {/* A Bonus/Split has no price, and ₹0.00 said nothing. Show the
+                                    RATIO it was entered as — which is also the number the engines
+                                    now re-derive its quantity from. Pre-14-Sep-2026 rows carry no
+                                    ratio and still show their price. */}
                                 {isDiv || (t.corpAction && t.corpAction.role === 'out') ? '—'
-                                  : t.openingAction ? (t.price > 0 ? formatINR(t.price) : '—')
-                                  : formatINR(t.price)}
+                                  : (() => { const r = rowRatio(t); return r ? formatRatio(r) : null; })()
+                                    || (t.openingAction ? (t.price > 0 ? formatINR(t.price) : '—') : formatINR(t.price))}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-800">
                                 {t.openingAction ? '—' : formatINR(t.amount)}

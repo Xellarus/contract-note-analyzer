@@ -460,6 +460,10 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
         stampDuty: num(l.stampDuty),
         gst: num(l.gst),
         ipf: pe ? 0 : num(l.ipf),
+        // The RATIO is the durable fact for a bonus / split; `quantity` above is only what it
+        // came to against today's holding, and every engine re-derives that from this.
+        ratio: isFreeShares(l.action) && num(l.ratioNum) > 0 && num(l.ratioDen) > 0
+          ? `${num(l.ratioNum)}:${num(l.ratioDen)}` : undefined,
         notes: l.notes.trim(),
       };
     };

@@ -27,7 +27,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (84) |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on (166; 167 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor` (180; 181 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -235,6 +235,39 @@ same side of the 365-day line and it never sells a received security into a pre-
 the suite stayed green either way. J is built so old and new behaviour are DISJOINT
 (ST 110,000 / LT 0 versus ST 0 / LT 250,000) and was probed in both directions: disabling the
 inheritance yields exactly 110,000/0, and swapping `insertLotByTs` back to `push` yields 50,000/60,000.
+
+**A BONUS / SPLIT stores its RATIO, and the share count is derived** (changed 14-Sep-2026).
+Until then only the resulting quantity reached the sheet — `AddTradeModal` computed it from the
+ratio and whatever was held at the moment of typing, and said so: *"written to `qty`, which stays
+the source of truth on save"*. Delete an earlier buy and that number is silently wrong: a 1:2
+bonus entered against 579 shares stays 289.5 forever, even after the 123-share buy behind it is
+gone. The ratio is the durable fact; the quantity is a consequence of it and of the position on
+the day, so every engine now re-derives it at the action's OWN date.
+
+- `parseRatio` / `freeSharesFor` in `tradeRowSchema.ts` are the single definition. **Bonus N:M**
+  adds `held × N/M`; **Split new:old** adds `held × (new/old − 1)`. Both return 0 on a
+  non-positive holding — a bonus on nothing is nothing.
+- Stored in a **`Ratio` column** on True Entry, auto-appended on first write exactly as `Notes`
+  already is, so existing sheets gain it without migration.
+- **NOT in the Avg Price column**, tempting as that was: `parseFloat("1:2")` is **1**, not NaN, so
+  a ratio parked there reads as one rupee per share to every numeric consumer and prices free
+  shares. The sheet keeps a numeric 0; the trade book RENDERS the ratio over it.
+- **A row with no ratio keeps its stored quantity, unchanged.** Every sheet written before this
+  change has none, and re-deriving those retroactively would move already-filed numbers.
+- Five replay sites read it and each must derive at the point the position is known:
+  `replayFifoHoldings` (both builders — Holding tab and the as-of report), `syncCapitalGains`'s
+  FIFO (`applySplitFifo` and the BUY branch), the register's `split` event and BUY branch, and
+  the stock detail page. The register writes the derived quantity back onto the `Trade` BEFORE
+  anything reads it, because the lot, the printed purchase row and the transaction statement are
+  all built from that one field.
+- The BUY-branch guard is `continue`, **never `return`** — those loops are plain `for...of` over
+  every dated event, so a `return` abandons the whole replay from the first bonus on an empty
+  position. It typechecks perfectly.
+
+Fixture K is the ledger from the owner's own report — 456 held, a bonus row still carrying its
+stale 289.5, and a 1:2 ratio — and asserts 228. Its control strips the `Ratio` column and asserts
+289.5 survives. Probed by making `parseRatio` always return null: K then reports exactly 745.5,
+the stale figure, and the control still passes.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

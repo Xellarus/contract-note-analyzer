@@ -20,6 +20,7 @@ import { generateTrxRegister } from './src/lib/trxRegister';
 import { SCRIP_MASTER_SPREADSHEET_ID, invalidateScripCache } from './src/lib/scripMaster';
 import { invalidatePrivateEquityCache } from './src/lib/privateEquities';
 import { carryLots } from './src/lib/holdingsCalc';
+import { parseRatio, freeSharesFor } from './src/lib/tradeRowSchema';
 
 // ── tiny assert harness (same shape as the other tmp-* suites) ──────────────
 let passed = 0;
@@ -812,6 +813,75 @@ export async function run() {
 
   eq('stamp duty is untouched - it IS deductible under s.48',
     colTotal(flagged, stampCol), colTotal(plain, stampCol));
+  }
+
+  // ── Fixture K. A BONUS re-derives its share count from the position on its own date ──
+  //
+  // The owner's case: buy 123, buy 456, take a 1:2 bonus (=289.5 free), then DELETE the 123.
+  // The bonus used to keep 289.5 forever, because only the resulting quantity was ever stored.
+  // The ledger below is exactly that book AFTER the deletion - 456 held, and a bonus row still
+  // carrying its stale 289.5 - plus a `Ratio` of 1:2. The derived answer is 456/2 = 228.
+  //
+  // The control run is the same ledger with the Ratio column REMOVED: it must still produce
+  // 289.5, because every sheet written before 14-Sep-2026 has no ratio and rewriting those
+  // retroactively would change filed numbers.
+  {
+    const HDR_R = [
+      'Trade Date', 'Stock Name', 'ISIN', 'Transaction Type', 'Number of Shares', 'Avg Price',
+      'Total Amount (Turnover)', 'Total Amount with Expense (Incl STT)', 'Trade Class', 'Notes',
+      'Total Brokerage', 'STT', 'IGST', 'Exchange Turnover Charges', 'Stamp Duty',
+      'SEBI Turnover Fees', 'IPF Charges', 'Demat Charges', 'Ratio',
+    ];
+    const row = (d: [number, number, number], type: string, qty: number, price: number, ratio: string) => [
+      serial(...d), 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', type, qty, price,
+      qty * price, qty * price, 'Delivery', '', 0, 0, 0, 0, 0, 0, 0, 0, ratio,
+    ];
+    const STALE = 289.5;          // 1:2 of (123 + 456), from before the 123 was deleted
+    const DERIVED = 228;          // 1:2 of the 456 that actually remains
+    const FIXTURE_K = [
+      HDR_R,
+      row([2025, 5, 1], 'Buy', 456, 100, ''),
+      row([2025, 6, 1], 'Bonus', STALE, 0, '1:2'),
+    ];
+
+    /** Total of the PURCHASE quantity column. Located from the GROUP header row so it cannot
+     *  be confused with the identically-labelled opening/sales qty columns. */
+    const purchaseQty = (tab: any[][] | undefined): number => {
+      const grp = (tab || []).findIndex((r) => r.indexOf('PURCHASE') >= 0);
+      if (grp < 0) return NaN;
+      const c = (tab || [])[grp].indexOf('PURCHASE') + 1;   // DATE, NO OF SHARE, RATE, AMOUNT
+      return (tab || []).reduce((sum, r, i) => sum + (i > grp + 1 && typeof r[c] === 'number' ? r[c] : 0), 0);
+    };
+
+    install(FIXTURE_K);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    eq('K: the bonus re-derives from what is actually held (456 -> 228), not its stale 289.5',
+      purchaseQty(written(CG_TAB)), 456 + DERIVED);
+
+    // Control: the SAME ledger with no Ratio column at all.
+    const noRatio = FIXTURE_K.map((r) => r.slice(0, HDR_R.length - 1));
+    install(noRatio);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    eq('K control: with no ratio stored, the frozen quantity still stands (no history rewrite)',
+      purchaseQty(written(CG_TAB)), 456 + STALE);
+  }
+
+  // ── parseRatio / freeSharesFor, directly ───────────────────────────────────
+  {
+    ok('parseRatio reads N:M', JSON.stringify(parseRatio('1:2')) === JSON.stringify({ num: 1, den: 2 }));
+    ok('parseRatio tolerates spacing and / and -', !!parseRatio(' 3 / 4 ') && !!parseRatio('3-4'));
+    eq('parseRatio rejects a bare number - "1" is not a ratio', parseRatio('1'), null);
+    eq('parseRatio rejects a zero denominator', parseRatio('1:0'), null);
+    eq('parseRatio rejects prose', parseRatio('one for two'), null);
+    // The trap that kept the ratio OUT of the Avg Price column.
+    eq('...and parseFloat would have read "1:2" as the number 1', parseFloat('1:2'), 1);
+
+    eq('Bonus 1:2 on 456 adds half', freeSharesFor('Bonus', { num: 1, den: 2 }, 456), 228);
+    eq('Bonus 1:1 on 100 doubles the holding', freeSharesFor('Bonus', { num: 1, den: 1 }, 100), 100);
+    eq('Split 2:1 on 100 ADDS 100 (each old becomes two)', freeSharesFor('Split', { num: 2, den: 1 }, 100), 100);
+    eq('Split 5:1 on 100 adds 400', freeSharesFor('Split', { num: 5, den: 1 }, 100), 400);
+    eq('a bonus on nothing is nothing', freeSharesFor('Bonus', { num: 1, den: 2 }, 0), 0);
+    eq('a bonus on a NEGATIVE position is nothing', freeSharesFor('Bonus', { num: 1, den: 2 }, -50), 0);
   }
 
   // ── Fixture J. The holding period CARRIES through a merger / demerger ───────

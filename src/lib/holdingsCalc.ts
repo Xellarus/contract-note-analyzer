@@ -13,7 +13,7 @@ import { loadOpeningHoldings } from "./openingHoldings";
 import { loadOpeningTxns } from "./openingTxns";
 import { loadOpeningCorpActions } from "./openingCorpActions";
 import { replayOpeningTxnsAsOf, classifyTxn, TxnStatementRow, ActionResolution } from "./openingBasis";
-import { ledgerSide, isSplitType, isTransferType } from "./tradeRowSchema";
+import { ledgerSide, isSplitType, isTransferType, parseRatio, freeSharesFor, FreeShareRatio } from "./tradeRowSchema";
 
 export interface UnresolvedScrip {
   name: string;
@@ -85,6 +85,11 @@ interface ReplayTrade {
    *  replay moves the shares, but is flagged so the same-day square-off leaves it
    *  alone - a transfer is not a round-trip leg. */
   xfer?: boolean;
+  /** Bonus / Split ONLY: the stored ratio, when the row carries one. Its presence makes the
+   *  share count DERIVED from the position on the action's date rather than read off the row. */
+  freeRatio?: FreeShareRatio | null;
+  /** The raw ledger action, so Bonus (N per M held) and Split (new:old) are told apart. */
+  rawType?: string;
 }
 
 /**
@@ -155,9 +160,13 @@ export function squareOffIntraday(trades: ReplayTrade[], keyOf: (t: ReplayTrade)
 // old weighted-average path, instead of being silently clamped.
 export interface FifoSeedLot { qty: number; price: number; ts: number; }
 export type FifoHoldingEvent =
-  | { kind: "BUY"; key: string; ts: number; qty: number; price: number }
+  // `freeRatio` marks a BONUS (on BUY) or SPLIT whose share count is DERIVED, not stored:
+  // the quantity is recomputed from the position held on the action's own date, so editing or
+  // deleting an earlier trade moves it. Absent on every row written before 14-Sep-2026, and on
+  // those the stored `qty` still stands - changing that retroactively would rewrite history.
+  | { kind: "BUY"; key: string; ts: number; qty: number; price: number; freeRatio?: FreeShareRatio; freeType?: string }
   | { kind: "SELL"; key: string; ts: number; qty: number }
-  | { kind: "SPLIT"; key: string; ts: number; qty: number }
+  | { kind: "SPLIT"; key: string; ts: number; qty: number; freeRatio?: FreeShareRatio }
   | { kind: "MERGER"; ts: number; fromKey: string; toKey: string; sharesIn: number; cost: number }
   | { kind: "DEMERGER"; ts: number; fromKey: string; toKey: string; sharesIn: number; cost: number };
 export interface FifoHoldingOut { netQty: number; invested: number; }
@@ -300,9 +309,11 @@ export function replayFifoHoldings(
       // stays equal to netQty and invested isn't inflated by phantom shares. (Matches the old
       // weighted-avg path, which reset cost to the buy price when a buy crossed back above 0.)
       const cur = netQty.get(e.key) || 0;
-      const rem = cur < 0 ? Math.max(0, e.qty + cur) : e.qty;
+      // A BONUS carrying a ratio re-derives its share count from what is held ON ITS OWN DATE.
+      const qty = e.freeRatio ? freeSharesFor(e.freeType || "Bonus", e.freeRatio, cur) : e.qty;
+      const rem = cur < 0 ? Math.max(0, qty + cur) : qty;
       insertLotByTs(getLots(e.key), { remaining: rem, price: e.price, ts: e.ts }, (l) => l.ts);
-      bump(e.key, e.qty);
+      bump(e.key, qty);
     } else if (e.kind === "SELL") {
       let left = e.qty;
       for (const l of getLots(e.key)) {
@@ -315,10 +326,13 @@ export function replayFifoHoldings(
     } else if (e.kind === "SPLIT") {
       const a = getLots(e.key);
       const held = a.reduce((s, l) => s + l.remaining, 0);
-      if (held > 1e-9 && e.qty > 0) {
-        const f = (held + e.qty) / held;   // total cost preserved: qty ×f, cost/share ÷f
+      // new:old straight off the ratio when the row carries one; otherwise the stored
+      // added-quantity, exactly as before.
+      const add = e.freeRatio ? freeSharesFor("Split", e.freeRatio, held) : e.qty;
+      if (held > 1e-9 && add > 0) {
+        const f = (held + add) / held;     // total cost preserved: qty ×f, cost/share ÷f
         for (const l of a) { l.remaining *= f; l.price = l.price / f; }
-        bump(e.key, e.qty);
+        bump(e.key, add);
       }
     } else if (e.kind === "MERGER") {
       // The received lots CARRY the target's acquisition dates (see `carryLots`). This engine
@@ -508,6 +522,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     const col = (name: string, fallback: number) => { const i = hdrs.indexOf(name); return i >= 0 ? i : fallback; };
     const dateIdx = col("Trade Date", 0), isinIdx = col("ISIN", -1), nameIdx = col("Stock Name", 2);
     const typeIdx = col("Transaction Type", 3), qtyIdx = col("Number of Shares", 4), priceIdx = col("Avg Price", 5);
+    const ratioIdx = col("Ratio", -1);   // absent on every sheet written before 14-Sep-2026
     const turnoverIdx = col("Total Amount (Turnover)", 6);
     const inclIdx = col("Total Amount with Expense (Incl STT)", 15);
 
@@ -534,7 +549,8 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
         ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
         : avgPrice;
       if (type === "BUY" && isNaN(price)) continue;
-      trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price, xfer });
+      trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price, xfer,
+        freeRatio: ratioIdx >= 0 ? parseRatio(r[ratioIdx]) : null, rawType: (r[typeIdx] || "").toString() });
     }
     trades.sort((a, b) => (a.ts - b.ts) || (a.idx - b.idx));
 
@@ -548,8 +564,8 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
         // FIFO: collect events; the replay + survivors are computed in the aggregation below.
         resolve(t.isin, t.name);   // register display name/ISIN
         const key = keyFor(t.isin, t.name);
-        if (t.type === "BUY") fifoEvents.push({ kind: "BUY", key, ts: t.ts, qty: t.qty, price: t.price });
-        else if (t.type === "SPLIT") fifoEvents.push({ kind: "SPLIT", key, ts: t.ts, qty: t.qty });
+        if (t.type === "BUY") fifoEvents.push({ kind: "BUY", key, ts: t.ts, qty: t.qty, price: t.price, freeRatio: t.freeRatio || undefined, freeType: t.rawType });
+        else if (t.type === "SPLIT") fifoEvents.push({ kind: "SPLIT", key, ts: t.ts, qty: t.qty, freeRatio: t.freeRatio || undefined });
         else fifoEvents.push({ kind: "SELL", key, ts: t.ts, qty: t.qty });
         continue;
       }
@@ -673,6 +689,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   const isinIdx = col("ISIN", -1);
   const nameIdx = col("Stock Name", 2);
   const typeIdx = col("Transaction Type", 3);
+  const ratioIdx = col("Ratio", -1);   // absent on every sheet written before 14-Sep-2026
   const qtyIdx = col("Number of Shares", 4);
   const priceIdx = col("Avg Price", 5);
   const turnoverIdx = col("Total Amount (Turnover)", 6);
@@ -683,7 +700,7 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   // `price` is the all-in COST used for the weighted average. `rawPrice` is the price the
   // trade actually happened at - a different number for a buy (cost includes STT and
   // brokerage) and the only one that means anything as a "last traded at".
-  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; rawPrice: number; xfer?: boolean; }
+  interface TradeRow { ts: number; idx: number; isin: string; name: string; type: string; qty: number; price: number; rawPrice: number; xfer?: boolean; freeRatio?: FreeShareRatio | null; rawType?: string; }
   const trades: TradeRow[] = [];
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
@@ -716,6 +733,8 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
       price: isNaN(price) ? 0 : price,
       rawPrice: isNaN(avgPrice) ? 0 : avgPrice,
       xfer,
+      freeRatio: ratioIdx >= 0 ? parseRatio(r[ratioIdx]) : null,
+      rawType: (r[typeIdx] || "").toString(),
     });
   }
   if (trades.length === 0) throw new Error("True Entry has no parseable Buy/Sell rows.");
@@ -793,8 +812,8 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   for (const t of playable) {
     resolve(t.isin, t.name);
     const key = keyOf(t);
-    if (t.type === "BUY") fifoEvents.push({ kind: "BUY", key, ts: t.ts, qty: t.qty, price: t.price });
-    else if (t.type === "SPLIT") fifoEvents.push({ kind: "SPLIT", key, ts: t.ts, qty: t.qty });
+    if (t.type === "BUY") fifoEvents.push({ kind: "BUY", key, ts: t.ts, qty: t.qty, price: t.price, freeRatio: t.freeRatio || undefined, freeType: t.rawType });
+    else if (t.type === "SPLIT") fifoEvents.push({ kind: "SPLIT", key, ts: t.ts, qty: t.qty, freeRatio: t.freeRatio || undefined });
     else fifoEvents.push({ kind: "SELL", key, ts: t.ts, qty: t.qty });
   }
   for (const ca of corpActions) {
@@ -1263,12 +1282,13 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
 
   const hdrs = teRows[0].map((h: any) => h.toString().trim());
   const ci = (n: string) => hdrs.indexOf(n);
+  const ratioIdx = ci("Ratio");   // -1 on every sheet written before 14-Sep-2026
   const dateIdx = ci("Trade Date"), isinIdx = ci("ISIN"), nameIdx = ci("Stock Name");
   const typeIdx = ci("Transaction Type"), qtyIdx = ci("Number of Shares");
   const avgPriceIdx = ci("Avg Price"), turnoverIdx = ci("Total Amount (Turnover)");
   const tradeClassIdx = ci("Trade Class");
 
-  interface TERow { tradeDate: string; dateObj: Date; isin: string; stockName: string; txType: string; qty: number; avgPrice: number; turnover: number; tradeClass: string; }
+  interface TERow { tradeDate: string; dateObj: Date; isin: string; stockName: string; txType: string; qty: number; avgPrice: number; turnover: number; tradeClass: string; freeRatio?: FreeShareRatio | null; rawAction?: string; }
   const teData: TERow[] = [];
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i]; if (!r || r.length === 0) continue;
@@ -1297,7 +1317,8 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     const avgPrice = (turnover > 0 && qty > 0) ? turnover / qty : rawAvg;
     const tradeClass = (tradeClassIdx >= 0 ? (r[tradeClassIdx] || "Delivery") : "Delivery").toString().trim();
     if (!stockName || qty <= 0) continue;
-    teData.push({ tradeDate, dateObj, isin, stockName, txType, qty, avgPrice, turnover, tradeClass });
+    teData.push({ tradeDate, dateObj, isin, stockName, txType, qty, avgPrice, turnover, tradeClass,
+      freeRatio: ratioIdx >= 0 ? parseRatio(r[ratioIdx]) : null, rawAction: rawType });
   }
 
   // ── Step 2: Build FIFO queues (delivery) + intraday day-queues, purely from
@@ -1429,8 +1450,11 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
   const applySplitFifo = (sp: TERow) => {
     const lots = fifo[secKey(sp.isin, sp.stockName)] || [];
     const held = lots.reduce((s, l) => s + l.remaining, 0);
-    if (held <= 1e-9 || sp.qty <= 0) return;   // a split on nothing → no-op
-    const factor = (held + sp.qty) / held;
+    // new:old off the ratio when the row carries one, so editing an earlier buy moves the
+    // split with it; otherwise the stored added-quantity, exactly as before.
+    const add = sp.freeRatio ? freeSharesFor("Split", sp.freeRatio, held) : sp.qty;
+    if (held <= 1e-9 || add <= 0) return;   // a split on nothing → no-op
+    const factor = (held + add) / held;
     for (const l of lots) { l.qty *= factor; l.remaining *= factor; l.purPrice = l.purPrice / factor; }
   };
 
@@ -1451,8 +1475,15 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
     if (ev.buy) {
       const buy = ev.buy;
       const key = secKey(buy.isin, buy.stockName); if (!fifo[key]) fifo[key] = [];
+      // A BONUS carrying a ratio re-derives its share count from what is held on its own date,
+      // so deleting or editing an earlier buy moves it instead of leaving a frozen number.
+      const held = (fifo[key] || []).reduce((s2, l) => s2 + l.remaining, 0);
+      const bq = buy.freeRatio ? freeSharesFor(buy.rawAction || "Bonus", buy.freeRatio, held) : buy.qty;
+      // `continue`, NOT `return`: this is a plain for-of over every dated event, so a return
+      // here would abandon the whole replay from the first bonus on an empty position.
+      if (buy.freeRatio && !(bq > 0)) continue;   // a bonus on nothing is nothing
       insertLotByTs(fifo[key],
-        { stockName: buy.stockName, isin: buy.isin, buyDate: buy.dateObj, buyDateStr: buy.tradeDate, qty: buy.qty, remaining: buy.qty, purPrice: buy.avgPrice, isOpening: false },
+        { stockName: buy.stockName, isin: buy.isin, buyDate: buy.dateObj, buyDateStr: buy.tradeDate, qty: bq, remaining: bq, purPrice: buy.avgPrice, isOpening: false },
         (l) => l.buyDate.getTime());
     } else if (ev.split) {
       applySplitFifo(ev.split);
