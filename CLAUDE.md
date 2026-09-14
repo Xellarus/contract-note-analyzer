@@ -27,12 +27,13 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (84) |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor` (180; 181 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, and the legacy holding tab being RENAMED rather than orphaned (209; 210 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
 | `node tmp-holdings-sort.mjs` | Sort order: the holdings grid (default biggest-first, click direction, tiebreaks) **and** the Portfolios page cards, incl. a guard that `PORTFOLIOS` is never sorted in place (19). Reads the comparators OUT of `Holdings.tsx`, so it fails if the source drifts — and needs no `ROOT` edit |
 | `node tmp-transfer-run.mjs` | Cross-portfolio transfer: FIFO, cost carryover, no gain realised (83) |
+| `node tmp-opening-import-run.mjs` | Per-stock opening-trades import: header detection (incl. the template's own Instructions tab NOT matching, and a bare `Amount` never adopted as turnover), Excel date serials, the foreign-security rejection, the duplicate guard, the FIFO-order warning, and the **additive merge** — plus fixture H, which BUILDS the shipped .xlsx template and reads it straight back through the shipped reader (71) |
 | `node tmp-axis-run.mjs` | Axis Securities parser (68) |
 | `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
@@ -91,6 +92,42 @@ class** — `Capital Gains for FY..` is **LISTED ONLY**; PE and AIF each get
 gains tab (no holding-period rule). A sale appears on exactly **one** tab — non-listed classes
 MOVED off the main tab rather than being copied, because two tabs carrying one gain is a double
 count nothing downstream can detect.
+
+**The FY-end holding statement is THREE tabs per FY** (changed 14-Sep-2026), split the same way
+the capital-gains tabs are and for the same reason — PE is off-market, long-term at 730 days and
+bears no STT, so a preparer cannot separate it out of a commingled table:
+
+- `Holding Equity+Intraday as on 31st March <y>` — **listed only**. There is no such thing as an
+  intraday HOLDING: a same-day round trip is squared off and leaves no closing stock. The tab is
+  named for the book both trade kinds live in, not for a second kind of holding.
+- `Holding Private Equity Only as on 31st March <y>` — the PE class alone.
+- `Holding Combined as on 31st March <y>` — every class. This is what the single tab always was,
+  so the old `Holding as on 31st March <y>` is **RENAMED** into it, never left standing: an
+  orphaned commingled tab beside the new three is last run's numbers under a heading that still
+  looks current. Same legacy-rename mechanism as the Transaction Ledger tab; fixture L3 pins it.
+
+**AIF / Mutual Fund / Bond holdings are on Combined and NOWHERE ELSE** — the owner's decision
+(2026-09-14), taken with the consequence stated. So `Equity + PE` does **not** foot to `Combined`
+whenever the book holds one. Combined therefore PRINTS the shortfall under its grand total,
+naming the count and the classes; an unexplained difference between two filed statements is the
+thing nobody can debug six months later. Fixture L asserts the note fires, names `1 holding(s) in
+AIF`, and is absent from the two partial tabs.
+
+Three more rules here, each a way to get it silently wrong:
+
+- **All three are written every run, even empty**, exactly as the intraday tab is. A tab skipped
+  because its class is empty keeps LAST year's figures under THIS year's heading. An empty one
+  says *"Nothing held under this heading"* rather than showing bare column headers, which reads
+  as a failed run. Fixture L2.
+- **`gTot` is local to each tab's build.** A shared accumulator would add Combined's total onto
+  Equity's — the same trap `emitTab` carries its own `grand` per call to avoid.
+- **One metadata read and one formatting `batchUpdate` for all three.** The single-tab version did
+  a `spreadsheets.get` per tab; three of those sit inside the app's heaviest operation against a
+  60-read-per-minute quota that nothing counts. A `batchUpdate` request carries its own `sheetId`,
+  so three paints never need three calls.
+
+These tabs reach **no** charge into `cgGrand`. Like the transaction statements they record what is
+HELD, not an expense claim, so splitting them cannot move the conservation guard.
 
 Two rules that follow from that, and both have already broken the whole register once:
 
@@ -268,6 +305,49 @@ Fixture K is the ledger from the owner's own report — 456 held, a bonus row st
 stale 289.5, and a 1:2 ratio — and asserts 228. Its control strips the `Ratio` column and asserts
 289.5 survives. Probed by making `parseRatio` always return null: K then reports exactly 745.5,
 the stale figure, and the control still passes.
+
+**The per-stock opening-trades import ADDS; it does not replace** (changed 14-Sep-2026). The
+detail page's Import button now opens on two choices — upload trades, or download a two-tab
+.xlsx template — and the upload is additive. It used to delete the stock's `Opening Holdings`
+lots and `Opening Txns` rows and write the file's own reconstruction in their place.
+
+- **Adding is NOT appending lots.** `Opening Holdings` is not a row list, it is the surviving
+  FIFO reconstruction. Reconstruct the new file on its own and concatenate, and the first SELL
+  in it replays against an EMPTY queue and evaporates — the position silently comes out short.
+  Adding means SEEDING the FIFO with the lots already on the sheet and replaying only the new
+  rows on top: `accumulateOpeningLots(prevLots, txns)`, the same carried-in contract the
+  date-sliced batch importer has always used. Fixture F pins it and is DISJOINT from the wrong
+  answer (120 sh / ₹3,600 vs 60 sh / ₹3,000), probed by passing `[]` as the seed.
+- **Re-uploading the same file must not double the position.** Rows matching an existing
+  `Opening Txns` row on date · type · qty · price are skipped and counted. Duplicates WITHIN one
+  upload are kept — two identical fills on one day are real.
+- **`replayScrip` PUSHES new buys after the seed** (`openingBasis.ts:387`), so a batch that both
+  buys at dates older than lots already on the sheet AND sells consumes the wrong lots.
+  Buy-only batches are safe — every downstream engine re-sorts opening lots by date, so queue
+  position does not survive the write. `batchIsOutOfOrder` warns on exactly that pair; it does
+  not block, because the fix is "import oldest-first", not "don't".
+- **A "sample CSV" cannot have two tabs.** The template is .xlsx (ExcelJS — SheetJS's community
+  build drops styles), and the importer therefore accepts .xlsx as well as .csv, or the sample
+  could not be fed back without a manual Save-As. The workbook is scanned sheet by sheet and the
+  FIRST with a usable header wins, so the Instructions tab is skipped without knowing its name.
+- **Only TURNOVER-named amount headers are adopted.** `replayScrip` prefers `amount` over
+  `price`, so treating a bare `Amount` (usually all-in on a broker statement) as turnover moves
+  brokerage into the cost basis of every lot, silently. The template's charge columns — STT,
+  brokerage, fees, IPF, demat — are read and IGNORED: gains here are computed on turnover and
+  s.48 does not allow STT anyway. Divergence between a filled turnover cell and qty × price is
+  counted and shown, never absorbed.
+- **A row naming another security is rejected and counted, never relabelled** — the identity is
+  the page context. A valid ISIN decides alone; otherwise `obKey(name)` does; a BSE code or NSE
+  symbol in the ISIN column decides nothing (the reference template's column accepts all three).
+- **The data tab ships EMPTY.** A pre-filled example row inside the sheet you are about to upload
+  is a phantom trade waiting to be imported; the worked example lives on the Instructions tab.
+- Fixture H is the one that catches `openingTemplate.ts` drifting away from `findHeader`'s
+  keywords — it builds the real workbook and reads it back through the real reader, so renaming
+  a template column ships a sample the app rejects **under a green suite** without it. Probed by
+  renaming `Trans Type`.
+
+Known gap, unchanged: bonus / split / rights rows are not handled by this importer (they need a
+ratio), and `openingBasis.ts`'s corp-action resolution is not wired to it.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

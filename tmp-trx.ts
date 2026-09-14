@@ -76,7 +76,7 @@ const SCRIP_ROWS = [
 ];
 
 function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = [],
-                 aif: any[][] = [], mf: any[][] = [], bond: any[][] = []) {
+                 aif: any[][] = [], mf: any[][] = [], bond: any[][] = [], pe: any[][] = []) {
   g.__ranges = {
     [`${PORTFOLIO}::True Entry!A:Z`]: trueEntry,
     [`${PORTFOLIO}::Corporate Actions!A:Z`]: corp.length ? corp : undefined,
@@ -85,7 +85,7 @@ function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = [],
     // An EMPTY Private Equities tab still counts as a successful read. If this range is
     // missing the master sets peFailed and the register refuses to write at all — which is
     // itself correct behaviour and is asserted separately below.
-    [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`]: [['Name', 'ISIN']],
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`]: pe.length ? pe : [['Name', 'ISIN']],
     // The AIF and Mutual Fund tabs are read on every master load too. Left ABSENT by default
     // (the stub throws "Unable to parse range", which the loader treats as a legitimate empty
     // answer) so every existing fixture behaves exactly as before; the asset-class fixture
@@ -116,6 +116,15 @@ const TXC = { sno: 0, date: 1, name: 2, type: 3, qty: 4, rate: 5, amt: 6, brok: 
 /** Rows of a transaction statement whose TYPE cell matches, e.g. 'BUY' or 'TOTAL SELL'. */
 const txnRows = (tab: any[][] | undefined, type: string): any[][] =>
   (tab || []).filter(r => (r[TXC.type] || '').toString().trim() === type);
+
+/** A holding statement's grand total (the charge-free AMOUNT column). */
+const holdTotal = (tab: any[][] | undefined): number => {
+  const r = (tab || []).find(x => (x[1] || '').toString().trim() === 'TOTAL HOLDINGS WITHOUT EXPENSES');
+  return r ? Number(r[5]) : NaN;
+};
+/** Does a holding statement carry a scrip's name row? */
+const holdHas = (tab: any[][] | undefined, name: string): boolean =>
+  (tab || []).some(r => (r[1] || '').toString().trim() === name);
 
 const tabsWritten = (): string[] =>
   [...new Set((g.__updated || []).map((u: any) => (u.range || '').split('!')[0]))] as string[];
@@ -232,7 +241,9 @@ export async function run() {
   }
 
   eq('A: result names the capital gains tab', resA.tabName, CG_TAB);
-  eq('A: result names the holding tab', resA.holdingTabName, 'Holding as on 31st March 2026');
+  // The headline holding tab is the COMBINED statement since the 3-way split; the other
+  // two are partial by construction and naming one of them here would narrow it.
+  eq('A: result names the holding tab', resA.holdingTabName, 'Holding Combined as on 31st March 2026');
 
   // ── FIXTURE B ─────────────────────────────────────────────────────────────
   install(FIXTURE_B, OPENING_B);
@@ -1124,6 +1135,113 @@ export async function run() {
       ok(`${name}: does NOT force - read-only hot path, must keep the 90s cache`,
         [...body.matchAll(CALL)].every((m) => !/force:\s*true/.test(m[1])));
     }
+  }
+
+  // ── FIXTURE L — the FY-end holding statement, split into three tabs ─────────
+  //
+  // One scrip per class, with DISJOINT closing amounts so a leak names its own source:
+  //   ALPHA  listed  1,000 @ 100   = 100,000
+  //   ZENITH PE        300 @ 700   = 210,000
+  //   HELION AIF        50 @ 1,000 =  50,000
+  //
+  // The load-bearing assertion is the last group: AIF is on Combined and nowhere else, so
+  // Equity + PE (310,000) does NOT foot to Combined (360,000). That is the owner's decision,
+  // taken with the consequence stated - so what is tested is that the 50,000 difference is
+  // PRINTED on the tab rather than left to be discovered inside a filed document.
+  {
+    const PE_ROWS = [['Company', 'ISIN'], ['ZENITH GROWTH PARTNERS', 'INE700A01015']];
+    const AIF_ROWS_L = [['Company', 'ISIN'], ['HELION VENTURES FUND II', 'INE500A01019']];
+    const FIXTURE_L: any[][] = [
+      TE_HEADER,
+      te([2025, 6, 10], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Buy', 1000, 100),
+      te([2025, 7, 15], 'ZENITH GROWTH PARTNERS', 'INE700A01015', 'Buy', 300, 700),
+      te([2025, 8, 20], 'HELION VENTURES FUND II', 'INE500A01019', 'Buy', 50, 1000),
+    ];
+
+    install(FIXTURE_L, [], [], AIF_ROWS_L, [], [], PE_ROWS);
+    const res = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+
+    const EQ_TAB = `Holding Equity+Intraday as on 31st March ${FY + 1}`;
+    const PE_TAB = `Holding Private Equity Only as on 31st March ${FY + 1}`;
+    const CMB_TAB = `Holding Combined as on 31st March ${FY + 1}`;
+    const eqH = written(EQ_TAB), peH = written(PE_TAB), cmbH = written(CMB_TAB);
+
+    ok('L: the Equity+Intraday holding tab is written', !!eqH, `tabs: ${tabsWritten().join(', ')}`);
+    ok('L: the Private Equity Only holding tab is written', !!peH);
+    ok('L: the Combined holding tab is written', !!cmbH);
+    // The old commingled name must be GONE, not sitting beside the new three carrying last
+    // run's numbers under a heading that still looks current.
+    ok('L: the legacy single holding tab is no longer written',
+      !written(`Holding as on 31st March ${FY + 1}`));
+
+    // Each scrip on exactly the tabs it belongs on.
+    ok('L: listed ALPHA is on the Equity tab', holdHas(eqH, 'ALPHA INDUSTRIES LIMITED'));
+    ok('L: ...and on Combined', holdHas(cmbH, 'ALPHA INDUSTRIES LIMITED'));
+    ok('L: ...and NOT on the PE tab', !holdHas(peH, 'ALPHA INDUSTRIES LIMITED'));
+    ok('L: PE ZENITH is on the PE tab', holdHas(peH, 'ZENITH GROWTH PARTNERS'));
+    ok('L: ...and on Combined', holdHas(cmbH, 'ZENITH GROWTH PARTNERS'));
+    ok('L: ...and NOT on the Equity tab', !holdHas(eqH, 'ZENITH GROWTH PARTNERS'));
+    ok('L: AIF HELION is on Combined', holdHas(cmbH, 'HELION VENTURES FUND II'));
+    ok('L: ...and on NEITHER of the other two',
+      !holdHas(eqH, 'HELION VENTURES FUND II') && !holdHas(peH, 'HELION VENTURES FUND II'));
+
+    // Grand totals. Charge-free, like the Capital Gains tab's CLOSING.
+    near('L: Equity tab total is the listed holding alone', holdTotal(eqH), 100000);
+    near('L: PE tab total is the PE holding alone', holdTotal(peH), 210000);
+    near('L: Combined total is every class', holdTotal(cmbH), 360000);
+
+    // The shortfall, and the line that stops it being silent.
+    near('L: Equity + PE falls short of Combined by exactly the AIF holding',
+      holdTotal(cmbH) - (holdTotal(eqH) + holdTotal(peH)), 50000);
+    const note = (cmbH || []).map(r => (r[1] || '').toString()).find(t => /appear on NO other holding tab/i.test(t)) || '';
+    ok('L: Combined PRINTS the shortfall rather than leaving it to be discovered', !!note, 'no note found');
+    ok('L: ...and the note names the class and the count', /\b1 holding\(s\) in AIF\b/.test(note), `note: ${note}`);
+    ok('L: the two partial tabs carry no such note',
+      !(eqH || []).some(r => /appear on NO other holding tab/i.test((r[1] || '').toString()))
+      && !(peH || []).some(r => /appear on NO other holding tab/i.test((r[1] || '').toString())));
+
+    // The result must name all three, or the UI tooltip reports a run that half happened.
+    eq('L: the result carries all three tab names',
+      [res.holdingTabs?.equity, res.holdingTabs?.pe, res.holdingTabs?.combined], [EQ_TAB, PE_TAB, CMB_TAB]);
+    eq('L: holdingTabName stays the COMPLETE statement', res.holdingTabName, CMB_TAB);
+  }
+
+  // ── FIXTURE L2 — a book with no private equity at all ───────────────────────
+  // All three tabs are still written. A tab skipped because its class is empty keeps LAST
+  // year's figures under THIS year's heading - the same reason the intraday tab is always
+  // written - and an empty tab must SAY it is empty rather than show bare headers.
+  {
+    install(FIXTURE_A, OPENING_A);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const peH = written(`Holding Private Equity Only as on 31st March ${FY + 1}`);
+    const eqH = written(`Holding Equity+Intraday as on 31st March ${FY + 1}`);
+    const cmbH = written(`Holding Combined as on 31st March ${FY + 1}`);
+    ok('L2: the PE holding tab is written even with no PE in the book', !!peH);
+    ok('L2: ...and says so in words',
+      (peH || []).some(r => /Nothing held under this heading/i.test((r[1] || '').toString())));
+    near('L2: ...and totals zero', holdTotal(peH), 0);
+    // With nothing but listed stock the two tabs are the same statement.
+    near('L2: Equity equals Combined when the book is listed-only', holdTotal(eqH), holdTotal(cmbH));
+    ok('L2: ...and Combined carries no shortfall note',
+      !(cmbH || []).some(r => /appear on NO other holding tab/i.test((r[1] || '').toString())));
+  }
+
+  // ── FIXTURE L3 — the legacy single holding tab is RENAMED, not orphaned ──
+  // Leaving "Holding as on 31st March 2026" standing beside the new three is last run's
+  // commingled numbers under a heading that still looks current - a stale tax document that
+  // nothing on screen distinguishes from a fresh one.
+  {
+    install(FIXTURE_A, OPENING_A);
+    g.__sheetTabs[PORTFOLIO] = ['True Entry', 'Opening Holdings', 'Corporate Actions', `Holding as on 31st March ${FY + 1}`];
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const renames = (g.__batched || [])
+      .flatMap((b: any) => ((b.resource || {}).requests) || [])
+      .filter((r: any) => r.updateSheetProperties?.properties?.title === `Holding Combined as on 31st March ${FY + 1}`);
+    eq('L3: the legacy holding tab is renamed exactly once', renames.length, 1);
+    ok('L3: ...so no stale "Holding as on 31st March" tab is left behind',
+      !(g.__sheetTabs[PORTFOLIO] || []).includes(`Holding as on 31st March ${FY + 1}`));
+    ok('L3: ...and the renamed tab is the one written to',
+      !!written(`Holding Combined as on 31st March ${FY + 1}`));
   }
 
   // ── report ────────────────────────────────────────────────────────────────

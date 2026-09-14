@@ -264,7 +264,13 @@ export interface TrxRegisterResult {
   /** The speculative same-day tab. Always written, even with no round trips that year -
    *  skipping it would leave a previous run's figures standing under the same FY heading. */
   intradayTabName: string;
+  /** The FY-end holding statement that carries EVERY class. Stays the headline name:
+   *  a consumer that says "the holding tab" means the complete one. */
   holdingTabName: string;
+  /** All three FY-end holding statements. Equity + PE does NOT foot to combined when
+   *  the book holds AIF / Mutual Fund / Bonds — those are on combined alone, and the
+   *  tab says so under its grand total. */
+  holdingTabs: { equity: string; pe: string; combined: string };
   fyLabel: string;
   /** One entry per non-listed asset class that produced output this run, in registry order. */
   classTabs: { id: AssetClassId; label: string; cgTab?: string; txnTab?: string }[];
@@ -1429,13 +1435,41 @@ export async function generateTrxRegister(
   // spreadsheet inside the app's heaviest operation, and Sheets rate-limits per document.
   for (const c of classCg) await writeAndPaint(dL, c.tab, [], c.em);
 
-  // ── 8. FY-end holding snapshot tab: "Holding as on 31st March <fyEnd>" ──
-  // A standalone closing-stock statement — every scrip's lots still held at FY-end (the
-  // FIFO state frozen above), with pro-rated buy charges and an all-in "final amount",
-  // in the accountant's CSV layout. Built from block.closing. The live "Holding" tab
-  // (current holding, refreshed on every import) is separate and untouched.
+  // ── 8. FY-end holding snapshot: THREE tabs per FY ──
+  // Standalone closing-stock statements — every scrip's lots still held at FY-end (the FIFO
+  // state frozen above), with pro-rated buy charges and an all-in "final amount", in the
+  // accountant's CSV layout. Built from block.closing. The live "Holding" tab (current
+  // holding, refreshed on every import) is separate and untouched.
+  //
+  // Split by asset class (owner directive 2026-09-14) exactly as the capital-gains tabs
+  // already are, and for the same reason: PE is off-market, long-term at 730 days and bears
+  // no STT, so it is taxed on a different footing from listed equity and a preparer cannot
+  // separate the two out of a commingled table.
+  //
+  //   "Holding Equity+Intraday …"      listed equity. There is no such thing as an intraday
+  //                                    HOLDING — a same-day round trip is squared off and
+  //                                    leaves no closing stock — so this is the listed book,
+  //                                    named for the book both its trade kinds live in.
+  //   "Holding Private Equity Only …"  the PE class alone.
+  //   "Holding Combined …"             every class, which is what the single tab always was.
+  //
+  // AIF / Mutual Fund / Bond holdings appear ONLY on Combined — the owner's decision, taken
+  // with the consequence stated. So Equity + PE does NOT foot to Combined whenever the book
+  // holds one of those. That shortfall is PRINTED under Combined's grand total rather than
+  // left to be discovered: an unexplained difference between two filed statements is the
+  // thing nobody can debug six months later.
+  //
+  // None of these tabs reach `cgGrand`. Like the transaction statements they record what is
+  // HELD, not an expense claim, so splitting them cannot move the conservation guard.
   const fyEndYear = fyStartYear + 1;
-  const holdingTabName = `Holding as on 31st March ${fyEndYear}`;
+  const asOn = `as on 31st March ${fyEndYear}`;
+  const equityHoldingTab = `Holding Equity+Intraday ${asOn}`;
+  const peHoldingTab = `Holding Private Equity Only ${asOn}`;
+  const combinedHoldingTab = `Holding Combined ${asOn}`;
+  // The headline name stays the COMPLETE statement: every existing consumer of
+  // `holdingTabName` means "the holding tab", and pointing it at a partial one would quietly
+  // narrow what they report.
+  const holdingTabName = combinedHoldingTab;
   try {
     const HW = 15;
     const hRow = (): any[] => new Array(HW).fill("");
@@ -1463,99 +1497,163 @@ export async function generateTrxRegister(
       row[HC.ipf] = c.ipf ? r2(c.ipf) : ""; row[HC.gst] = c.gst ? r2(c.gst) : "";
     };
 
-    const hout: any[][] = [];
-    const t0 = hRow(); t0[HC.name] = `${title ? title + " — " : ""}Holding as on 31st March ${fyEndYear}`; hout.push(t0);
-    const t1 = hRow(); t1[HC.date] = `CLOSING STOCK-31.03.${fyEndYear}`; hout.push(t1);
-    hout.push(["S.No", "SCRIPT NAME", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "Total Brokerage", "STT", "ETC", "SEBI Turnover Fees", "ECC", "Stamp Duty", "IPF", "GST", "final amount"]);
-
     // ALL held scrips (incl. opening-only, untraded-in-FY) — a holding statement, not the
     // in-FY-activity filter the Capital Gains tab uses.
-    const held = [...blocks.values()].filter(b => b.closing.length > 0)
+    const heldAll = [...blocks.values()].filter(b => b.closing.length > 0)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
-    let hsno = 0;
-    const gTot = { amt: 0, ch: { ...ZERO_CHARGES } };
-    const blockRanges: { start: number; end: number }[] = [];   // green A:F band per scrip (excl. spacer)
-    for (const b of held) {
-      hsno++;
-      const aggs = consolidate(b.closing);
-      const bStart = hout.length;
-      const head = hRow(); head[HC.sno] = hsno; head[HC.name] = b.name; hout.push(head);   // scrip name on its own row
-      aggs.forEach((a, i) => {
-        const row = hRow();
-        if (i === 0) row[HC.name] = "CLOSING";   // first held-lot row carries the CLOSING label
-        row[HC.date] = a.dateStr; row[HC.qty] = a.qty;
-        row[HC.rate] = a.qty > 0 ? r6(a.amt / a.qty) : ""; row[HC.amt] = r2(a.amt);
-        chCells(row, a.ch); row[HC.final] = r2(a.amt + exclSTT(a.ch));
-        gTot.amt += a.amt; gTot.ch = addCharges(gTot.ch, a.ch);
-        hout.push(row);
-      });
-      if (aggs.length > 1) {   // per-scrip subtotal (qty · amount · final)
-        const sub = hRow();
-        sub[HC.qty] = aggs.reduce((s, a) => s + a.qty, 0);
-        sub[HC.amt] = r2(aggs.reduce((s, a) => s + a.amt, 0));
-        sub[HC.final] = r2(aggs.reduce((s, a) => s + a.amt + exclSTT(a.ch), 0));
-        hout.push(sub);
+    const heldListed = heldAll.filter(b => !classOfKey(b.key));
+    const heldPe = heldAll.filter(b => classOfKey(b.key) === "PE");
+    const heldOther = heldAll.filter(b => { const c = classOfKey(b.key); return !!c && c !== "PE"; });
+
+    // The line that stops Equity + PE ≠ Combined from being a silent discrepancy.
+    const otherLabels = [...new Set(heldOther.map(b => ASSET_CLASSES[classOfKey(b.key)!].label))].sort();
+    const combinedNote = heldOther.length
+      ? `Includes ${heldOther.length} holding(s) in ${otherLabels.join(" / ")}, which appear on NO other holding tab — `
+        + `"Holding Equity+Intraday" plus "Holding Private Equity Only" therefore does not add up to this total.`
+      : "";
+
+    interface HoldingSheet { rows: any[][]; blockRanges: { start: number; end: number }[]; gtRow: number; }
+    /**
+     * One holding statement. `gTot` is LOCAL to the call on purpose — a shared accumulator
+     * would add the Combined tab's total onto the Equity tab's, the same trap `emitTab`
+     * carries its own `grand` per call to avoid.
+     */
+    const buildHolding = (held: Block[], caption: string, note: string): HoldingSheet => {
+      const out: any[][] = [];
+      const t0 = hRow(); t0[HC.name] = caption; out.push(t0);
+      const t1 = hRow(); t1[HC.date] = `CLOSING STOCK-31.03.${fyEndYear}`; out.push(t1);
+      out.push(["S.No", "SCRIPT NAME", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "Total Brokerage", "STT", "ETC", "SEBI Turnover Fees", "ECC", "Stamp Duty", "IPF", "GST", "final amount"]);
+
+      let hsno = 0;
+      const gTot = { amt: 0, ch: { ...ZERO_CHARGES } };
+      const blockRanges: { start: number; end: number }[] = [];   // green A:F band per scrip (excl. spacer)
+      for (const b of held) {
+        hsno++;
+        const aggs = consolidate(b.closing);
+        const bStart = out.length;
+        const head0 = hRow(); head0[HC.sno] = hsno; head0[HC.name] = b.name; out.push(head0);   // scrip name on its own row
+        aggs.forEach((a, i) => {
+          const row = hRow();
+          if (i === 0) row[HC.name] = "CLOSING";   // first held-lot row carries the CLOSING label
+          row[HC.date] = a.dateStr; row[HC.qty] = a.qty;
+          row[HC.rate] = a.qty > 0 ? r6(a.amt / a.qty) : ""; row[HC.amt] = r2(a.amt);
+          chCells(row, a.ch); row[HC.final] = r2(a.amt + exclSTT(a.ch));
+          gTot.amt += a.amt; gTot.ch = addCharges(gTot.ch, a.ch);
+          out.push(row);
+        });
+        if (aggs.length > 1) {   // per-scrip subtotal (qty · amount · final)
+          const sub = hRow();
+          sub[HC.qty] = aggs.reduce((s, a) => s + a.qty, 0);
+          sub[HC.amt] = r2(aggs.reduce((s, a) => s + a.amt, 0));
+          sub[HC.final] = r2(aggs.reduce((s, a) => s + a.amt + exclSTT(a.ch), 0));
+          out.push(sub);
+        }
+        blockRanges.push({ start: bStart, end: out.length });   // name row → subtotal (before the spacer)
+        out.push(hRow());   // spacer between scrips
       }
-      blockRanges.push({ start: bStart, end: hout.length });   // name row → subtotal (before the spacer)
-      hout.push(hRow());   // spacer between scrips
-    }
-    const gtRow = hout.length;
-    const gt = hRow();
-    gt[HC.name] = "TOTAL HOLDINGS WITHOUT EXPENSES";
-    gt[HC.amt] = r2(gTot.amt); chCells(gt, gTot.ch); gt[HC.final] = r2(gTot.amt + exclSTT(gTot.ch));
-    hout.push(gt);
+      // Empty is a real answer and must still be SAID. A book that held PE last year and none
+      // this year would otherwise get a tab carrying nothing but headers, which reads as a
+      // failed run rather than as "no private equity held".
+      if (!held.length) {
+        const none = hRow(); none[HC.name] = `Nothing held under this heading as on 31st March ${fyEndYear}.`;
+        out.push(none);
+        out.push(hRow());
+      }
+      const gtRow = out.length;
+      const gt = hRow();
+      gt[HC.name] = "TOTAL HOLDINGS WITHOUT EXPENSES";
+      gt[HC.amt] = r2(gTot.amt); chCells(gt, gTot.ch); gt[HC.final] = r2(gTot.amt + exclSTT(gTot.ch));
+      out.push(gt);
+      if (note) { const n = hRow(); n[HC.name] = note; out.push(n); }
+      return { rows: out, blockRanges, gtRow };
+    };
 
-    // Write values (resolve the tab's sheetId first, for the formatting pass below).
-    await ensureSheetTabs(spreadsheetId, [holdingTabName]);
-    let hSheetId: number | undefined;
-    {
+    const variants: { tab: string; sheet: HoldingSheet }[] = [
+      { tab: equityHoldingTab, sheet: buildHolding(heldListed, `${head}Holding (Equity + Intra-Day) ${asOn}`, "") },
+      { tab: peHoldingTab, sheet: buildHolding(heldPe, `${head}Holding (Private Equity only) ${asOn}`, "") },
+      { tab: combinedHoldingTab, sheet: buildHolding(heldAll, `${head}Holding (Combined) ${asOn}`, combinedNote) },
+    ];
+
+    // ONE metadata read for all three tabs. The single-tab version did a `spreadsheets.get`
+    // per tab; three of those sit inside the app's heaviest operation, against a quota of 60
+    // reads per minute that nothing counts.
+    let props: any[] = [];
+    const readProps = async () => {
       const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title)" }));
-      hSheetId = ((meta?.result?.sheets || []).find((s: any) => (s.properties?.title || "").toString().trim().toLowerCase() === holdingTabName.trim().toLowerCase()) || {}).properties?.sheetId;
-    }
-    await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${holdingTabName}!A:Z` }));
-    await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
-      spreadsheetId, range: `${holdingTabName}!A1`, valueInputOption: "USER_ENTERED", resource: { values: hout },
-    }));
+      props = (meta?.result?.sheets || []).map((s: any) => s.properties || {});
+    };
+    await readProps();
+    const byTitle = (t: string) => props.find((p: any) => (p.title || "").toString().trim().toLowerCase() === t.trim().toLowerCase());
 
-    // ── formatting: yellow title/total, green name+holding blocks, orange CLOSING-STOCK band,
-    // cream charge-header band, Indian comma number formats. Reset first so stale bands don't
-    // bleed (same guard as the Capital Gains tab). Cosmetic — never fails the write.
-    if (hSheetId !== undefined && hSheetId !== null) {
+    // The single commingled tab BECOMES Combined — renamed, never left standing. An orphaned
+    // "Holding as on 31st March 2026" sitting beside the new three is last run's numbers under
+    // a heading that still looks current, which is the failure the legacy rename on the
+    // Transaction Ledger tab already exists to prevent.
+    if (!byTitle(combinedHoldingTab)) {
+      const legacy = byTitle(`Holding ${asOn}`);
+      if (legacy) {
+        await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          resource: { requests: [{ updateSheetProperties: { properties: { sheetId: legacy.sheetId, title: combinedHoldingTab }, fields: "title" } }] },
+        }));
+        legacy.title = combinedHoldingTab;   // keep the local view in step so the create pass skips it
+      }
+    }
+    const missing = variants.map(v => v.tab).filter(t => !byTitle(t));
+    if (missing.length) { await ensureSheetTabs(spreadsheetId, missing); await readProps(); }
+
+    const paint: any[] = [];
+    for (const v of variants) {
+      const hSheetId = byTitle(v.tab)?.sheetId;
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${v.tab}!A:Z` }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
+        spreadsheetId, range: `${v.tab}!A1`, valueInputOption: "USER_ENTERED", resource: { values: v.sheet.rows },
+      }));
+
+      // ── formatting: yellow title/total, green name+holding blocks, orange CLOSING-STOCK band,
+      // cream charge-header band, Indian comma number formats. Reset first so stale bands don't
+      // bleed (same guard as the Capital Gains tab). Cosmetic — never fails the write.
+      if (hSheetId === undefined || hSheetId === null) continue;
+      const rgb = (r: number, g: number, b: number) => ({ red: r, green: g, blue: b });
+      const YELLOW = rgb(1, 0.92, 0.15), GREEN = rgb(0.298, 0.686, 0.314), ORANGE = rgb(0.93, 0.60, 0.25), CREAM = rgb(1, 0.949, 0.8), WHT = rgb(1, 1, 1);
+      const INR = "#,##,##0.00", INT = "#,##,##0", RATEP = "#,##,##0.00####";
+      const fill = (r0: number, r1: number, c0: number, c1: number, color: any) => ({
+        repeatCell: { range: { sheetId: hSheetId, startRowIndex: r0, endRowIndex: r1, startColumnIndex: c0, endColumnIndex: c1 }, cell: { userEnteredFormat: { backgroundColor: color } }, fields: "userEnteredFormat.backgroundColor" },
+      });
+      const numFmt = (c0: number, c1: number, pattern: string) => ({
+        repeatCell: { range: { sheetId: hSheetId, startRowIndex: 3, startColumnIndex: c0, endColumnIndex: c1 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern } } }, fields: "userEnteredFormat.numberFormat" },
+      });
+      const bold = (r0: number, r1: number) => ({
+        repeatCell: { range: { sheetId: hSheetId, startRowIndex: r0, endRowIndex: r1 }, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: "userEnteredFormat.textFormat.bold" },
+      });
+      const gtRow = v.sheet.gtRow;
+      paint.push(
+        { repeatCell: { range: { sheetId: hSheetId }, cell: { userEnteredFormat: { backgroundColor: WHT, textFormat: { bold: false } } }, fields: "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold" } },
+        numFmt(HC.qty, HC.qty + 1, INT),
+        numFmt(HC.rate, HC.rate + 1, RATEP),
+        numFmt(HC.amt, HW, INR),   // amount + charges + final amount
+        bold(0, 3), bold(gtRow, gtRow + 1),
+        { updateSheetProperties: { properties: { sheetId: hSheetId, gridProperties: { frozenRowCount: 3 } }, fields: "gridProperties.frozenRowCount" } },
+        fill(0, 1, 0, HW, YELLOW),                 // title row (SAGUN CAPITAL / Holding …)
+        fill(1, 3, HC.sno, HC.date, GREEN),        // S.No + SCRIPT NAME band
+        fill(1, 2, HC.date, HC.brok, ORANGE),      // CLOSING STOCK-31.03.YYYY band (row 1: DATE→AMOUNT)
+        fill(2, 3, HC.date, HC.brok, GREEN),       // column headers DATE→AMOUNT (row 2)
+        fill(1, 3, HC.brok, HW, CREAM),            // charge-column header band
+        fill(gtRow, gtRow + 1, 0, HC.brok, YELLOW),// TOTAL HOLDINGS row (label + amount)
+      );
+      for (const r of v.sheet.blockRanges) paint.push(fill(r.start, r.end, HC.sno, HC.brok, GREEN));   // each scrip's holding block, A→F
+    }
+    // One batchUpdate for all three sheets — a request carries its own sheetId, so there is no
+    // reason to spend three.
+    if (paint.length) {
       try {
-        const rgb = (r: number, g: number, b: number) => ({ red: r, green: g, blue: b });
-        const YELLOW = rgb(1, 0.92, 0.15), GREEN = rgb(0.298, 0.686, 0.314), ORANGE = rgb(0.93, 0.60, 0.25), CREAM = rgb(1, 0.949, 0.8), WHT = rgb(1, 1, 1);
-        const INR = "#,##,##0.00", INT = "#,##,##0", RATEP = "#,##,##0.00####";
-        const fill = (r0: number, r1: number, c0: number, c1: number, color: any) => ({
-          repeatCell: { range: { sheetId: hSheetId, startRowIndex: r0, endRowIndex: r1, startColumnIndex: c0, endColumnIndex: c1 }, cell: { userEnteredFormat: { backgroundColor: color } }, fields: "userEnteredFormat.backgroundColor" },
-        });
-        const numFmt = (c0: number, c1: number, pattern: string) => ({
-          repeatCell: { range: { sheetId: hSheetId, startRowIndex: 3, startColumnIndex: c0, endColumnIndex: c1 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern } } }, fields: "userEnteredFormat.numberFormat" },
-        });
-        const bold = (r0: number, r1: number) => ({
-          repeatCell: { range: { sheetId: hSheetId, startRowIndex: r0, endRowIndex: r1 }, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: "userEnteredFormat.textFormat.bold" },
-        });
-        const requests: any[] = [
-          { repeatCell: { range: { sheetId: hSheetId }, cell: { userEnteredFormat: { backgroundColor: WHT, textFormat: { bold: false } } }, fields: "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold" } },
-          numFmt(HC.qty, HC.qty + 1, INT),
-          numFmt(HC.rate, HC.rate + 1, RATEP),
-          numFmt(HC.amt, HW, INR),   // amount + charges + final amount
-          bold(0, 3), bold(gtRow, gtRow + 1),
-          { updateSheetProperties: { properties: { sheetId: hSheetId, gridProperties: { frozenRowCount: 3 } }, fields: "gridProperties.frozenRowCount" } },
-          fill(0, 1, 0, HW, YELLOW),                 // title row (SAGUN CAPITAL / Holding as on…)
-          fill(1, 3, HC.sno, HC.date, GREEN),        // S.No + SCRIPT NAME band
-          fill(1, 2, HC.date, HC.brok, ORANGE),      // CLOSING STOCK-31.03.YYYY band (row 1: DATE→AMOUNT)
-          fill(2, 3, HC.date, HC.brok, GREEN),       // column headers DATE→AMOUNT (row 2)
-          fill(1, 3, HC.brok, HW, CREAM),            // charge-column header band
-          fill(gtRow, gtRow + 1, 0, HC.brok, YELLOW),// TOTAL HOLDINGS row (label + amount)
-        ];
-        for (const r of blockRanges) requests.push(fill(r.start, r.end, HC.sno, HC.brok, GREEN));   // each scrip's holding block, A→F
-        await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } }));
+        await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: paint } }));
       } catch (fmtErr) {
-        console.warn(`"${holdingTabName}" values written; formatting skipped:`, fmtErr);
+        console.warn("Holding tab values written; formatting skipped:", fmtErr);
       }
     }
   } catch (e) {
-    console.warn(`Failed to write the "${holdingTabName}" tab (the Capital Gains tab is unaffected):`, e);
+    console.warn(`Failed to write the holding tabs (the Capital Gains tab is unaffected):`, e);
   }
 
   // ── 9. Transaction statement, one tab per non-listed class with activity this FY ──
@@ -1740,6 +1838,7 @@ export async function generateTrxRegister(
 
   return {
     tabName, intradayTabName, holdingTabName, fyLabel,
+    holdingTabs: { equity: equityHoldingTab, pe: peHoldingTab, combined: combinedHoldingTab },
     classTabs: ASSET_CLASS_IDS
       .filter(id => classCg.some(c => c.id === id) || txnTabByClass.has(id))
       .map(id => ({

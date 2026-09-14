@@ -3701,7 +3701,7 @@ export default function Holdings({
                         },
                         {
                           id: 'detail-import-opening', Icon: Upload, label: 'Import',
-                          hint: `Rebuild ${name}'s opening basis from a CSV of trades through 31-Mar-2025`,
+                          hint: `Add trades through 31-Mar-2025 to ${name}'s opening basis, or download the template`,
                           pressed: false,
                           run: () => setShowOpeningImport(true),
                         },
@@ -4184,7 +4184,7 @@ export default function Holdings({
             if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
           }}
         />
-        {/* Temporary per-stock opening-basis import (Google portfolios only). */}
+        {/* Per-stock opening-trades import — ADDS to the opening basis (Google portfolios only). */}
         {activePortfolio !== 'local' && (
           <StockOpeningImportModal
             open={showOpeningImport}
@@ -4572,7 +4572,14 @@ export default function Holdings({
                         // non-listed class now gets its own capital-gains tab and its own
                         // transaction statement, and a tooltip that named only the originals
                         // would read as though the PE tabs had not been written.
-                        ...[trx.result.tabName, trx.result.intradayTabName, trx.result.holdingTabName],
+                        // The holding statement is THREE tabs per FY, so listing only the
+                        // combined one would read as though the equity and PE splits had not
+                        // been written — the same failure this tooltip already avoids for the
+                        // per-class capital-gains tabs.
+                        ...[trx.result.tabName, trx.result.intradayTabName],
+                        ...(trx.result.holdingTabs
+                          ? [trx.result.holdingTabs.equity, trx.result.holdingTabs.pe, trx.result.holdingTabs.combined]
+                          : [trx.result.holdingTabName]),
                         ...(trx.result.classTabs || []).flatMap(c => [c.cgTab, c.txnTab].filter(Boolean) as string[]),
                       ].map(t => `"${t}"`).join(' + ') + ` — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`
                         // "STT Removed" fails silently: the tab just still shows STT. Naming
