@@ -23,6 +23,11 @@ import { parseDMY } from "./dates";
  *   Valuation      — optional per-share fair value. BLANK MEANS HELD AT COST — the app
  *                    never invents a valuation for an unlisted holding.
  *   Valuation Date — optional as-on date for that valuation, shown beside it.
+ *   PAN            — optional. The company's Permanent Account Number, carried onto the
+ *                    FY-end private-equity holding statement (a preparer needs the PAN of
+ *                    each unlisted company beside the holding).
+ *   Face Value     — optional. Per-share face value. 0 / blank ⇒ not given.
+ *   Type Of Company— optional free text (Private Limited, LLP, Unlisted Public…).
  *   Notes          — optional free text.
  *
  * These rows are folded into the in-memory `ScripMaster` at load (see `loadScripMaster`),
@@ -112,6 +117,16 @@ export interface PrivateEquityRow {
   valuation: number;
   /** ISO `yyyy-mm-dd`, or "" when absent/unparseable. */
   valuationDate: string;
+  /** Permanent Account Number as typed, upper-cased. "" when the column or cell is blank.
+   *  Passed through, NOT validated: this is a display field on a statement, and rejecting
+   *  an unfamiliar shape would blank a PAN the owner had entered correctly. */
+  pan: string;
+  /** Per-share face value. 0 ⇒ none given ⇒ a blank cell on the statement. */
+  faceValue: number;
+  /** Free text as typed — Private Limited, LLP, Unlisted Public. NOT upper-cased (unlike a
+   *  PAN, which is written that way): this is prose and the sheet's capitalisation is the
+   *  owner's. */
+  companyType: string;
   notes: string;
 }
 
@@ -175,6 +190,9 @@ export interface PeColumns {
   isin: number;
   valuation: number;
   valuationDate: number;
+  pan: number;
+  faceValue: number;
+  companyType: number;
   notes: number;
 }
 
@@ -196,10 +214,10 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
   // Row 0 is a HEADER only if it reads like LABELS: a recognised keyword, and nothing that is
   // plainly a value. Keyword alone isn't enough — a Drive URL contains the word "drive", so a
   // headerless sheet's first company row would be swallowed as the header and vanish.
-  const hasKeyword = header.some((h) => /company|name|drive|link|folder|url|isin|valuation|value|cmp|price|note|remark|sector/.test(h));
+  const hasKeyword = header.some((h) => /company|name|drive|link|folder|url|isin|valuation|value|cmp|price|note|remark|sector|\bpan\b|face|type/.test(h));
   const hasValueCell = row0.some((c: any) => typeof c === "number" || /^https?:\/\//i.test((c ?? "").toString().trim()));
   const hasHeader = hasKeyword && !hasValueCell;
-  const ci: PeColumns = { company: 0, driveLink: 1, isin: -1, valuation: -1, valuationDate: -1, notes: -1 };
+  const ci: PeColumns = { company: 0, driveLink: 1, isin: -1, valuation: -1, valuationDate: -1, pan: -1, faceValue: -1, companyType: -1, notes: -1 };
   if (hasHeader) {
     let companySet = false, driveSet = false;
     header.forEach((h, idx) => {
@@ -207,6 +225,19 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
       if (/valuation date|value date|val date|as on|as at|as of/.test(h)) ci.valuationDate = idx;
       else if (/drive|folder|link|url|docs/.test(h)) { if (!driveSet) { ci.driveLink = idx; driveSet = true; } }
       else if (/isin/.test(h)) ci.isin = idx;
+      // Ahead of the company test on purpose: a header of "Company PAN" contains "company"
+      // and would otherwise be claimed as the NAME column. \b anchors it so "Expansion" and
+      // the like cannot match.
+      else if (/\bpan\b/.test(h)) ci.pan = idx;
+      // BEFORE the valuation test: "Face Value Per Share" contains "value per", so the
+      // valuation test would claim it and every unlisted holding would be priced at its
+      // face value — wrong, and invisible, because the column looks correctly filled in.
+      else if (/face value|face val|^fv$/.test(h)) ci.faceValue = idx;
+      // BEFORE the company test, for the same reason "Company PAN" is: this contains
+      // "company" and would otherwise be claimed as the NAME column. A bare "Type" is
+      // taken as the company type — on a tab that lists companies there is nothing else
+      // it could be typing.
+      else if (/type of company|type of entity|company type|entity type|constitution|^type$/.test(h)) ci.companyType = idx;
       // "CMP" is the header the sheet actually uses for this. It matched none of the earlier
       // words, so the whole column was being ignored and every unlisted holding read as
       // unvalued - the column was there, filled in, and invisible.
@@ -224,7 +255,7 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
     // identified: the tab now leads with ISIN, and reading an ISIN as the company name gives
     // every row a garbage identity while the real names go unread.
     if (!companySet) {
-      const taken = new Set([ci.driveLink, ci.isin, ci.valuation, ci.valuationDate, ci.notes].filter(i => i >= 0));
+      const taken = new Set([ci.driveLink, ci.isin, ci.valuation, ci.valuationDate, ci.pan, ci.faceValue, ci.companyType, ci.notes].filter(i => i >= 0));
       ci.company = taken.has(0) ? header.findIndex((_, i) => !taken.has(i)) : 0;
       if (ci.company < 0) ci.company = 0;   // nothing else to choose - A is all there is
     }
@@ -254,6 +285,9 @@ export function parsePrivateEquityVals(vals: any[][], assetClass: AssetClassId =
       isin: ci.isin >= 0 ? (r[ci.isin] ?? "").toString().trim().toUpperCase() : "",
       valuation: ci.valuation >= 0 ? Math.max(0, toNum(r[ci.valuation])) : 0,
       valuationDate: ci.valuationDate >= 0 ? isoDate(r[ci.valuationDate]) : "",
+      pan: ci.pan >= 0 ? (r[ci.pan] ?? "").toString().trim().toUpperCase() : "",
+      faceValue: ci.faceValue >= 0 ? Math.max(0, toNum(r[ci.faceValue])) : 0,
+      companyType: ci.companyType >= 0 ? (r[ci.companyType] ?? "").toString().trim() : "",
       notes: ci.notes >= 0 ? (r[ci.notes] ?? "").toString().trim() : "",
     });
   }

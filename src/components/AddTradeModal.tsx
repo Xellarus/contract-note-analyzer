@@ -3,6 +3,7 @@ import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Slider
 import { ModalShell, toast, confirmDialog } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
+import { dateInputValue } from '../lib/dates';
 import { CorpActionType } from '../lib/corporateActions';
 import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { appendPrivateEquity } from '../lib/privateEquityWrite';
@@ -41,7 +42,7 @@ const ACTIONS: { value: ManualAction; label: string; hint: string }[] = [
   { value: 'Rights', label: 'Rights', hint: 'Rights subscription — a buy at the issue price.' },
 ];
 
-type ChargeKey = keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'date' | 'amount' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>;
+type ChargeKey = keyof Omit<LineDraft, 'id' | 'company' | 'isin' | 'date' | 'dateSet' | 'amount' | 'action' | 'qty' | 'price' | 'tradeClass' | 'showCharges' | 'ratioNum' | 'ratioDen' | 'held' | 'notes'>;
 const CHARGE_FIELDS: { key: ChargeKey; label: string }[] = [
   { key: 'brokerage', label: 'Brokerage' },
   { key: 'stt', label: 'STT' },
@@ -63,6 +64,12 @@ interface LineDraft {
   company: string;
   isin: string;          // resolved behind the scenes (no input) — still used for scrip matching
   date: string;          // per-line trade date; blank = use the drawer's default date
+  /**
+   * Has this line's date been typed into? It exists ONLY to keep the input controlled
+   * without fighting the user mid-keystroke - see the input itself for why a fallback in
+   * `value` cannot work. Never read outside the input; `date` stays the source of truth.
+   */
+  dateSet: boolean;
   amount: string;        // turnover; any TWO of qty/price/amount fill in the third
   action: ManualAction;
   qty: string;
@@ -88,7 +95,7 @@ const inr = (n: number) => '₹' + n.toLocaleString('en-IN', { minimumFractionDi
 
 let _seq = 1;
 const blankLine = (): LineDraft => ({
-  id: _seq++, company: '', isin: '', date: '', amount: '', action: 'Buy', qty: '', price: '', tradeClass: 'Delivery',
+  id: _seq++, company: '', isin: '', date: '', dateSet: false, amount: '', action: 'Buy', qty: '', price: '', tradeClass: 'Delivery',
   brokerage: '', stt: '', exchangeCharges: '', sebiFees: '', stampDuty: '', gst: '', ipf: '', showCharges: false,
   ratioNum: '', ratioDen: '', held: '', notes: '',
 });
@@ -828,9 +835,13 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                           <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
                             Date {!l.date && <span className="font-normal normal-case text-slate-400">(default)</span>}
                           </label>
+                          {/* `dateInputValue`, never `l.date || tradeDate` — a fallback in a date
+                              input's value wipes the segment being typed. The onBlur is what
+                              hands an emptied field back to the drawer's date. See dates.ts. */}
                           <input
-                            type="date" value={l.date || tradeDate}
-                            onChange={(e) => setLine(l.id, { date: e.target.value })}
+                            type="date" value={dateInputValue(l.date, tradeDate, l.dateSet)}
+                            onChange={(e) => setLine(l.id, { date: e.target.value, dateSet: true })}
+                            onBlur={() => { if (!l.date) setLine(l.id, { dateSet: false }); }}
                             title="This line's trade date — defaults to the date at the top of the drawer."
                             className={`w-full px-3 py-2 text-xs rounded-lg border outline-none focus:ring-1 focus:ring-indigo-500 ${l.date ? 'border-indigo-200 bg-white text-slate-800' : 'border-slate-200 bg-white text-slate-500'}`}
                           />

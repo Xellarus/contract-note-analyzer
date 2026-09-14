@@ -119,3 +119,24 @@ export function formatDMYTime(value: any): string {
  *  tables (Reports) where cells are untyped strings. */
 export const isDateHeader = (header: string): boolean =>
   /\bdate\b|^date$/i.test((header || "").trim());
+
+/**
+ * The `value` for a controlled `<input type="date">` that shows a DEFAULT until the user
+ * sets its own date.
+ *
+ * The obvious spelling — `value={stored || fallback}` — is broken, and broken in a way no
+ * type checker or build can see. A native date input reports `value === ""` for every
+ * INTERMEDIATE state while it is being typed into: it only yields a date once day, month and
+ * year are all filled. So the first keystroke sets `stored` to "", the `||` recomputes the
+ * fallback, and because the fallback differs from the "" the DOM currently holds, React
+ * writes it back to the node and WIPES the segment just typed. To the user the field snaps
+ * to the default date on every keypress (reported 14-Sep-2026 on the Add Trade line date).
+ *
+ * `touched` breaks the loop: once the field is being edited, a half-typed date renders as ""
+ * — equal to what the DOM already holds — so React leaves the node alone and typing works.
+ *
+ * The caller owns `touched`: set it in `onChange`, and clear it in `onBlur` WHEN THE FIELD IS
+ * EMPTY, which is the only way back to showing the default.
+ */
+export const dateInputValue = (stored: string, fallback: string, touched: boolean): string =>
+  touched ? stored : (stored || fallback);

@@ -120,7 +120,12 @@ const txnRows = (tab: any[][] | undefined, type: string): any[][] =>
 /** A holding statement's grand total (the charge-free AMOUNT column). */
 const holdTotal = (tab: any[][] | undefined): number => {
   const r = (tab || []).find(x => (x[1] || '').toString().trim() === 'TOTAL HOLDINGS WITHOUT EXPENSES');
-  return r ? Number(r[5]) : NaN;
+  if (!r) return NaN;
+  // By HEADER, not by position: the PE statement carries a PAN column the other two do not,
+  // so AMOUNT is column F on two tabs and G on the third. A positional read here would have
+  // compared two different columns and called it a reconciliation.
+  const amt = ((tab || [])[2] || []).indexOf('AMOUNT');
+  return Number(r[amt >= 0 ? amt : 5]);
 };
 /** Does a holding statement carry a scrip's name row? */
 const holdHas = (tab: any[][] | undefined, name: string): boolean =>
@@ -1149,7 +1154,8 @@ export async function run() {
   // taken with the consequence stated - so what is tested is that the 50,000 difference is
   // PRINTED on the tab rather than left to be discovered inside a filed document.
   {
-    const PE_ROWS = [['Company', 'ISIN'], ['ZENITH GROWTH PARTNERS', 'INE700A01015']];
+    const PE_ROWS = [['Company', 'ISIN', 'PAN', 'Face Value', 'Type Of Company'],
+                     ['ZENITH GROWTH PARTNERS', 'INE700A01015', 'AAAPZ1234C', 10, 'Private Limited']];
     const AIF_ROWS_L = [['Company', 'ISIN'], ['HELION VENTURES FUND II', 'INE500A01019']];
     const FIXTURE_L: any[][] = [
       TE_HEADER,
@@ -1199,6 +1205,34 @@ export async function run() {
     ok('L: the two partial tabs carry no such note',
       !(eqH || []).some(r => /appear on NO other holding tab/i.test((r[1] || '').toString()))
       && !(peH || []).some(r => /appear on NO other holding tab/i.test((r[1] || '').toString())));
+
+
+    // ── The company columns, on the PE statement only ──
+    // PAN, Face Value and Type Of Company come off the Private Equities tab of the scrip
+    // master and belong beside the company on a filed statement. The equity and combined tabs
+    // keep their old geometry: those columns would be blank for every listed scrip, which is
+    // noise in a tax document, and they would shift every index the paint pass uses.
+    const HDR = (tab: any[][] | undefined) => (tab || [])[2] || [];
+    eq('L: the PE statement carries the company columns right after SCRIPT NAME',
+      HDR(peH).slice(1, 6), ['SCRIPT NAME', 'PAN', 'FACE VALUE', 'TYPE OF COMPANY', 'DATE']);
+    for (const [label, col] of [['PAN', 'PAN'], ['FACE VALUE', 'FACE VALUE'], ['TYPE OF COMPANY', 'TYPE OF COMPANY']] as const) {
+      eq(`L: the equity statement has no ${label} column`, HDR(eqH).indexOf(col), -1);
+      eq(`L: nor does the combined one (${label})`, HDR(cmbH).indexOf(col), -1);
+    }
+    // On the scrip's own identity row, not repeated down its per-date lot rows.
+    {
+      const nameRow = (peH || []).find(r => (r[1] || '').toString().trim() === 'ZENITH GROWTH PARTNERS') || [];
+      eq('L: PAN sits on the company row', nameRow[2], 'AAAPZ1234C');
+      eq('L: ...face value beside it, as a NUMBER', nameRow[3], 10);
+      eq('L: ...and the company type as typed', nameRow[4], 'Private Limited');
+      const lotRows = (peH || []).filter(r => (r[1] || '').toString().trim() === 'CLOSING');
+      ok('L: none of the three is repeated onto the lot rows',
+        lotRows.length > 0 && lotRows.every(r => !r[2] && !r[3] && !r[4]));
+    }
+    // Geometry follows the header: with three columns inserted, AMOUNT moves from F to I.
+    eq('L: every column after them shifted by three', HDR(peH).indexOf('AMOUNT'), 8);
+    eq('L: ...and the equity tab is unshifted', HDR(eqH).indexOf('AMOUNT'), 5);
+    near('L: the PE total is still read from the shifted AMOUNT column', holdTotal(peH), 210000);
 
     // The result must name all three, or the UI tooltip reports a run that half happened.
     eq('L: the result carries all three tab names',

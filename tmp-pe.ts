@@ -105,6 +105,100 @@ const eq = (label: string, got: any, want: any) => {
   eq('bad date → empty', r[0].valuationDate, '');
 }
 
+// 12. PAN. Added to the sheet by the owner 14-Sep-2026 and carried onto the FY-end private
+//     equity holding statement, so a column that goes unread is a blank column on a filed
+//     document - the same silent failure "CMP" had before its header was recognised.
+{
+  const r = parsePrivateEquityVals([
+    ['Company', 'PAN', 'Drive Link'],
+    ['Acme Foods Private Limited', 'aaapz1234c', 'https://drive.google.com/x'],
+    ['Beta Ventures Pvt Ltd', '', ''],
+  ]);
+  eq('pan: read', r[0].pan, 'AAAPZ1234C');          // upper-cased, as a PAN is written
+  eq('pan: blank cell', r[1].pan, '');
+  eq('pan: the company column is untouched', r[0].company, 'Acme Foods Private Limited');
+}
+
+// 13. "Company PAN" must be the PAN, NOT the company name. It contains "company", so if the
+//     name test ran first it would claim this column and every row's identity would be a PAN.
+{
+  const r = parsePrivateEquityVals([
+    ['Name', 'Company PAN', 'CMP'],
+    ['Acme', 'AAAPZ1234C', 250],
+  ]);
+  eq('company pan: name column', r[0].company, 'Acme');
+  eq('company pan: pan column', r[0].pan, 'AAAPZ1234C');
+  eq('company pan: cmp still read', r[0].valuation, 250);
+}
+
+// 14. No PAN column at all - every existing sheet, until the owner adds one.
+{
+  const r = parsePrivateEquityVals([['Company', 'Drive Link'], ['Acme', '']]);
+  eq('no pan column', r[0].pan, '');
+}
+
+// 15. Word-anchoring: a header that merely CONTAINS the letters p-a-n is not a PAN column.
+//     Without the anchor "Expansion Plan" would be claimed and the real column lost.
+{
+  const r = parsePrivateEquityVals([
+    ['Company', 'Expansion Plan', 'PAN'],
+    ['Acme', 'Phase II', 'AAAPZ1234C'],
+  ]);
+  eq('pan anchoring: real pan wins', r[0].pan, 'AAAPZ1234C');
+}
+
+// 16. Face Value + Type Of Company. Added to the sheet 14-Sep-2026 and carried onto the FY-end
+//     private equity holding statement beside PAN.
+{
+  const r = parsePrivateEquityVals([
+    ['Company', 'PAN', 'Face Value', 'Type Of Company', 'CMP'],
+    ['Acme Foods Private Limited', 'AAAPZ1234C', 10, 'Private Limited', 250],
+    ['Beta Ventures Pvt Ltd', '', '', '', ''],
+  ]);
+  eq('fv: read as a number', r[0].faceValue, 10);
+  eq('fv: blank is 0, not NaN', r[1].faceValue, 0);
+  eq('type: read as typed', r[0].companyType, 'Private Limited');
+  eq('type: NOT upper-cased (it is prose, unlike a PAN)', r[0].companyType, 'Private Limited');
+  eq('type: blank', r[1].companyType, '');
+  eq('fv/type: the CMP column is still the valuation', r[0].valuation, 250);
+  eq('fv/type: the company column is untouched', r[0].company, 'Acme Foods Private Limited');
+}
+
+// 17. THE TRAP. "Face Value Per Share" contains "value per", which the VALUATION test matches.
+//     Claimed there, every unlisted holding would be priced at its face value - ₹10 a share -
+//     and the column would look correctly filled in the whole time.
+{
+  const r = parsePrivateEquityVals([
+    ['Company', 'Face Value Per Share', 'CMP'],
+    ['Acme', 10, 2500],
+  ]);
+  eq('face-value-per-share: is the face value', r[0].faceValue, 10);
+  eq('face-value-per-share: the CMP is still the valuation', r[0].valuation, 2500);
+}
+
+// 18. "Type Of Company" contains "company" - the same trap "Company PAN" is.
+{
+  const r = parsePrivateEquityVals([
+    ['Name', 'Type Of Company', 'Drive Link'],
+    ['Acme', 'LLP', ''],
+  ]);
+  eq('type of company: name column survives', r[0].company, 'Acme');
+  eq('type of company: type column', r[0].companyType, 'LLP');
+}
+
+// 19. A bare "Type" on a tab that lists companies is the company type.
+{
+  const r = parsePrivateEquityVals([['Company', 'Type'], ['Acme', 'Unlisted Public']]);
+  eq('bare Type', r[0].companyType, 'Unlisted Public');
+}
+
+// 20. Neither column present - every sheet until the owner adds them.
+{
+  const r = parsePrivateEquityVals([['Company', 'Drive Link'], ['Acme', '']]);
+  eq('no face value column', r[0].faceValue, 0);
+  eq('no type column', r[0].companyType, '');
+}
+
 // 11. Empty tab.
 eq('empty', parsePrivateEquityVals([]).length, 0);
 eq('header only', parsePrivateEquityVals([['Company', 'Drive Link']]).length, 0);

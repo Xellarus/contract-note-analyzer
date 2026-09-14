@@ -27,7 +27,11 @@ import { normName, invalidateScripCache, lookupScrip, ScripMaster } from "./scri
  * "Valuation" (the date test runs first), and "Company" must not contain a value-like cell or
  * the row would be read as data rather than a header.
  */
-const PE_HEADER = ["Company", "Drive Link", "ISIN", "Valuation", "Valuation Date", "Notes"];
+// PAN, Face Value and Type Of Company sit with ISIN: company attributes together, which is
+// what a person creating
+// this tab by hand would expect. The suite round-trips this row through `detectPeColumns`,
+// so a header the reader cannot map fails there rather than on a live sheet.
+const PE_HEADER = ["Company", "Drive Link", "ISIN", "PAN", "Face Value", "Type Of Company", "Valuation", "Valuation Date", "Notes"];
 
 export type PeAppendRefusal =
   | "blank"              // no company name given
@@ -140,7 +144,7 @@ export async function appendPrivateEquity(
   // the next reader detects them instead of falling back to "company is column A".
   const needsHeader = tabMissing || vals.length === 0;
   const { ci, width } = needsHeader
-    ? { ci: { company: 0, driveLink: 1, isin: 2, valuation: 3, valuationDate: 4, notes: 5 }, width: PE_HEADER.length }
+    ? { ci: { company: 0, driveLink: 1, isin: 2, pan: 3, faceValue: 4, companyType: 5, valuation: 6, valuationDate: 7, notes: 8 }, width: PE_HEADER.length }
     : detectPeColumns(vals);
 
   // Place the name in the column THIS SHEET uses for it, padding to the sheet's own width so a

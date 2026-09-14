@@ -24,10 +24,10 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 
 | Command | Covers |
 |---|---|
-| `node tmp-pe-run.mjs` | Private Equities tab reader (27 assertions) |
+| `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
-| `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (84) |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, and the legacy holding tab being RENAMED rather than orphaned (209; 210 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master (223; 224 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -38,6 +38,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
+| `npx tsx tmp-date-input.ts` | Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), plus a source sweep asserting no date input anywhere falls back to a non-empty `value` — and that the Add Trade line date keeps its touched flag and its onBlur (13) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
@@ -105,6 +106,40 @@ bears no STT, so a preparer cannot separate it out of a commingled table:
   so the old `Holding as on 31st March <y>` is **RENAMED** into it, never left standing: an
   orphaned commingled tab beside the new three is last run's numbers under a heading that still
   looks current. Same legacy-rename mechanism as the Transaction Ledger tab; fixture L3 pins it.
+
+**The PE statement carries three COMPANY columns; the other two carry none** (added
+14-Sep-2026): `PAN`, `FACE VALUE` and `TYPE OF COMPANY`. All three come off the
+**Private Equities** tab of the shared scrip master — hand-maintained like the rest of it — and
+sit immediately after `SCRIPT NAME`, on the company's own identity row, never repeated down its
+per-date lot rows. A missing face value prints BLANK, not 0.00: zero is not a fact about a
+company, it is the absence of one.
+
+- **Column geometry is a function of the tab, not a constant.** `geom(withCompanyCols)` builds `HC`/`HW`
+  and the header row together, and everything downstream — the painting included — is written in
+  terms of them, so there is no second set of indices to drift. The three columns shift `AMOUNT`
+  from F to I on that tab alone. Anything reading these tabs positionally must read by HEADER;
+  the suite's own `holdTotal` had to be changed to do that, and would otherwise have compared
+  two different columns and called it a reconciliation.
+- **Not on the equity or combined tabs**: blank for every listed scrip is noise in a filed
+  document, and they would shift those tabs' columns for nothing.
+- **Header-match ORDER is load-bearing, and this one tab has now hit it five times.** `PAN` and
+  `Type Of Company` must be tested BEFORE the company test — both contain "company"
+  (`Company PAN`, `Type Of Company`) and would otherwise be claimed as the NAME column, making
+  every row's identity a PAN or the word "LLP". `Face Value` must be tested BEFORE the valuation
+  test: **`Face Value Per Share` contains `value per`**, so the valuation test claims it and
+  every unlisted holding is priced at its face value — ₹10 a share, with the column looking
+  correctly filled in the whole time. `PAN` is anchored `pan` so `Expansion Plan` cannot
+  match. Same shape as `Valuation Date` vs `Valuation` and the scrip master's `Tally Name`,
+  which is why each test now carries its reason beside it.
+- `PE_HEADER` in `privateEquityWrite.ts` (the header the app writes when it CREATES the tab)
+  gained all three too, and `tmp-pe-write-run.mjs` round-trips that row back through
+  `detectPeColumns` — a header the reader cannot map fails there rather than on a live sheet.
+  Its appended data row is padded to the sheet's own width, so a new column never leaves the
+  row short of it.
+- PAN is **passed through, not validated** (trimmed and upper-cased only). This is a display
+  field on a statement; rejecting an unfamiliar shape would blank a PAN entered correctly.
+  `Type Of Company` is trimmed and NOT upper-cased — it is prose and the sheet's capitalisation
+  is the owner's. `Face Value` is a number, 0 ⇒ absent, exactly as `Valuation` already works.
 
 **AIF / Mutual Fund / Bond holdings are on Combined and NOWHERE ELSE** — the owner's decision
 (2026-09-14), taken with the consequence stated. So `Equity + PE` does **not** foot to `Combined`
@@ -348,6 +383,27 @@ lots and `Opening Txns` rows and write the file's own reconstruction in their pl
 
 Known gap, unchanged: bonus / split / rights rows are not handled by this importer (they need a
 ratio), and `openingBasis.ts`'s corp-action resolution is not wired to it.
+
+**A controlled `<input type="date">` must never fall back to a non-empty `value`.** A native
+date input reports `value === ""` for every INTERMEDIATE state while it is typed into — it only
+yields a date once day, month and year are all filled. So `value={stored || fallback}` recomputes
+the fallback on the first keystroke; that differs from the `""` the DOM currently holds, React
+writes it back, and the segment just typed is WIPED. To the user the field snaps to the default
+date on every keypress (reported 14-Sep-2026 on the Add Trade line date, which was the only date
+input in the app carrying a fallback — every other one is `value={state}` and works precisely
+because an empty string matches the DOM and React leaves the node alone).
+
+`dateInputValue(stored, fallback, touched)` in `src/lib/dates.ts` is the one spelling. The caller
+owns `touched`: set it in `onChange`, and clear it in `onBlur` **when the field is empty** — that
+blur is the ONLY route back to showing the default, and without it an emptied line renders blank
+while `buildLines`' own `l.date || tradeDate` still files it under the drawer's date, so the
+screen and the sheet disagree. `?? ''` is harmless (the empty string matches the DOM); only a
+non-empty fallback bites. `tmp-date-input.ts` pins both the behaviour and a source sweep, because
+neither `tsc` nor the build can see any of it and there is no browser in the loop.
+
+Adding a field to `AddTradeModal`'s `LineDraft` needs one more edit than it looks: `ChargeKey` is
+`keyof Omit<LineDraft, …>` over a hand-listed set, so a new field that is not added to that Omit
+list silently becomes a CHARGE field.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

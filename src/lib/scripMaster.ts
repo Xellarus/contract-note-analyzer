@@ -76,6 +76,13 @@ export interface ScripEntry {
   /** Hand-entered per-share fair value. Undefined/0 ⇒ the holding stays valued at cost. */
   peValuation?: number;
   peValuationDate?: string;   // ISO yyyy-mm-dd
+  /** PAN of an unlisted company, from its asset-class tab. Shown on the FY-end private
+   *  equity holding statement. */
+  pan?: string;
+  /** Per-share face value of an unlisted company, from its asset-class tab. */
+  faceValue?: number;
+  /** Private Limited / LLP / Unlisted Public, as typed on that tab. */
+  companyType?: string;
   peNotes?: string;
 }
 
@@ -515,6 +522,9 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
     entry.priceExcept = true;
     if (r.valuation > 0) entry.peValuation = r.valuation;
     if (r.valuationDate) entry.peValuationDate = r.valuationDate;
+    if (r.pan) entry.pan = r.pan;
+    if (r.faceValue > 0) entry.faceValue = r.faceValue;
+    if (r.companyType) entry.companyType = r.companyType;
     if (r.notes) entry.peNotes = r.notes;
     // So the allocation chart shows these as their own slice instead of "Unclassified".
     // A real sector set on the row/entry still wins.

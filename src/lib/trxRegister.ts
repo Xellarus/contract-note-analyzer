@@ -1,7 +1,7 @@
 import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
-  normName, loadScripMaster, resolveScrip, ScripMaster,
+  normName, loadScripMaster, resolveScrip, lookupScrip, ScripMaster,
   SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor, assetClassOf, isSttRemoved,
 } from "./scripMaster";
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from "./privateEquities";
@@ -1471,9 +1471,37 @@ export async function generateTrxRegister(
   // narrow what they report.
   const holdingTabName = combinedHoldingTab;
   try {
-    const HW = 15;
-    const hRow = (): any[] => new Array(HW).fill("");
-    const HC = { sno: 0, name: 1, date: 2, qty: 3, rate: 4, amt: 5, brok: 6, stt: 7, et: 8, sebi: 9, ecc: 10, stamp: 11, ipf: 12, gst: 13, final: 14 };
+    /**
+     * Column geometry. The PRIVATE EQUITY statement carries a PAN column that the other two do
+     * not (owner directive 2026-09-14: a preparer needs each unlisted company's PAN beside its
+     * holding), so this is a function of the tab rather than a constant — every index after
+     * SCRIPT NAME shifts by one. Everything below, the painting included, is written in terms
+     * of HC/HW, so there is no second set of numbers that can drift out of step with this one.
+     */
+    const HEAD_COLS = ["S.No", "SCRIPT NAME", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "Total Brokerage", "STT", "ETC", "SEBI Turnover Fees", "ECC", "Stamp Duty", "IPF", "GST", "final amount"];
+    const COMPANY_COLS = ["PAN", "FACE VALUE", "TYPE OF COMPANY"];
+    const geom = (withCompanyCols: boolean) => {
+      const HC: Record<string, number> = { sno: 0, name: 1 };
+      let i = 2;
+      if (withCompanyCols) { HC.pan = i++; HC.faceValue = i++; HC.companyType = i++; }
+      for (const k of ["date", "qty", "rate", "amt", "brok", "stt", "et", "sebi", "ecc", "stamp", "ipf", "gst", "final"]) HC[k] = i++;
+      const header = withCompanyCols ? [...HEAD_COLS.slice(0, 2), ...COMPANY_COLS, ...HEAD_COLS.slice(2)] : HEAD_COLS.slice();
+      return { HC, HW: i, header };
+    };
+
+    /**
+     * The company attributes the PE statement prints beside the name, from its asset-class tab
+     * in the shared scrip master. ONE lookup for all three — asked once per HELD scrip on one
+     * tab, unlike `classOfKey` / `sttOffForKey` which are asked once per emitted ROW and are
+     * memoised for it, so a plain lookup is the right cost here.
+     *
+     * A missing value is "" rather than 0: a face value of zero is not a fact about the
+     * company, it is the absence of one, and printing 0.00 on a statement asserts otherwise.
+     */
+    const companyColsOfKey = (key: string): (string | number)[] => {
+      const e = lookupScrip(master, isinByKey.get(key) || "", nameByKey.get(key) || key).entry;
+      return [e?.pan || "", e?.faceValue > 0 ? e.faceValue : "", e?.companyType || ""];
+    };
     interface HAgg { ts: number; dateStr: string; qty: number; amt: number; ch: Charges; }
     const consolidate = (snaps: LotSnap[]): HAgg[] => {   // one line per calendar date
       const m = new Map<number, HAgg>();
@@ -1490,12 +1518,6 @@ export async function generateTrxRegister(
     // "final amount" = closing amount + ALL expenses EXCEPT STT (STT is not part of the
     // cost basis for capital gains). STT still shows in its own column, just not in final.
     const exclSTT = (c: Charges) => c.brok + c.gst + c.et + c.stamp + c.sebi + c.ipf + c.dmat;
-    const chCells = (row: any[], c: Charges) => {   // blank a zero charge (matches the source)
-      row[HC.brok] = c.brok ? r2(c.brok) : ""; row[HC.stt] = c.stt ? r2(c.stt) : "";
-      row[HC.et] = c.et ? r2(c.et) : ""; row[HC.sebi] = c.sebi ? r2(c.sebi) : "";
-      row[HC.ecc] = ""; row[HC.stamp] = c.stamp ? r2(c.stamp) : "";
-      row[HC.ipf] = c.ipf ? r2(c.ipf) : ""; row[HC.gst] = c.gst ? r2(c.gst) : "";
-    };
 
     // ALL held scrips (incl. opening-only, untraded-in-FY) — a holding statement, not the
     // in-FY-activity filter the Capital Gains tab uses.
@@ -1512,17 +1534,29 @@ export async function generateTrxRegister(
         + `"Holding Equity+Intraday" plus "Holding Private Equity Only" therefore does not add up to this total.`
       : "";
 
-    interface HoldingSheet { rows: any[][]; blockRanges: { start: number; end: number }[]; gtRow: number; }
+    interface HoldingSheet {
+      rows: any[][]; blockRanges: { start: number; end: number }[]; gtRow: number;
+      /** This tab's own geometry — the paint pass below must use it, not a shared constant. */
+      HC: Record<string, number>; HW: number;
+    }
     /**
      * One holding statement. `gTot` is LOCAL to the call on purpose — a shared accumulator
      * would add the Combined tab's total onto the Equity tab's, the same trap `emitTab`
      * carries its own `grand` per call to avoid.
      */
-    const buildHolding = (held: Block[], caption: string, note: string): HoldingSheet => {
+    const buildHolding = (held: Block[], caption: string, note: string, withCompanyCols = false): HoldingSheet => {
+      const { HC, HW, header } = geom(withCompanyCols);
+      const hRow = (): any[] => new Array(HW).fill("");
+      const chCells = (row: any[], c: Charges) => {   // blank a zero charge (matches the source)
+        row[HC.brok] = c.brok ? r2(c.brok) : ""; row[HC.stt] = c.stt ? r2(c.stt) : "";
+        row[HC.et] = c.et ? r2(c.et) : ""; row[HC.sebi] = c.sebi ? r2(c.sebi) : "";
+        row[HC.ecc] = ""; row[HC.stamp] = c.stamp ? r2(c.stamp) : "";
+        row[HC.ipf] = c.ipf ? r2(c.ipf) : ""; row[HC.gst] = c.gst ? r2(c.gst) : "";
+      };
       const out: any[][] = [];
       const t0 = hRow(); t0[HC.name] = caption; out.push(t0);
       const t1 = hRow(); t1[HC.date] = `CLOSING STOCK-31.03.${fyEndYear}`; out.push(t1);
-      out.push(["S.No", "SCRIPT NAME", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "Total Brokerage", "STT", "ETC", "SEBI Turnover Fees", "ECC", "Stamp Duty", "IPF", "GST", "final amount"]);
+      out.push(header);
 
       let hsno = 0;
       const gTot = { amt: 0, ch: { ...ZERO_CHARGES } };
@@ -1531,7 +1565,16 @@ export async function generateTrxRegister(
         hsno++;
         const aggs = consolidate(b.closing);
         const bStart = out.length;
-        const head0 = hRow(); head0[HC.sno] = hsno; head0[HC.name] = b.name; out.push(head0);   // scrip name on its own row
+        // Identity row: S.No + name, and on the PE statement the company's PAN, face value and
+        // type beside it. They belong HERE and not on the lot rows below — those are
+        // per-acquisition-date lines, and a company attribute repeated down them would read as
+        // a per-lot one.
+        const head0 = hRow(); head0[HC.sno] = hsno; head0[HC.name] = b.name;
+        if (withCompanyCols) {
+          const [pan, fv, ctype] = companyColsOfKey(b.key);
+          head0[HC.pan] = pan; head0[HC.faceValue] = fv; head0[HC.companyType] = ctype;
+        }
+        out.push(head0);
         aggs.forEach((a, i) => {
           const row = hRow();
           if (i === 0) row[HC.name] = "CLOSING";   // first held-lot row carries the CLOSING label
@@ -1565,12 +1608,12 @@ export async function generateTrxRegister(
       gt[HC.amt] = r2(gTot.amt); chCells(gt, gTot.ch); gt[HC.final] = r2(gTot.amt + exclSTT(gTot.ch));
       out.push(gt);
       if (note) { const n = hRow(); n[HC.name] = note; out.push(n); }
-      return { rows: out, blockRanges, gtRow };
+      return { rows: out, blockRanges, gtRow, HC, HW };
     };
 
     const variants: { tab: string; sheet: HoldingSheet }[] = [
       { tab: equityHoldingTab, sheet: buildHolding(heldListed, `${head}Holding (Equity + Intra-Day) ${asOn}`, "") },
-      { tab: peHoldingTab, sheet: buildHolding(heldPe, `${head}Holding (Private Equity only) ${asOn}`, "") },
+      { tab: peHoldingTab, sheet: buildHolding(heldPe, `${head}Holding (Private Equity only) ${asOn}`, "", true) },
       { tab: combinedHoldingTab, sheet: buildHolding(heldAll, `${head}Holding (Combined) ${asOn}`, combinedNote) },
     ];
 
@@ -1627,6 +1670,7 @@ export async function generateTrxRegister(
         repeatCell: { range: { sheetId: hSheetId, startRowIndex: r0, endRowIndex: r1 }, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: "userEnteredFormat.textFormat.bold" },
       });
       const gtRow = v.sheet.gtRow;
+      const { HC, HW } = v.sheet;
       paint.push(
         { repeatCell: { range: { sheetId: hSheetId }, cell: { userEnteredFormat: { backgroundColor: WHT, textFormat: { bold: false } } }, fields: "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold" } },
         numFmt(HC.qty, HC.qty + 1, INT),
@@ -1635,7 +1679,7 @@ export async function generateTrxRegister(
         bold(0, 3), bold(gtRow, gtRow + 1),
         { updateSheetProperties: { properties: { sheetId: hSheetId, gridProperties: { frozenRowCount: 3 } }, fields: "gridProperties.frozenRowCount" } },
         fill(0, 1, 0, HW, YELLOW),                 // title row (SAGUN CAPITAL / Holding …)
-        fill(1, 3, HC.sno, HC.date, GREEN),        // S.No + SCRIPT NAME band
+        fill(1, 3, HC.sno, HC.date, GREEN),        // S.No + SCRIPT NAME (+ the company columns on the PE tab) band
         fill(1, 2, HC.date, HC.brok, ORANGE),      // CLOSING STOCK-31.03.YYYY band (row 1: DATE→AMOUNT)
         fill(2, 3, HC.date, HC.brok, GREEN),       // column headers DATE→AMOUNT (row 2)
         fill(1, 3, HC.brok, HW, CREAM),            // charge-column header band

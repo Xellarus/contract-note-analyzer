@@ -64,7 +64,7 @@ async function main() {
     const { hasHeader, ci } = detectPeColumns([PE_HEADER_ROW]);
     ok('created header is detected AS a header', hasHeader);
     eq('created header maps every column', ci,
-      { company: 0, driveLink: 1, isin: 2, valuation: 3, valuationDate: 4, notes: 5 });
+      { company: 0, driveLink: 1, isin: 2, valuation: 6, valuationDate: 7, pan: 3, faceValue: 4, companyType: 5, notes: 8 });
   }
 
   // ── 2. the happy path on a conventional tab ───────────────────────────────────────────────
@@ -190,8 +190,11 @@ async function main() {
     if (req) {
       eq('header written above the first company', req.resource.values.length, 2);
       eq('the header is the canonical one', req.resource.values[0], PE_HEADER_ROW);
+      // One blank per header column, PAN's included — the row is padded to the sheet's own
+      // width, so a column added to the header can never leave the data row short of it.
       eq('the company row follows it', req.resource.values[1],
-        ['Jeena Sikho Lifecare', '', '', '', '', '']);
+        ['Jeena Sikho Lifecare', '', '', '', '', '', '', '', '']);
+      eq('...one cell per header column', req.resource.values[1].length, PE_HEADER_ROW.length);
       const after = parsePrivateEquityVals(req.resource.values);
       eq('and the created tab reads back as exactly one company', after.length, 1);
       eq('with the right name', after[0]?.company, 'Jeena Sikho Lifecare');
@@ -307,7 +310,8 @@ async function main() {
     const { hasHeader, ci } = detectPeColumns(USER_TAB);
     ok('the user layout is detected as a header', hasHeader);
     eq('ISIN in A, company in B, CMP read as the valuation column', ci,
-      { company: 1, driveLink: 2, isin: 0, valuation: 3, valuationDate: 4, notes: 5 });
+      // No PAN column on the owner's own layout - -1, not a stray index onto another column.
+      { company: 1, driveLink: 2, isin: 0, valuation: 3, valuationDate: 4, pan: -1, faceValue: -1, companyType: -1, notes: 5 });
     const parsed = parsePrivateEquityVals(USER_TAB);
     eq('three companies read, by NAME not by ISIN', parsed.map(r => r.company),
       ['ACME VENTURES PRIVATE LIMITED', 'ZENITH CAPITAL LLP', 'ORBIT LABS PRIVATE LIMITED']);
