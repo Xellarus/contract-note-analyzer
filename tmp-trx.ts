@@ -1278,6 +1278,147 @@ export async function run() {
       !!written(`Holding Combined as on 31st March ${FY + 1}`));
   }
 
+  // ── FIXTURE M — the ITR unlisted-equity-shares schedule, end to end ─────────
+  //
+  // `tmp-itr.ts` covers the LAYOUT against the owner's filed return. What only this fixture
+  // can reach is the PLUMBING: which blocks the register hands the builder, and which it
+  // must not. Four companies, each here for a different reason:
+  //
+  //   ZENITH  PE   opening 500 @ 200, buys 300 @ 700 and 200 @ 900, sells 600 @ 1,000
+  //                -> TWO acquisition rows, and a sale that straddles the LT/ST boundary
+  //                   (500 pre-FY shares long-term + 100 of the July buy short-term), so
+  //                   ONE sale arrives as TWO parcels and has to be re-aggregated
+  //   ORION   PE   opening 1,000 @ 50, sells ALL of it
+  //                -> fully exited, and must STILL be on the schedule
+  //   VERTEX  PE   buys 100 @ 500 and sells 100 @ 600 ON ONE DAY
+  //                -> an intraday round trip, which lands in `intraBlocks` and NOT in `blocks`
+  //   ALPHA / HELION  listed and AIF -> neither belongs on an unlisted-EQUITY-SHARES schedule
+  {
+    const PE_ROWS_M = [
+      ['Company', 'ISIN', 'PAN', 'Face Value', 'Type Of Company'],
+      ['ZENITH GROWTH PARTNERS', 'INE700A01015', 'AAAPZ1234C', 10, 'Domestic'],
+      ['ORION UNLISTED PVT LTD', 'INE701A01013', 'AABCO9999D', 100, 'Domestic'],
+      ['VERTEX HOLDINGS PVT LTD', 'INE702A01011', 'AACCV1111E', 10, 'Domestic'],
+    ];
+    const AIF_ROWS_M = [['Company', 'ISIN'], ['HELION VENTURES FUND II', 'INE500A01019']];
+    const OPENING_M: any[][] = [
+      ['Security', 'ISIN', 'Acquisition Date', 'Quantity', 'Cost Per Share', 'Total Cost', '', ''],
+      ['ZENITH GROWTH PARTNER', 'INE700A01015', serial(2023, 5, 4), 500, 200, 100000, '', ''],
+      ['ORION UNLISTED PVT LTD', 'INE701A01013', serial(2024, 2, 1), 1000, 50, 50000, '', ''],
+    ];
+    const FIXTURE_M: any[][] = [
+      TE_HEADER,
+      te([2025, 7, 15], 'ZENITH GROWTH PARTNER', 'INE700A01015', 'Buy', 300, 700),
+      te([2025, 11, 20], 'ZENITH GROWTH PARTNER', 'INE700A01015', 'Buy', 200, 900),
+      te([2026, 1, 10], 'ZENITH GROWTH PARTNER', 'INE700A01015', 'Sell', 600, 1000),
+      te([2025, 8, 5], 'ORION UNLISTED PVT LTD', 'INE701A01013', 'Sell', 1000, 80),
+      te([2025, 9, 12], 'VERTEX HOLDINGS PVT LTD', 'INE702A01011', 'Buy', 100, 500),
+      te([2025, 9, 12], 'VERTEX HOLDINGS PVT LTD', 'INE702A01011', 'Sell', 100, 600),
+      te([2025, 6, 10], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Buy', 1000, 100),
+      te([2025, 8, 20], 'HELION VENTURES FUND II', 'INE500A01019', 'Buy', 50, 1000),
+    ];
+
+    install(FIXTURE_M, OPENING_M, [], AIF_ROWS_M, [], [], PE_ROWS_M);
+    const res = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+
+    const ITR_TAB = `Unlisted Equity Shares for ${FY_LABEL}`;
+    const itr = written(ITR_TAB);
+    ok('M: the ITR schedule tab is written', !!itr, `tabs: ${tabsWritten().join(', ')}`);
+    eq('M: ...and the result names it', res.itrUnlistedTab, ITR_TAB);
+
+    // Read BY HEADER, never by position — the same rule the tab itself is written under, and
+    // the one the holding-statement suite had to be corrected to follow.
+    const hi = (itr || []).findIndex(r => (r[1] || '').toString().trim() === 'Name of company');
+    const C = (name: string) => ((itr || [])[hi] || []).findIndex((c: any) => (c || '').toString().trim() === name);
+    const rowsFor = (n: string) => (itr || []).slice(hi + 1)
+      .filter(r => (r[C('Name of company')] || '').toString().trim() === n);
+    const cell = (r: any[] | undefined, name: string) => (r || [])[C(name)];
+
+    ok('M: the header row is present', hi >= 0);
+    eq('M: header sits on sheet row 4', hi, 3);
+    ok('M: every ITR column resolves by name',
+      ['Sl. No.', 'Type of Company', 'PAN of Company', 'Opening Balance - No. of shares',
+       'Shares acquired - Date of subscription/purchase', 'Shares transferred - Sale consideration',
+       'Closing balance - Cost of acquisition'].every(n => C(n) >= 0));
+
+    // Scope: unlisted EQUITY SHARES only.
+    eq('M: three unlisted companies reach the schedule', res.itrCompanies, 3);
+    eq('M: listed ALPHA is NOT on it', rowsFor('ALPHA INDUSTRIES LIMITED').length, 0);
+    eq('M: the AIF fund is NOT on it', rowsFor('HELION VENTURES FUND II').length, 0);
+
+    // ZENITH — two acquisitions, so two rows, with the opening and the transfer on the first.
+    const z = rowsFor('ZENITH GROWTH PARTNERS');
+    eq('M: ZENITH gets one row per acquisition', z.length, 2);
+    // The ledger spells it 'ZENITH GROWTH PARTNER' — a truncated broker name, resolved to
+    // the right company by ISIN. A filed return must carry the scrip master's canonical
+    // spelling, never the longest thing a counterparty's paperwork happened to say.
+    eq('M: the truncated LEDGER spelling is not what gets filed', rowsFor('ZENITH GROWTH PARTNER').length, 0);
+    eq('M: ZENITH PAN', cell(z[0], 'PAN of Company'), 'AAAPZ1234C');
+    eq('M: ZENITH type of company', cell(z[0], 'Type of Company'), 'Domestic');
+    eq('M: ZENITH face value', cell(z[0], 'Shares acquired - Face value per share'), 10);
+    eq('M: ZENITH opening qty', cell(z[0], 'Opening Balance - No. of shares'), 500);
+    near('M: ZENITH opening cost', Number(cell(z[0], 'Opening Balance - Cost of acquisition')), 100000);
+    eq('M: ZENITH r1 acquired', cell(z[0], 'Shares acquired - No. of shares'), 300);
+    eq('M: ZENITH r1 date is dd/mm/yyyy TEXT', cell(z[0], 'Shares acquired - Date of subscription/purchase'), '15/07/2025');
+    near('M: ZENITH r1 issue price is derived turnover/qty', Number(cell(z[0], 'Shares acquired - Issue price per share (fresh issue)')), 700);
+    eq('M: ZENITH r2 acquired', cell(z[1], 'Shares acquired - No. of shares'), 200);
+    eq('M: ZENITH r2 date', cell(z[1], 'Shares acquired - Date of subscription/purchase'), '20/11/2025');
+    // The transfer rides the first row and the closing distributes across both.
+    eq('M: ZENITH transfer is on the first row', cell(z[0], 'Shares transferred - No. of shares'), 600);
+    // 600 shares across a long-term and a short-term parcel, re-aggregated into one figure.
+    near('M: ZENITH consideration sums BOTH tax parcels', Number(cell(z[0], 'Shares transferred - Sale consideration')), 600000);
+    eq('M: ZENITH r2 carries no transfer', cell(z[1], 'Shares transferred - No. of shares'), '');
+    eq('M: ZENITH r1 closing qty (500 + 300 - 600)', cell(z[0], 'Closing balance - No. of shares'), 200);
+    eq('M: ZENITH r2 closing qty', cell(z[1], 'Closing balance - No. of shares'), 200);
+    // FIFO ate the opening first, then 100 of the July lot, so r1 keeps 200 @ 700.
+    near('M: ZENITH r1 closing cost', Number(cell(z[0], 'Closing balance - Cost of acquisition')), 140000);
+    near('M: ZENITH r2 closing cost', Number(cell(z[1], 'Closing balance - Cost of acquisition')), 180000);
+    near('M: ZENITH closing sums to the FIFO position', 200 + 200, 400);
+
+    // ORION — sold out during the year. `heldAll` / `heldPe` filter on `closing.length > 0`,
+    // so sourcing the schedule from either would drop this company off a filed return.
+    const o = rowsFor('ORION UNLISTED PVT LTD');
+    eq('M: an exited company is STILL on the schedule', o.length, 1);
+    eq('M: ORION opening qty', cell(o[0], 'Opening Balance - No. of shares'), 1000);
+    eq('M: ORION transferred everything', cell(o[0], 'Shares transferred - No. of shares'), 1000);
+    near('M: ORION consideration', Number(cell(o[0], 'Shares transferred - Sale consideration')), 80000);
+    eq('M: ORION closing qty is BLANK, not 0', cell(o[0], 'Closing balance - No. of shares'), '');
+    eq('M: ORION closing cost is BLANK, not 0.00', cell(o[0], 'Closing balance - Cost of acquisition'), '');
+    eq('M: ORION made no acquisition, so no date', cell(o[0], 'Shares acquired - Date of subscription/purchase'), '');
+
+    // VERTEX — the one the schedule could silently lose. The same-day matcher groups purely on
+    // key|ts with no asset-class test and routes the matched quantity into `intraBlocks`, so a
+    // builder reading `blocks` alone drops BOTH the acquisition and the transfer while opening
+    // and closing stay untouched — the row still foots, with a year's activity missing from it.
+    const v = rowsFor('VERTEX HOLDINGS PVT LTD');
+    eq('M: a same-day round trip still reaches the schedule', v.length, 1);
+    eq('M: VERTEX acquisition survives the intraday matcher', cell(v[0], 'Shares acquired - No. of shares'), 100);
+    eq('M: VERTEX acquisition date', cell(v[0], 'Shares acquired - Date of subscription/purchase'), '12/09/2025');
+    eq('M: VERTEX transfer survives it too', cell(v[0], 'Shares transferred - No. of shares'), 100);
+    near('M: VERTEX consideration', Number(cell(v[0], 'Shares transferred - Sale consideration')), 60000);
+    eq('M: VERTEX closes at nil, printed blank', cell(v[0], 'Closing balance - No. of shares'), '');
+
+    // Sl. No. runs over ROWS, not companies — 2 + 1 + 1 = 4.
+    const dataRowsM = (itr || []).slice(hi + 1).filter(r => Number(r[C('Sl. No.')]) > 0);
+    eq('M: Sl. No. is a row counter', dataRowsM.map(r => r[C('Sl. No.')]), [1, 2, 3, 4]);
+
+    // Diagnostics: every failure mode of this tab is invisible ON the tab.
+    eq('M: nothing unfooted', res.itrUnfooted, []);
+    eq('M: no PAN missing', res.itrMissingPan, []);
+
+    // Dates are written RAW. Under USER_ENTERED, Sheets reparses 15/07/2025 as US mm-dd for
+    // any day <= 12 and stores a swapped serial — 12/09/2025 would be filed as 9-Dec-2025.
+    const upd = (g.__updated || []).filter((u: any) => (u.range || '').startsWith(`${ITR_TAB}!`));
+    eq('M: the ITR tab is written RAW, never USER_ENTERED', upd.map((u: any) => u.valueInputOption), ['RAW']);
+
+    // The banner rows are merged. `mergeCells` is issued nowhere else against the Sheets API
+    // in this app, so nothing else would catch it being dropped.
+    const reqs = (g.__batched || []).flatMap((b: any) => ((b.resource || {}).requests) || []);
+    eq('M: both banner rows are merged', reqs.filter((r: any) => r.mergeCells).length, 2);
+    eq('M: ...each unmerged first, so a re-run cannot reject the whole batch',
+      reqs.filter((r: any) => r.unmergeCells).length, 2);
+  }
+
   // ── report ────────────────────────────────────────────────────────────────
   console.log('='.repeat(60));
   for (const f of failures) console.log('  FAIL ' + f);

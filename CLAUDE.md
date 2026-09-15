@@ -25,9 +25,9 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
-| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, and the batch-failure fallback (39) |
+| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, and a SOURCE check that Add Trade's save path refreshes the page's scrip master (49) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master (223; 224 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write (270; 271 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -38,6 +38,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
+| `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), plus a source sweep asserting no date input anywhere falls back to a non-empty `value` — and that the Add Trade line date keeps its touched flag and its onBlur (13) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
@@ -139,7 +140,86 @@ company, it is the absence of one.
 - PAN is **passed through, not validated** (trimmed and upper-cased only). This is a display
   field on a statement; rejecting an unfamiliar shape would blank a PAN entered correctly.
   `Type Of Company` is trimmed and NOT upper-cased — it is prose and the sheet's capitalisation
-  is the owner's. `Face Value` is a number, 0 ⇒ absent, exactly as `Valuation` already works.
+  is the owner's. It holds **Domestic / Foreign** (confirmed 14-Sep-2026), not a legal form: it
+  IS column C of the ITR schedule below. Nothing validates it, so an unexpected value prints as
+  typed rather than being blanked. `Face Value` is a number, 0 ⇒ absent, exactly as `Valuation` already works.
+
+**The ITR unlisted-equity-shares schedule** (added 15-Sep-2026). `Unlisted Equity Shares for
+FY<yy-yy>`, written by the same register run, beside the holding tabs. This is **why** PAN,
+Face Value and Type Of Company went onto the Private Equities tab: they are columns D, I and C
+of the ITR-2/3 schedule *"Details of Unlisted Equity Shares held at any time during the previous
+year"*. `src/lib/itrUnlistedSchedule.ts` is a PURE builder (no `gapi`), so the layout is testable
+without Sheets; `trxRegister.ts` assembles its inputs and writes the tab.
+
+The layout is copied from the owner's own FILED FY2024-25 return, and several of its conventions
+contradict how the rest of this app prints things. **On this tab the filed file wins.**
+
+- **ONE ROW PER ACQUISITION, and CLOSING IS PER ROW.** The filed file proves it: `9M India Ltd`
+  occupies two rows carrying closing balances of 18,000 and 12,000, not 30,000 and a blank. The
+  company's real position is the SUM of its rows, which is what makes the schedule's own
+  `=SUM(N5:N57)` mean anything. Each row foots on its own —
+  `closing(row) = opening(row) + acquired(row) - transferred(row)` — with the opening on the
+  first row and **the transfer allocated OLDEST-FIRST** (the order FIFO consumes lots in). Pin
+  the transfer to row 1 instead and a company that sold more than its opening plus first
+  purchase prints a NEGATIVE closing balance on a filed page. The filed file cannot distinguish
+  the two schemes: no company in it has both an opening balance and more than one acquisition.
+- **Blank versus zero, four ways, and the file is not self-consistent.** BLANK where the fact
+  does not exist: E/F for a company first bought during the year (**the commonest case** — an
+  empty lot list sums to 0, and a filed 0.00 asserts it was held on 1-Apr at nil cost), G/H with
+  no acquisition, L/M with no transfer, N/O at nil — and O alone when the survivors are bonus
+  shares. ZERO where the filed file prints zero: I/J/K on a row with no acquisition. That last
+  one is the deliberate divergence from the PE holding statement, which blanks a missing face
+  value.
+- **Source `blocks` DIRECTLY — never `heldAll` / `heldPe`.** Both filter `closing.length > 0`,
+  and a company SOLD OUT during the year is exactly what "held at any time" means. Fixture M's
+  ORION pins it.
+- **Fold in `intraBlocks`, and this one is invisible.** The same-day matcher groups purely on
+  `key|ts` with **no asset-class and no intraday-flag test**, then removes the whole day's rows
+  for that scrip from the delivery replay. An unlisted company bought and sold on one date — an
+  off-market secondary settled same-day — loses its acquisition row AND its transfer row while
+  opening and closing stay untouched, so the row still FOOTS with a year's activity missing from
+  it. The builder reads both maps; the matcher is left alone because changing it would move
+  capital-gains figures. Fixture M's VERTEX pins it.
+- **Written RAW, not USER_ENTERED.** Column H is dd/mm/yyyy TEXT, and under USER_ENTERED Sheets
+  reparses any such string whose day is 12 or less as US mm-dd and stores a swapped serial —
+  `04/10/2024` would file as 10-Apr. Almost every date in the owner's filed copy is one of these.
+- **Indian digit grouping**, like every other tab here. The filed .xlsx stores the WESTERN
+  built-ins and only RENDERS 25,74,000.00 because that machine's Excel is set to India; copied
+  verbatim into Sheets it reads 2,574,000.00.
+- **The name is `canonicalName`, never `Block.name`** — that one is the LONGEST ledger/broker
+  spelling, which on an unlisted company is whatever the counterparty's paperwork said.
+- **TOTAL is written as VALUES, not `=SUM()`.** The register has never written a cell formula,
+  and a formula with no cached result reads back as `undefined` through a workbook reader — a
+  broken total row would then pass a round-trip test as an empty one.
+- **It is a SIBLING of the three holding tabs, not a fourth `variants` entry.** `geom()`
+  parameterises columns, but every row index in that paint pass is a shared constant
+  (`bold(0,3)`, the fill bands, `numFmt(startRowIndex: 3)`, `frozenRowCount: 3`) and this tab has
+  banners on rows 1-2, its header on row 4 and data from row 5. It still shares the single
+  `spreadsheets.get` and the single paint `batchUpdate`, which is the part that costs quota.
+  `mergeCells` is issued **nowhere else** against the Sheets API in this app — each banner is
+  unmerged before it is merged, because the whole paint is ONE request and a rejection would
+  strip the formatting off all four tabs at once.
+
+Three things it deliberately does not do, each an owner decision taken with the consequence
+stated:
+
+- **Column K is 0 on every row.** Nothing records whether a purchase was a fresh issue or came
+  from an existing shareholder — `ledgerSide` collapses RIGHT / IPO / SUBSCRIB / ALLOT into
+  "BUY", and a private placement is entered as a plain Buy. The owner's filed return puts every
+  acquisition in J and leaves K at 0.00 on all 53 rows, so that is reproduced exactly. Recording
+  the distinction needs a ledger column, not a guess.
+- **Cost of acquisition is charge-free turnover**, the basis every gain in this app is computed
+  on, so the schedule reconciles to the capital-gains tabs. For off-market PE the two bases
+  coincide (the owner's filed figures are exact `qty x rate` products), but a PE lot that DOES
+  carry a charge is counted and named rather than absorbed.
+- **The Private Equities tab is assumed to hold EQUITY SHARES only** (confirmed by the owner,
+  14-Sep-2026). An LLP capital contribution, a preference share or an unlisted debenture parked
+  there would be filed on this schedule, and nothing in the data model could tell.
+
+Every way this tab can be wrong is silent ON the tab, so `TrxRegisterResult` carries
+`itrCompanies`, `itrMissingPan` and `itrUnfooted`, all three on the register badge — same
+discipline as the STT pair. `0 companies` against a book that holds unlisted shares means the
+Private Equities tab went unread or nothing resolved, NOT that nothing was held.
 
 **AIF / Mutual Fund / Bond holdings are on Combined and NOWHERE ELSE** — the owner's decision
 (2026-09-14), taken with the consequence stated. So `Equity + PE` does **not** foot to `Combined`
@@ -405,6 +485,28 @@ Adding a field to `AddTradeModal`'s `LineDraft` needs one more edit than it look
 `keyof Omit<LineDraft, …>` over a hand-listed set, so a new field that is not added to that Omit
 list silently becomes a CHARGE field.
 
+**The page holds its OWN scrip master, and it goes stale** (found 14-Sep-2026). `Holdings.tsx`
+loads the master ONCE on mount, unforced, into React state, and keeps it for the life of the
+page. The Add Trade drawer loads its own, and force-reloads it when you press
+*"Just added a company? Recheck"*. So register an unlisted company on the Private Equities tab,
+trade it, and **the drawer's dropdown says PE while the page says EQ** — the series badge, the
+Listed/Unlisted segment and every class-derived figure — for the rest of the session, until a
+browser reload. A PE holding reading as listed equity is a 365-day holding period on a 730-day
+asset.
+
+The save path now calls `refreshScripAfterSave`, which **adopts the drawer's forced master when
+it has one** (free — the drawer already paid for it) and otherwise spends ONE forced read. That
+is a single-spreadsheet batched read on an explicit user action, not the 13-portfolio fan-out the
+read-quota rule is about; `rebuildHolding` and the PE CMP write already do the same.
+
+Worth knowing for the next report of this shape: the SHEET was never wrong. `rebuildHoldingTab`
+and `syncCapitalGains` force a fresh master, so the tax tabs classified it correctly the whole
+time — only the screen lied. And the two candidate causes are indistinguishable from outside the
+app: a stale master and a SPLIT IDENTITY (two entries normalising alike, one carrying the PE
+flag and the other winning the name lookup) produce the identical symptom. The resolution path
+was probed in four shapes and is sound, so `tmp-pe-fold-run.mjs` now pins the invariant — every
+entry the dropdown lists as PE must also RESOLVE as PE by name — to tell the two apart next time.
+
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not
 expressible. Three rules:
@@ -578,7 +680,7 @@ catch a self-consistent misparse. STT allocation goes through the shared `alloca
 
 ## Layout
 
-- `src/lib/` — engines: `holdingsCalc`, `trxRegister`, `openingBasis`, `scripMaster`,
+- `src/lib/` — engines: `holdingsCalc`, `trxRegister`, `openingBasis`, `itrUnlistedSchedule`, `scripMaster`,
   `scripPrices`, `navTimeline`, `reportDoc` / `reportPdf` / `reportXlsx`, `brokers/`
 - `src/components/` — `Holdings.tsx` is the largest (portfolio list + stock detail + trade book)
 - `apps-script/` — Gmail-triggered auto-import (`.gs`); leave alone unless asked

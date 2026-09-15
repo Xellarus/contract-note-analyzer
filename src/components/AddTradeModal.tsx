@@ -18,7 +18,13 @@ interface AddTradeModalProps {
   onClose: () => void;
   defaultPortfolio: string;
   master: ScripMaster | null;
-  onSaved: (pid: string) => void;
+  /**
+   * Saved. The second argument is the master this drawer force-reloaded via "Just added a
+   * company? Recheck", when it did — the parent holds its OWN master for the life of the
+   * page, so handing this one over is what stops a newly registered unlisted company from
+   * reading as listed everywhere outside this drawer. Null when nothing was rechecked.
+   */
+  onSaved: (pid: string, recheckedMaster?: ScripMaster | null) => void;
   // Holdings of the portfolio the PARENT page has open, used to prefill "shares held" for
   // Bonus/Split. The drawer's own portfolio dropdown can point somewhere else, in which case
   // it fetches that portfolio's Holding tab itself — see `heldRows` below.
@@ -496,7 +502,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
         if (res.capGainsWarning) warnings.capGainsWarning = res.capGainsWarning;
       }
       setResult({ ...warnings, added });
-      onSaved(portfolio);
+      onSaved(portfolio, recheckedMaster);
     } catch (e: any) {
       setError(e?.result?.error?.message || e?.message || 'Could not save the trade(s).');
     } finally {
@@ -523,7 +529,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
         sharesIn: num(caSharesIn), cost: num(caCost), notes: caNotes.trim(),
       });
       setCaResult(res);
-      onSaved(portfolio);
+      onSaved(portfolio, recheckedMaster);
     } catch (e: any) {
       setCaError(e?.result?.error?.message || e?.message || 'Could not record the corporate action.');
     } finally {

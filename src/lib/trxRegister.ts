@@ -9,6 +9,10 @@ import { loadCorporateActions, CORP_ACTIONS_TAB } from "./corporateActions";
 import { loadOpeningHoldings } from "./openingHoldings";
 import { UnresolvedScrip, insertLotByTs, carryLots, CarrySource } from "./holdingsCalc";
 import { ledgerSide, isSplitType, isTransferType, parseRatio, freeSharesFor, FreeShareRatio } from "./tradeRowSchema";
+import {
+  buildItrUnlistedSchedule, ItrCompanyInput, ITR_COL, ITR_WIDTH, ITR_COL_WIDTHS,
+  ITR_HEADER_ROW_INDEX, ITR_FIRST_DATA_ROW_INDEX, ITR_BANNER_ROWS,
+} from "./itrUnlistedSchedule";
 
 /**
  * Financial-year, scrip-wise TRANSACTION LEDGER — a replica of the accountant's
@@ -271,6 +275,23 @@ export interface TrxRegisterResult {
    *  the book holds AIF / Mutual Fund / Bonds — those are on combined alone, and the
    *  tab says so under its grand total. */
   holdingTabs: { equity: string; pe: string; combined: string };
+  /**
+   * The ITR schedule "Details of Unlisted Equity Shares held at any time during the previous
+   * year", written per FY beside the holding tabs.
+   *
+   * The three counts are DIAGNOSTIC and exist for the same reason the STT pair does: every way
+   * this schedule can be wrong is silent on the tab itself. `itrCompanies` 0 against a book
+   * that holds unlisted companies means the Private Equities tab was not read or the companies
+   * did not resolve — not that nothing was held. `itrMissingPan` names companies whose PAN cell
+   * is empty, because a blank column D on a filed return is indistinguishable from a company
+   * that legitimately has none. `itrUnfooted` names companies whose rows will not foot, which
+   * happens when a split, a merger/demerger receipt or a cross-portfolio transfer moved shares
+   * with no row of its own.
+   */
+  itrUnlistedTab: string;
+  itrCompanies: number;
+  itrMissingPan: string[];
+  itrUnfooted: string[];
   fyLabel: string;
   /** One entry per non-listed asset class that produced output this run, in registry order. */
   classTabs: { id: AssetClassId; label: string; cgTab?: string; txnTab?: string }[];
@@ -1470,6 +1491,13 @@ export async function generateTrxRegister(
   // `holdingTabName` means "the holding tab", and pointing it at a partial one would quietly
   // narrow what they report.
   const holdingTabName = combinedHoldingTab;
+  // Declared OUT here, like the tab names above, because the whole section-8 block is wrapped
+  // in a try/catch that downgrades any failure to a console.warn — so the result must be able
+  // to report what was (and was not) written from outside it.
+  const itrUnlistedTab = `Unlisted Equity Shares for ${fyLabel}`;
+  let itrCompanies = 0;
+  let itrMissingPan: string[] = [];
+  let itrUnfooted: string[] = [];
   try {
     /**
      * Column geometry. The PRIVATE EQUITY statement carries a PAN column that the other two do
@@ -1526,6 +1554,61 @@ export async function generateTrxRegister(
     const heldListed = heldAll.filter(b => !classOfKey(b.key));
     const heldPe = heldAll.filter(b => classOfKey(b.key) === "PE");
     const heldOther = heldAll.filter(b => { const c = classOfKey(b.key); return !!c && c !== "PE"; });
+
+    // ── The ITR unlisted-equity-shares schedule's inputs ──────────────────────────────────
+    //
+    // Built from `blocks` DIRECTLY, not from `heldAll` / `heldPe`: those filter on
+    // `closing.length > 0`, and a company SOLD OUT during the year is exactly what this
+    // schedule must still report ("held at any time during the previous year"). Such a block
+    // survives in `blocks` with its opening and sales populated and an empty closing.
+    //
+    // And `intraBlocks` is folded in, which is not obvious and is the one way this tab could
+    // have been silently short. The same-day matcher groups purely on `key|ts` with NO
+    // asset-class and no intraday-flag test, then removes the WHOLE day's rows for that scrip
+    // from the delivery replay. So an unlisted company bought and sold on one date — an
+    // off-market secondary settled same-day — loses its acquisition row AND its transfer row,
+    // while opening and closing stay untouched, so the schedule still foots perfectly with a
+    // year's activity missing from it. Reading both maps is the fix; the matcher itself is left
+    // alone because changing it would move capital-gains figures.
+    const sumLotQty = (ls: LotSnap[]) => ls.reduce((s, l) => s + l.qty, 0);
+    const sumLotCost = (ls: LotSnap[]) => ls.reduce((s, l) => s + l.qty * turnoverPrice(l), 0);
+    const chargedLot = (c: Charges) =>
+      c.brok + c.stt + c.gst + c.et + c.stamp + c.sebi + c.ipf + c.dmat > 0.005;
+
+    const itrKeys = new Set<string>();
+    for (const b of blocks.values()) {
+      if (classOfKey(b.key) !== "PE") continue;
+      if (b.opening.length || b.purchases.length || b.sales.length || b.closing.length) itrKeys.add(b.key);
+    }
+    for (const k of intraBlocks.keys()) if (classOfKey(k) === "PE") itrKeys.add(k);
+
+    const itrCompanyInputs: ItrCompanyInput[] = [...itrKeys].map((key) => {
+      const b = blocks.get(key);
+      const ib = intraBlocks.get(key);
+      const e = lookupScrip(master, isinByKey.get(key) || "", nameByKey.get(key) || key).entry;
+      const purchases = [...(b?.purchases || []), ...(ib?.purchases || [])];
+      const sales = [...(b?.sales || []), ...(ib?.sales || [])];
+      return {
+        // The scrip master's own spelling. `b.name` is the LONGEST ledger/broker spelling,
+        // which on an unlisted company is whatever the counterparty's paperwork said — not a
+        // name to file under.
+        name: e?.canonicalName || nameByKey.get(key) || key,
+        pan: e?.pan || "",
+        companyType: e?.companyType || "",
+        faceValue: e?.faceValue > 0 ? e.faceValue : 0,
+        openingQty: sumLotQty(b?.opening || []),
+        openingCost: sumLotCost(b?.opening || []),
+        acquisitions: purchases.map(p => ({ ts: p.ts, qty: p.qty, turnover: p.turnover })),
+        // One sale is pushed as up to THREE parcels (its ST bucket, its LT bucket and any
+        // uncovered quantity), so the company's transfer has to be re-aggregated here; there
+        // is no single per-company figure anywhere upstream.
+        transferredQty: sales.reduce((s, x) => s + x.qty, 0),
+        consideration: sales.reduce((s, x) => s + x.turnover, 0),
+        closingQty: sumLotQty(b?.closing || []),
+        closingCost: sumLotCost(b?.closing || []),
+        hasCharges: purchases.some(p => chargedLot(p.charges)),
+      };
+    });
 
     // The line that stops Equity + PE ≠ Combined from being a silent discrepancy.
     const otherLabels = [...new Set(heldOther.map(b => ASSET_CLASSES[classOfKey(b.key)!].label))].sort();
@@ -1617,6 +1700,22 @@ export async function generateTrxRegister(
       { tab: combinedHoldingTab, sheet: buildHolding(heldAll, `${head}Holding (Combined) ${asOn}`, combinedNote) },
     ];
 
+    // The ITR schedule is a SIBLING of the three holding tabs, not a fourth entry in `variants`.
+    // `geom()` parameterises COLUMNS, but every row index in the paint pass below is a shared
+    // constant — bold(0,3), the three fill bands, numFmt(startRowIndex: 3) and frozenRowCount 3
+    // — and this tab has banners on rows 1-2, its header on row 4 and data from row 5. Reusing
+    // the variant machinery would paint the wrong bands and freeze the wrong rows. It still
+    // shares the single `spreadsheets.get` above and the single paint `batchUpdate` below,
+    // which is the part that costs quota.
+    const itrTab = itrUnlistedTab;
+    const itrSheet = buildItrUnlistedSchedule(itrCompanyInputs, {
+      title: `${head}Details of Unlisted Equity Shares held at any time during ${fyLabel}`,
+      subtitle: "Cost of acquisition is charge-free turnover — the same basis this app computes "
+        + "every capital gain on, so this schedule reconciles to the capital-gains tabs. Every "
+        + "acquisition is carried in the ISSUE PRICE column: the app does not record whether a "
+        + "purchase was a fresh issue or was bought from an existing shareholder.",
+    });
+
     // ONE metadata read for all three tabs. The single-tab version did a `spreadsheets.get`
     // per tab; three of those sit inside the app's heaviest operation, against a quota of 60
     // reads per minute that nothing counts.
@@ -1642,7 +1741,7 @@ export async function generateTrxRegister(
         legacy.title = combinedHoldingTab;   // keep the local view in step so the create pass skips it
       }
     }
-    const missing = variants.map(v => v.tab).filter(t => !byTitle(t));
+    const missing = [...variants.map(v => v.tab), itrTab].filter(t => !byTitle(t));
     if (missing.length) { await ensureSheetTabs(spreadsheetId, missing); await readProps(); }
 
     const paint: any[] = [];
@@ -1687,7 +1786,83 @@ export async function generateTrxRegister(
       );
       for (const r of v.sheet.blockRanges) paint.push(fill(r.start, r.end, HC.sno, HC.brok, GREEN));   // each scrip's holding block, A→F
     }
-    // One batchUpdate for all three sheets — a request carries its own sheetId, so there is no
+    // ── The ITR schedule: values, then its own paint requests into the SAME batch ──────────
+    //
+    // RAW, not USER_ENTERED. Column H carries dd/mm/yyyy as literal TEXT, and under
+    // USER_ENTERED Sheets reparses any such string whose day is <= 12 as US mm-dd and stores a
+    // SWAPPED serial — 04/10/2024 would land as 10-Apr-2024 on a filed return. RAW stores each
+    // JSON value as it stands: numbers stay numeric, the date strings stay strings.
+    {
+      itrCompanies = itrSheet.companyCount;
+      itrMissingPan = itrSheet.missingPan;
+      itrUnfooted = itrSheet.unfooted;
+      const itrSheetId = byTitle(itrTab)?.sheetId;
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${itrTab}!A:Z` }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
+        spreadsheetId, range: `${itrTab}!A1`, valueInputOption: "RAW", resource: { values: itrSheet.rows },
+      }));
+      if (itrSheetId !== undefined && itrSheetId !== null) {
+        const HDRFILL = { red: 0.851, green: 0.882, blue: 0.949 };   // FFD9E1F2 — the filed file's own header fill
+        const WHITE = { red: 1, green: 1, blue: 1 };
+        const rng = (r0: number, r1: number, c0: number, c1: number) =>
+          ({ sheetId: itrSheetId, startRowIndex: r0, endRowIndex: r1, startColumnIndex: c0, endColumnIndex: c1 });
+        const boldRows = (r0: number, r1: number) => ({
+          repeatCell: { range: rng(r0, r1, 0, ITR_WIDTH), cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: "userEnteredFormat.textFormat.bold" },
+        });
+        // Number formats run from the first DATA row so the header text is never reformatted.
+        const fmt = (c0: number, c1: number, pattern: string, type = "NUMBER") => ({
+          repeatCell: {
+            range: { sheetId: itrSheetId, startRowIndex: ITR_FIRST_DATA_ROW_INDEX, startColumnIndex: c0, endColumnIndex: c1 },
+            cell: { userEnteredFormat: { numberFormat: { type, pattern } } },
+            fields: "userEnteredFormat.numberFormat",
+          },
+        });
+        // Indian digit grouping, as every other tab this app writes uses. The filed file stores
+        // the WESTERN built-ins (#,##0.00) and only RENDERS 25,74,000.00 because that machine's
+        // Excel is set to India; copied verbatim into Sheets it would read 2,574,000.00.
+        const INR = "#,##,##0.00", INT = "#,##,##0";
+        paint.push(
+          { repeatCell: { range: { sheetId: itrSheetId }, cell: { userEnteredFormat: { backgroundColor: WHITE, textFormat: { bold: false } } }, fields: "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold" } },
+          fmt(ITR_COL.openQty, ITR_COL.openQty + 1, INT),
+          fmt(ITR_COL.openCost, ITR_COL.openCost + 1, INR),
+          fmt(ITR_COL.acqQty, ITR_COL.acqQty + 1, INT),
+          fmt(ITR_COL.acqDate, ITR_COL.acqDate + 1, "@", "TEXT"),
+          fmt(ITR_COL.faceValue, ITR_COL.purchasePrice + 1, INR),   // face value + both price columns
+          fmt(ITR_COL.xferQty, ITR_COL.xferQty + 1, INT),
+          fmt(ITR_COL.consideration, ITR_COL.consideration + 1, INR),
+          fmt(ITR_COL.closeQty, ITR_COL.closeQty + 1, INT),
+          fmt(ITR_COL.closeCost, ITR_COL.closeCost + 1, INR),
+          boldRows(0, ITR_BANNER_ROWS),
+          boldRows(itrSheet.totalRowIndex, itrSheet.totalRowIndex + 1),
+          {
+            repeatCell: {
+              range: rng(ITR_HEADER_ROW_INDEX, ITR_HEADER_ROW_INDEX + 1, 0, ITR_WIDTH),
+              cell: { userEnteredFormat: { backgroundColor: HDRFILL, textFormat: { bold: true }, wrapStrategy: "WRAP", verticalAlignment: "MIDDLE", horizontalAlignment: "CENTER" } },
+              fields: "userEnteredFormat(backgroundColor,textFormat,wrapStrategy,verticalAlignment,horizontalAlignment)",
+            },
+          },
+          { updateSheetProperties: { properties: { sheetId: itrSheetId, gridProperties: { frozenRowCount: ITR_HEADER_ROW_INDEX + 1 } }, fields: "gridProperties.frozenRowCount" } },
+        );
+        // Banner rows merged A:N, exactly as the filed file has them. `mergeCells` is issued
+        // NOWHERE else against the Sheets API in this app (only ExcelJS uses it, in
+        // reportXlsx.ts), so this is a new request type here. Unmerge first: a re-run would
+        // otherwise merge an already-merged range, and the whole batch is one request — a
+        // rejection would strip the formatting off all four tabs at once.
+        for (let r = 0; r < ITR_BANNER_ROWS; r++) {
+          paint.push({ unmergeCells: { range: rng(r, r + 1, 0, ITR_WIDTH - 1) } });
+          paint.push({ mergeCells: { range: rng(r, r + 1, 0, ITR_WIDTH - 1), mergeType: "MERGE_ALL" } });
+        }
+        ITR_COL_WIDTHS.forEach((w, i) => paint.push({
+          updateDimensionProperties: {
+            range: { sheetId: itrSheetId, dimension: "COLUMNS", startIndex: i, endIndex: i + 1 },
+            properties: { pixelSize: Math.round(w * 7 + 5) },   // Excel character units -> pixels
+            fields: "pixelSize",
+          },
+        }));
+      }
+    }
+
+    // One batchUpdate for all four sheets — a request carries its own sheetId, so there is no
     // reason to spend three.
     if (paint.length) {
       try {
@@ -1883,6 +2058,7 @@ export async function generateTrxRegister(
   return {
     tabName, intradayTabName, holdingTabName, fyLabel,
     holdingTabs: { equity: equityHoldingTab, pe: peHoldingTab, combined: combinedHoldingTab },
+    itrUnlistedTab, itrCompanies, itrMissingPan, itrUnfooted,
     classTabs: ASSET_CLASS_IDS
       .filter(id => classCg.some(c => c.id === id) || txnTabByClass.has(id))
       .map(id => ({

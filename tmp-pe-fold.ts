@@ -29,6 +29,15 @@ const PE = [
   ['Quiet Harbour Ventures Pvt Ltd', 'https://drive.google.com/drive/folders/quiet', '', ''],
   // Normalises to "acme foods" — the SAME key as the listed "Acme Foods Ltd" above.
   ['Acme Foods Private Limited', 'https://drive.google.com/drive/folders/acme', 900, '2026-03-31'],
+  // The owner's own spelling, reported 14-Sep-2026: no space before LTD, and two full stops.
+  // It has to collapse to "keshwana ispat", because True Entry stores no ISIN and that
+  // normalised name is the ONLY thing a saved trade is looked up by. A SHAPE guard, not a
+  // mechanism one: swapping normName's punctuation and pvt/ltd steps does not break it
+  // (\b treats the full stop as a word boundary either way), and nor does disabling
+  // claimAlias's overwrite rule. Both were tried. It is here because the shape came off a
+  // real sheet and the cost of it silently failing is a 365-day holding period on a
+  // 730-day asset.
+  ['KESHWANA ISPAT PVT.LTD.', '', '', ''],
 ];
 
 const MAIN_RANGE = "'Scrip Master'!A1:Z50000";
@@ -177,6 +186,53 @@ eq('collision: no valuation applied', lookupScrip(master, '', 'Acme Foods Ltd').
     isPeScrip(m, '', 'Stellar Robotics Private Limited'), true);
   eq('...and no class is wrongly marked failed', m.peFailed, false);
   g.__failBatch = false;
+}
+
+
+// ── The punctuation shape the owner actually types ───────────────────────────────
+// True Entry has NO ISIN column, so a saved unlisted trade is looked up BY NAME alone. That is
+// the only path production uses, and it is the path these assert.
+eq('pvt.ltd.: resolves as PE by name alone', isPeScrip(master, '', 'KESHWANA ISPAT PVT.LTD.'), true);
+eq('pvt.ltd.: long-term at 730 days, not 365', ltDaysFor(master, '', 'KESHWANA ISPAT PVT.LTD.'), 730);
+eq('pvt.ltd.: and under a shortened spelling', isPeScrip(master, '', 'Keshwana Ispat'), true);
+
+// ── THE INVARIANT: what the dropdown LISTS as PE must also RESOLVE as PE ──────────────
+// Reported 14-Sep-2026: the Add Trade dropdown showed a company as PE while its detail-page
+// badge read EQ. Those two ask DIFFERENT questions — the dropdown iterates `master.entries` and
+// reads `e.assetClass`, the badge calls `assetClassOf(name)` — so an identity split across two
+// entries answers them differently, and the holding is then taxed as listed equity at 365 days
+// instead of 730 with nothing on screen disagreeing.
+//
+// (That report turned out to be a STALE master held in the page, not a split identity. But the
+// two are indistinguishable from outside the app, which is exactly why the invariant is worth
+// pinning: next time, this says which one it is.)
+for (const e of master.entries.filter((x: any) => x.assetClass)) {
+  eq(`invariant: "${e.canonicalName}" is listed as ${e.assetClass} and resolves as ${e.assetClass}`,
+    lookupScrip(master, '', e.canonicalName).entry?.assetClass, e.assetClass);
+}
+
+
+// ── The page must not keep a STALE master after registering a company ───────────────
+// This is what the 14-Sep-2026 report actually was. `Holdings.tsx` loads the scrip master ONCE
+// on mount, unforced, into React state; the Add Trade drawer force-reloads its OWN master when
+// you press "Just added a company? Recheck". Register an unlisted company, trade it, and the
+// drawer's dropdown says PE while the page's badge, its Listed/Unlisted segment and every
+// class-derived figure keep saying EQ — for the whole session, until a browser reload.
+//
+// Source-checked rather than behaviour-checked because it is React state wiring: there is no
+// browser in the loop, and a green suite proved nothing about it for as long as it was broken.
+{
+  const fs = await import('node:fs');
+  const src = fs.readFileSync('src/components/Holdings.tsx', 'utf8');
+  const handlers = [...src.matchAll(/onSaved=\{([\s\S]{0,400}?)\}\}/g)].map(m => m[1]);
+  const addTrade = handlers.filter(h => /fetchSheetHoldings/.test(h));
+  eq('every Add Trade onSaved handler was found', addTrade.length >= 2, true);
+  eq('...and every one of them refreshes the scrip master',
+    addTrade.every(h => /refreshScripAfterSave/.test(h)), true);
+  eq('the refresh prefers the drawer-supplied master over a fresh read',
+    /refreshScripAfterSave = \(fromDrawer[\s\S]{0,200}?if \(fromDrawer\) \{ setScrip\(fromDrawer\)/.test(src), true);
+  eq('...and forces the read when there is none, or it would re-read the same stale cache',
+    /refreshScripAfterSave[\s\S]{0,400}?loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID, \{ force: true \}\)/.test(src), true);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

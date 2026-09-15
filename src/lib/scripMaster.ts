@@ -81,7 +81,9 @@ export interface ScripEntry {
   pan?: string;
   /** Per-share face value of an unlisted company, from its asset-class tab. */
   faceValue?: number;
-  /** Private Limited / LLP / Unlisted Public, as typed on that tab. */
+  /** `Type Of Company` as typed on that tab, passed through verbatim. Confirmed 14-Sep-2026 to
+   *  hold the ITR vocabulary — **Domestic / Foreign** — because it feeds column C of the
+   *  unlisted-equity-shares schedule, not a description of the company's legal form. */
   companyType?: string;
   peNotes?: string;
 }

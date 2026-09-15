@@ -27,7 +27,10 @@ import { parseDMY } from "./dates";
  *                    FY-end private-equity holding statement (a preparer needs the PAN of
  *                    each unlisted company beside the holding).
  *   Face Value     — optional. Per-share face value. 0 / blank ⇒ not given.
- *   Type Of Company— optional free text (Private Limited, LLP, Unlisted Public…).
+ *   Type Of Company— optional. Passed through verbatim. The owner keeps the ITR vocabulary
+ *                    here — Domestic / Foreign — because it IS column C of the unlisted-
+ *                    equity-shares schedule. The reader does not police it: an unexpected
+ *                    value prints as typed rather than being blanked.
  *   Notes          — optional free text.
  *
  * These rows are folded into the in-memory `ScripMaster` at load (see `loadScripMaster`),
@@ -123,7 +126,7 @@ export interface PrivateEquityRow {
   pan: string;
   /** Per-share face value. 0 ⇒ none given ⇒ a blank cell on the statement. */
   faceValue: number;
-  /** Free text as typed — Private Limited, LLP, Unlisted Public. NOT upper-cased (unlike a
+  /** Free text as typed — Domestic / Foreign, the ITR vocabulary. NOT upper-cased (unlike a
    *  PAN, which is written that way): this is prose and the sheet's capitalisation is the
    *  owner's. */
   companyType: string;

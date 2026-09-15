@@ -328,6 +328,28 @@ export default function Holdings({
   useEffect(() => onShortcut((a) => { if (a === 'addTrade') setShowAddTrade(true); }), []);
   // Scrip master (NSE/BSE/ISIN reference) for the stock-detail header pills.
   const [scrip, setScrip] = useState<ScripMaster | null>(null);
+
+  /**
+   * Re-point this page at a current scrip master after a trade is saved.
+   *
+   * The master lives in this component's state for the LIFE OF THE PAGE — loaded once, unforced,
+   * by the mount effect below. That is right for a read-only view and wrong the moment the user
+   * registers a new unlisted company and trades it: the Add Trade drawer force-reloads its OWN
+   * master when you press "Just added a company? Recheck", so the drawer sees the new Private
+   * Equities row and this page does not. The dropdown says PE, while the series badge, the
+   * Listed/Unlisted segment and every class-derived figure here keep saying EQ — for the rest of
+   * the session, until a browser reload. Reported 14-Sep-2026 on KESHWANA ISPAT PVT.LTD.; the
+   * resolution path was probed in four shapes and is not at fault, the staleness is.
+   *
+   * Adopt the drawer's forced master when it has one (free), else spend ONE forced read. That is
+   * a single-spreadsheet batched read on an explicit user action, not the 13-portfolio fan-out
+   * the read-quota rule is about — the same trade `rebuildHolding` and the PE CMP write already
+   * make below.
+   */
+  const refreshScripAfterSave = (fromDrawer?: ScripMaster | null) => {
+    if (fromDrawer) { setScrip(fromDrawer); return; }
+    loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).then(setScrip).catch(() => {});
+  };
   // Current-price snapshot (from the screener.in import) — values holdings live-ish.
   const [priceRows, setPriceRows] = useState<ScripPrice[]>([]);
   // Both reads need a LIVE Google token, and the saved token is restored ASYNCHRONOUSLY after
@@ -4178,7 +4200,8 @@ export default function Holdings({
           master={scrip}
           holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
           prefill={{ company: name, isin: displayIsin || isin }}
-          onSaved={(pid) => {
+          onSaved={(pid, rechecked) => {
+            refreshScripAfterSave(rechecked);
             if (pid !== activePortfolio) return;
             fetchSheetHoldings(pid, true);
             if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
@@ -4362,7 +4385,7 @@ export default function Holdings({
         // drawer's form - the saved row is still classified from the scrip master.
         scope={assetClass === 'pe' ? 'pe' : undefined}
         holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
-        onSaved={(pid) => { if (pid === activePortfolio) fetchSheetHoldings(pid, true); }}
+        onSaved={(pid, rechecked) => { refreshScripAfterSave(rechecked); if (pid === activePortfolio) fetchSheetHoldings(pid, true); }}
       />
 
       {editEntryModal}
@@ -4581,6 +4604,7 @@ export default function Holdings({
                           ? [trx.result.holdingTabs.equity, trx.result.holdingTabs.pe, trx.result.holdingTabs.combined]
                           : [trx.result.holdingTabName]),
                         ...(trx.result.classTabs || []).flatMap(c => [c.cgTab, c.txnTab].filter(Boolean) as string[]),
+                        ...(trx.result.itrUnlistedTab ? [trx.result.itrUnlistedTab] : []),
                       ].map(t => `"${t}"`).join(' + ') + ` — ${trx.result.buyRows} buys · ${trx.result.sellRows} sells`
                         // "STT Removed" fails silently: the tab just still shows STT. Naming
                         // both numbers here turns three indistinguishable causes into three
@@ -4592,11 +4616,29 @@ export default function Holdings({
 STT Removed: ${trx.result.sttFlaggedInMaster} flagged in master`
                         + (trx.result.sttSuppressed.length
                           ? `, suppressed on ${trx.result.sttSuppressed.length}: ${trx.result.sttSuppressed.join(', ')}`
-                          : ', suppressed on none')}>
+                          : ', suppressed on none')
+                        // The ITR schedule fails the same silent way: a tab that lists no
+                        // companies looks identical whether the book holds none, the Private
+                        // Equities tab went unread, or the companies did not resolve. The two
+                        // lists below are the ones that would otherwise only be found by
+                        // reading a filed return — a blank PAN, and rows that do not foot.
+                        + `
+Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.result.itrUnlistedTab || '(not written)'}"`
+                        + ((trx.result.itrMissingPan || []).length
+                          ? `
+  NO PAN on the scrip master: ${trx.result.itrMissingPan.join(', ')}`
+                          : '')
+                        + ((trx.result.itrUnfooted || []).length
+                          ? `
+  rows will not foot (a split, a merger/demerger or a transfer moved shares with no row of its own): ${trx.result.itrUnfooted.join(', ')}`
+                          : '')}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
                         {/* Shown only when the master actually carries the flag, so the badge
                             stays unchanged for everyone who does not use it. "0 of N" is the
                             loud case: the column WAS read and the scrip still did not match. */}
+                        {(trx.result.itrMissingPan || []).length > 0 && (
+                          <> · {trx.result.itrMissingPan.length} unlisted co. without PAN</>
+                        )}
                         {trx.result.sttFlaggedInMaster > 0 && (
                           <> · STT off: {trx.result.sttSuppressed.length}
                             {trx.result.sttSuppressed.length === 0 && ` of ${trx.result.sttFlaggedInMaster} flagged`}
