@@ -66,7 +66,7 @@ const headerLabel = (c: TemplateCol) => (c.mandatory ? `${c.header}*` : c.header
 const notes = (stockName: string): string[] => [
   `Only the columns marked with an asterisk * are compulsory.`,
   `Every row must be this stock's own trade — ${stockName || 'the stock you opened this from'}. Rows naming another company (or another ISIN) are rejected and counted, never filed under this one.`,
-  `Only trades dated ON OR BEFORE ${OPENING_CUTOFF_ISO} are imported. Anything later belongs in the trade book, not the opening basis, and is counted as dropped.`,
+  `Only trades dated ON OR BEFORE ${OPENING_CUTOFF_ISO} are imported. Anything later belongs in the trade book and is counted as dropped.`,
   `Trades are ADDED to what is already there — nothing is replaced. A SELL consumes the oldest shares already on the sheet, FIFO.`,
   `Uploading the same file twice is safe: a row already present (same date, type, quantity and price) is skipped.`,
   `Add older trades BEFORE newer ones when a batch also contains sells, so the FIFO order matches the order the trades actually happened in.`,

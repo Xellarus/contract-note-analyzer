@@ -15,7 +15,7 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { dateInputValue } from './src/lib/dates';
+import { dateInputValue, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from './src/lib/dates';
 
 let pass = 0;
 const failures: string[] = [];
@@ -74,6 +74,17 @@ const tsxFiles: string[] = [];
 
 ok('B1 the sweep found source files to scan', tsxFiles.length > 0, `found ${tsxFiles.length}`);
 
+/**
+ * Comments, gone, BEFORE anything is scanned.
+ *
+ * `Holdings.tsx` carries a doc comment containing a literal `<input type="date">` as prose.
+ * Scanned raw, this sweep reports that DOCUMENTATION as an unbounded, unguarded input — which
+ * is worse than silence, because it sends the next reader to a line with no code on it. Same
+ * trap `tmp-shortcuts.ts` already strips for, and it fired here the moment section D was added.
+ */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
 /** Every `<input …>` element in a file, as raw text. */
 const inputElements = (src: string): string[] => {
   const out: string[] = [];
@@ -110,7 +121,7 @@ const valueExpr = (el: string): string => {
 const offenders: string[] = [];
 let dateInputs = 0;
 for (const f of tsxFiles) {
-  const src = readFileSync(f, 'utf8');
+  const src = stripComments(readFileSync(f, 'utf8'));
   for (const el of inputElements(src)) {
     if (!/type=["']date["']/.test(el)) continue;
     dateInputs++;
@@ -137,6 +148,100 @@ ok('B3 NO date input falls back to a non-empty value — that wipes the segment 
   ok('B5 ...sets the touched flag as it is typed into', /dateSet:\s*true/.test(el), el.slice(0, 200));
   ok('B6 ...and clears it on blur, the only route back to the default',
     /onBlur=/.test(el) && /dateSet:\s*false/.test(el), el.slice(0, 300));
+}
+
+// ── C. isDateInputSane: the six-digit year ──────────────────────────────────────────────────
+//
+// Reported 16-Sep-2026 on the Add Trade line date. A native date input's year segment is not
+// four digits — the HTML date range runs to 275760-09-13 — so one keystroke too many turns
+// 21-11-2025 into 21-11-20251. What comes out is a WELL-FORMED date string, so nothing
+// downstream rejects it: it reaches the sheet, parses as a year twenty thousand years away,
+// falls outside every FY the register knows, and the row disappears off the tab it belonged on.
+
+// The empty string MUST pass. It is what the DOM reports for every intermediate typing state,
+// and rejecting it would re-open the wipe that section A exists to prevent.
+eq('C1 an empty value passes — it is what a half-typed field reports', () => isDateInputSane(''), true);
+eq('C2 an ordinary date passes', () => isDateInputSane('2025-11-21'), true);
+eq('C3 the lower bound passes', () => isDateInputSane(DATE_INPUT_MIN), true);
+eq('C4 the upper bound passes', () => isDateInputSane(DATE_INPUT_MAX), true);
+// THE BUG: the fifth digit.
+eq('C5 a FIVE-digit year is rejected', () => isDateInputSane('20251-11-21'), false);
+eq('C6 a six-digit year is rejected', () => isDateInputSane('202511-11-21'), false);
+eq('C7 the HTML maximum is rejected', () => isDateInputSane('275760-09-13'), false);
+// A leading-plus form is what some engines emit for expanded years.
+eq('C8 an expanded-year form is rejected', () => isDateInputSane('+020251-11-21'), false);
+eq('C9 a three-digit year is rejected too', () => isDateInputSane('202-11-21'), false);
+eq('C10 junk is rejected', () => isDateInputSane('not a date'), false);
+
+// The guard must REJECT, never rewrite: returning a clamped string from onChange would write a
+// non-empty value over a half-typed field, which is the original bug wearing a different hat.
+ok('C11 the guard is a predicate, not a transformer', typeof isDateInputSane('2025-11-21') === 'boolean');
+
+ok('C12 the bounds are four-digit years — Chrome sizes the year segment from `max`',
+  /^\d{4}-\d{2}-\d{2}$/.test(DATE_INPUT_MIN) && /^\d{4}-\d{2}-\d{2}$/.test(DATE_INPUT_MAX));
+
+// ── D. Source sweep: every date input is bounded AND guarded ────────────────────────────────
+//
+// `min`/`max` is the defence that stops the fifth keystroke being accepted at all, and the
+// onChange guard is the one that does not depend on a browser behaviour. Both, everywhere —
+// a single unbounded input is the whole bug back.
+{
+  const unbounded: string[] = [];
+  const unguarded: string[] = [];
+  let seen = 0;
+  for (const f of tsxFiles) {
+    const src = stripComments(readFileSync(f, 'utf8'));
+    for (const el of inputElements(src)) {
+      if (!/type=["']date["']/.test(el)) continue;
+      seen++;
+      const where = `${f.replace(process.cwd(), '.')} → ${(valueExpr(el) || '?').trim().slice(0, 40)}`;
+      // A tighter bound of the screen's own (Reports caps at today) counts: what matters is
+      // that SOME max is present, because that is what fixes the year-segment width.
+      if (!/\bmax=\{/.test(el)) unbounded.push(where);
+      if (!/isDateInputSane\(/.test(el)) unguarded.push(where);
+    }
+  }
+  ok('D1 the sweep found the date inputs', seen >= 8, `found ${seen}`);
+  ok('D2 EVERY date input carries a max — without it the year segment takes six digits',
+    unbounded.length === 0, unbounded.join('\n     '));
+  ok('D3 EVERY date input rejects an out-of-shape value in onChange',
+    unguarded.length === 0, unguarded.join('\n     '));
+}
+
+// ── E. A zero price or amount must be SAVEABLE ──────────────────────────────────────────────
+//
+// Owner directive, 16-Sep-2026: "remove the hardlock of buy and sell, the amount and price if 0
+// should be submittable". Shares do change hands for nothing — a gift, a transmission, a
+// written-off unlisted holding, an allotment against an earlier advance — and refusing them
+// forced a fictitious rupee into the cost basis, which is worse than the zero it avoided.
+//
+// Source-checked because `lineError` is a closure inside a React component with no seam to call
+// it through, and because the failure is a re-added guard, which is exactly the kind of thing a
+// later tidy-up reintroduces "for safety".
+{
+  const src = readFileSync(join(SRC, 'components', 'AddTradeModal.tsx'), 'utf8');
+  // Comments stripped first: the rule is explained in prose right beside the code it governs,
+  // and a naive scan reports its own documentation as the violation.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  ok('E1 nothing blocks a save on a zero PRICE', !/Price must be greater than 0/.test(code));
+  ok('E2 nothing blocks a save on a zero AMOUNT', !/Amount must be greater than 0/.test(code));
+  // Quantity is NOT part of the directive and must stay blocked: a trade of no shares moves
+  // nothing, and there is no reading of it that is correct.
+  ok('E3 a zero QUANTITY is still refused', /Quantity must be greater than 0/.test(code));
+
+  // Unblocked is not the same as unremarked. A zero-cost buy leaves the lot with no basis, so a
+  // later sale is taxed on the whole proceeds; a zero-consideration sell books the entire cost
+  // as a loss. Both are invisible on the row once written.
+  ok('E4 a zero-value line still WARNS', /const lineWarning\b/.test(code));
+  ok('E5 ...and the warning is rendered', /\{!err && warn &&/.test(code));
+  ok('E6 ...in amber, not the rose the blocking error uses',
+    /!err && warn &&[\s\S]{0,120}text-amber-700/.test(code));
+  ok('E7 ...and says something different for a sell than for a buy',
+    /lineWarning[\s\S]{0,700}l\.action === 'Sell'/.test(code));
+  // Bonus and Split are free BY DEFINITION — warning on them would train the user to ignore it.
+  ok('E8 free-share actions are not warned about',
+    /const lineWarning[\s\S]{0,200}isFreeShares\(l\.action\)\) return null;/.test(code));
 }
 
 console.log(`\ndate-input: ${pass} passed, ${failures.length} failed`);

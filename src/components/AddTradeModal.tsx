@@ -3,7 +3,7 @@ import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Slider
 import { ModalShell, toast, confirmDialog } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
-import { dateInputValue } from '../lib/dates';
+import { dateInputValue, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
 import { CorpActionType } from '../lib/corporateActions';
 import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { appendPrivateEquity } from '../lib/privateEquityWrite';
@@ -426,9 +426,37 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       }
     }
     if (isFreeShares(l.action)) return num(l.qty) > 0 ? null : 'Enter a ratio and shares held';
+    // QUANTITY still has to be positive: a trade of no shares moves nothing and there is no
+    // reading of it that is correct.
     if (num(l.qty) <= 0) return 'Quantity must be greater than 0';
-    if (num(l.price) <= 0) return 'Price must be greater than 0';
+    // PRICE and AMOUNT may both be zero (owner directive, 16-Sep-2026). They are not errors:
+    // shares genuinely change hands for nothing — a gift, a transmission, a written-off
+    // unlisted holding, an allotment against an earlier advance — and refusing them forced a
+    // fictitious rupee into the cost basis, which is worse than the zero it was avoiding. The
+    // arithmetic downstream is already total: turnover 0 gives purPrice 0 on a buy (the same
+    // path a bonus lot takes) and salePrice 0 on a sell.
+    //
+    // It is not free of consequence, though, so `lineWarning` SAYS what a zero does instead of
+    // blocking it.
     return null;
+  };
+
+  /**
+   * Non-blocking cautions, shown where the error would be and in amber rather than rose.
+   *
+   * A zero-value line is legitimate and is saved, but its tax effect is large and silent: a
+   * zero-cost BUY leaves the lot with no basis at all, so a later sale is taxed on the whole
+   * proceeds; a zero-consideration SELL books the entire cost of the shares sold as a loss.
+   * Neither is visible anywhere on the row once it is written, which is the argument for
+   * putting it in front of the person typing it.
+   */
+  const lineWarning = (l: LineDraft): string | null => {
+    if (isFreeShares(l.action)) return null;          // Bonus / Split are free BY DEFINITION
+    if (num(l.qty) <= 0) return null;                 // already a hard error; do not pile on
+    if (num(l.price) > 0 || num(l.amount) > 0) return null;
+    return l.action === 'Sell'
+      ? 'Zero consideration — books the whole cost of these shares as a loss.'
+      : 'Zero cost — the lot carries no basis, so a later sale is taxed on the full proceeds.';
   };
 
   // A wholly-empty line (e.g. a trailing "Add another line") is ignored, not an error.
@@ -633,7 +661,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Date <span className="text-rose-500">*</span></label>
-                  <input type="date" value={caDate} onChange={(e) => setCaDate(e.target.value)} className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
+                  <input type="date" value={caDate} min={DATE_INPUT_MIN} max={DATE_INPUT_MAX} onChange={(e) => { if (isDateInputSane(e.target.value)) setCaDate(e.target.value); }} className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white" />
                 </div>
               </div>
 
@@ -732,7 +760,8 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Default Trade Date <span className="text-rose-500">*</span></label>
                   <input
-                    type="date" value={tradeDate} onChange={(e) => setTradeDate(e.target.value)}
+                    type="date" value={tradeDate} min={DATE_INPUT_MIN} max={DATE_INPUT_MAX}
+                    onChange={(e) => { if (isDateInputSane(e.target.value)) setTradeDate(e.target.value); }}
                     title="Applies to every line that doesn't set its own date."
                     className="w-full px-3 py-2 text-xs text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                   />
@@ -799,6 +828,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   const deliveryLocked = isDeliveryLocked(l.action) || isPe;
                   const prev = linePreview(l);
                   const err = lineError(l);
+                  const warn = lineWarning(l);
                   const actionHint = ACTIONS.find((a) => a.value === l.action)?.hint;
                   // Bonus/Split: shares held come straight from the current holding (auto); the
                   // manual box only appears when we can't determine it (holdings not loaded / not held).
@@ -845,8 +875,8 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                               input's value wipes the segment being typed. The onBlur is what
                               hands an emptied field back to the drawer's date. See dates.ts. */}
                           <input
-                            type="date" value={dateInputValue(l.date, tradeDate, l.dateSet)}
-                            onChange={(e) => setLine(l.id, { date: e.target.value, dateSet: true })}
+                            type="date" value={dateInputValue(l.date, tradeDate, l.dateSet)} min={DATE_INPUT_MIN} max={DATE_INPUT_MAX}
+                            onChange={(e) => { if (isDateInputSane(e.target.value)) setLine(l.id, { date: e.target.value, dateSet: true }); }}
                             onBlur={() => { if (!l.date) setLine(l.id, { dateSet: false }); }}
                             title="This line's trade date — defaults to the date at the top of the drawer."
                             className={`w-full px-3 py-2 text-xs rounded-lg border outline-none focus:ring-1 focus:ring-indigo-500 ${l.date ? 'border-indigo-200 bg-white text-slate-800' : 'border-slate-200 bg-white text-slate-500'}`}
@@ -1012,6 +1042,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                         {!free && <span className="text-slate-500">Charges <strong className="font-mono text-slate-700">{inr(prev.charges)}</strong></span>}
                         <span className="text-slate-500">{prev.buySide ? 'Net outflow' : 'Net inflow'} <strong className="font-mono text-slate-900">{inr(prev.net)}</strong></span>
                         {err && l.company.trim() !== '' && <span className="text-rose-500 font-semibold ml-auto">{err}</span>}
+                        {/* Only when there is no error — two messages in one slot reads as
+                            though the warning were the reason the save is blocked. */}
+                        {!err && warn && <span className="text-amber-700 font-semibold ml-auto">{warn}</span>}
                         {/* One-click fix for the one refusal that a write actually resolves - but
                             WHICH tab is the user's call, because the tab decides the tax rule.
                             One compact button per class rather than a default, so nothing is

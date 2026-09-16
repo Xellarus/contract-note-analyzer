@@ -39,7 +39,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
-| `npx tsx tmp-date-input.ts` | Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), plus a source sweep asserting no date input anywhere falls back to a non-empty `value` — and that the Add Trade line date keeps its touched flag and its onBlur (13) |
+| `npx tsx tmp-date-input.ts` | Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about (36) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
@@ -461,6 +461,18 @@ lots and `Opening Txns` rows and write the file's own reconstruction in their pl
   a template column ships a sample the app rejects **under a green suite** without it. Probed by
   renaming `Trans Type`.
 
+- **It is not CALLED an opening-basis tool anywhere the owner can see** (15-Sep-2026). The
+  button hint, the dialog heading and subtitle, the duplicate-file error, the preview explainer,
+  the primary button (`Add trades`, was `Add to opening basis`) and the template's Instructions
+  tab all now say *trades*. The reason is not cosmetic: the portfolio-wide tool under the
+  **Opening Basis** tab REPLACES, and this one ADDS, so sharing its name made a destructive
+  operation and an additive one read as the same thing. What did NOT change is the destination —
+  the rows still land on `Opening Holdings` / `Opening Txns`, those tabs keep their names, and
+  the 31-Mar-2025 cap is still stated on the hint because True Entry is FY26-only and later rows
+  are counted as dropped. Internal names (`stockOpeningImport.ts`, `openingTemplate.ts`,
+  `StockOpeningImportModal.tsx`) are unchanged: they describe the sheet tabs, which really are
+  called that.
+
 Known gap, unchanged: bonus / split / rights rows are not handled by this importer (they need a
 ratio), and `openingBasis.ts`'s corp-action resolution is not wired to it.
 
@@ -473,13 +485,49 @@ date on every keypress (reported 14-Sep-2026 on the Add Trade line date, which w
 input in the app carrying a fallback — every other one is `value={state}` and works precisely
 because an empty string matches the DOM and React leaves the node alone).
 
+**And its year segment is not four digits.** The HTML date range runs to 275760-09-13, so an
+unbounded input accepts a SIX-digit year: one keystroke too many turns `21-11-2025` into
+`21-11-20251` (reported 16-Sep-2026, again on the Add Trade line date). What comes out is a
+well-formed date string, so nothing downstream rejects it — it reaches the sheet, parses as a
+year twenty thousand years away, falls outside every FY the register knows, and the row simply
+disappears off the tab it belonged on. Two defences, because the first is a browser behaviour
+rather than a guarantee:
+
+- **`min` / `max` on every date input.** Chrome sizes the year segment from `max`, so a
+  four-digit bound is what stops the fifth keystroke being accepted at all. `DATE_INPUT_MIN` /
+  `DATE_INPUT_MAX` in `dates.ts`; a screen with a tighter bound of its own (Reports caps at
+  today) keeps it — what matters is that SOME `max` is present. The three Reports inputs
+  already had one, which is why the glitch never appeared there and is the evidence the
+  mechanism is right.
+- **`isDateInputSane(v)` in `onChange`.** REJECT the change, never rewrite it: the controlled
+  input's unchanged `value` prop makes React restore the node on the next render. Rewriting a
+  clamped value here instead would re-open the wipe above, because any non-empty write differs
+  from the `""` a half-typed field reports. The empty string must therefore PASS.
+
 `dateInputValue(stored, fallback, touched)` in `src/lib/dates.ts` is the one spelling. The caller
 owns `touched`: set it in `onChange`, and clear it in `onBlur` **when the field is empty** — that
 blur is the ONLY route back to showing the default, and without it an emptied line renders blank
 while `buildLines`' own `l.date || tradeDate` still files it under the drawer's date, so the
 screen and the sheet disagree. `?? ''` is harmless (the empty string matches the DOM); only a
 non-empty fallback bites. `tmp-date-input.ts` pins both the behaviour and a source sweep, because
-neither `tsc` nor the build can see any of it and there is no browser in the loop.
+neither `tsc` nor the build can see any of it and there is no browser in the loop. That sweep
+**strips comments first**: `Holdings.tsx` carries a doc comment containing a literal
+`<input type="date">` as prose, and scanned raw the sweep reports its own documentation as an
+unbounded input — worse than silence, because it sends the reader to a line with no code on it.
+Same trap `tmp-shortcuts.ts` already strips for; it fired here the moment the bounds check was
+added.
+
+**A zero PRICE or AMOUNT is saveable** (owner directive, 16-Sep-2026); only QUANTITY is still
+refused. Shares genuinely change hands for nothing — a gift, a transmission, a written-off
+unlisted holding, an allotment against an earlier advance — and blocking them forced a
+fictitious rupee into the cost basis, which is worse than the zero it avoided. The arithmetic
+downstream is already total: turnover 0 gives `purPrice` 0 on a buy (the path a bonus lot
+already takes) and `salePrice` 0 on a sell, and `manualTrades` only ever divides by quantity.
+It is not free of consequence, so `lineWarning` SAYS it in amber instead of blocking in rose —
+a zero-cost buy leaves the lot with no basis at all, so a later sale is taxed on the whole
+proceeds; a zero-consideration sell books the entire cost of the shares as a loss. Neither is
+visible anywhere on the row once written. Bonus/Split are not warned about: they are free BY
+DEFINITION, and warning on them trains the user to ignore the warning.
 
 Adding a field to `AddTradeModal`'s `LineDraft` needs one more edit than it looks: `ChargeKey` is
 `keyof Omit<LineDraft, …>` over a hand-listed set, so a new field that is not added to that Omit

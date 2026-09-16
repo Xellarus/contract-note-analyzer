@@ -140,3 +140,30 @@ export const isDateHeader = (header: string): boolean =>
  */
 export const dateInputValue = (stored: string, fallback: string, touched: boolean): string =>
   touched ? stored : (stored || fallback);
+
+/**
+ * Bounds for EVERY `<input type="date">` in the app, and the guard that goes with them.
+ *
+ * A native date input's year segment is not four digits. Left unbounded it accepts up to SIX
+ * (the HTML date range runs to 275760-09-13), so typing one digit too many in the year turns
+ * `21-11-2025` into `21-11-20251` — reported 16-Sep-2026 on the Add Trade line date. The value
+ * that comes out is a real, well-formed date string (`20251-11-21`), so nothing downstream
+ * rejects it: it is written to the sheet, parsed back as a year twenty thousand years away, and
+ * lands outside every FY the register knows about. The row simply vanishes from the tab it
+ * belonged on.
+ *
+ * Two defences, because the first one is a browser behaviour rather than a guarantee:
+ *
+ *   1. `min` / `max` on the element. Chrome sizes the year segment from `max`, so a four-digit
+ *      bound is what stops the fifth keystroke being accepted at all.
+ *   2. `isDateInputSane` in `onChange`. Reject the change — do NOT rewrite it — and the
+ *      controlled input's unchanged `value` prop makes React restore the node on the next
+ *      render. Rewriting it here instead would re-open the wipe that `dateInputValue` exists to
+ *      prevent, because any non-empty write differs from the "" a half-typed field reports.
+ *
+ * The empty string MUST pass: it is what the DOM reports for every intermediate typing state.
+ */
+export const DATE_INPUT_MIN = "1900-01-01";
+export const DATE_INPUT_MAX = "2099-12-31";
+
+export const isDateInputSane = (v: string): boolean => v === "" || /^\d{4}-\d{2}-\d{2}$/.test(v);

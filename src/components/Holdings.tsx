@@ -33,7 +33,7 @@ import { useRowNav } from '../lib/rowNav';
 import { onShortcut, HOLDINGS_SEARCH_ID } from '../lib/shortcuts';
 import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount, isFreeShareType, parseRatio, formatRatio, freeSharesFor, FreeShareRatio } from '../lib/tradeRowSchema';
 import { TransferHoldingModal } from './TransferHoldingModal';
-import { formatDMY, formatDMYTime } from '../lib/dates';
+import { formatDMY, formatDMYTime, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
 import ScripReviewModal from './ScripReviewModal';
 import AddTradeModal from './AddTradeModal';
 import StockOpeningImportModal from './StockOpeningImportModal';
@@ -1944,7 +1944,7 @@ export default function Holdings({
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="text-[10px] font-bold uppercase text-slate-500">Acquisition Date</span>
-                  <input type="date" value={editForm.tradeDate ?? ''} onChange={e => setEditForm(p => ({ ...p, tradeDate: e.target.value }))}
+                  <input type="date" value={editForm.tradeDate ?? ''} min={DATE_INPUT_MIN} max={DATE_INPUT_MAX} onChange={e => { if (isDateInputSane(e.target.value)) setEditForm(p => ({ ...p, tradeDate: e.target.value })); }}
                     className="mt-0.5 w-full px-2.5 py-1.5 text-sm border border-slate-200 rounded-lg font-mono" />
                 </label>
                 <label className="block">
@@ -2147,8 +2147,8 @@ export default function Holdings({
 
             <div>
               <label className={lbl}>Action Date</label>
-              <input type="date" className={fld} value={caEditForm.dateISO}
-                onChange={(e) => setCaEditForm(f => ({ ...f, dateISO: e.target.value }))} />
+              <input type="date" className={fld} value={caEditForm.dateISO} min={DATE_INPUT_MIN} max={DATE_INPUT_MAX}
+                onChange={(e) => { if (isDateInputSane(e.target.value)) setCaEditForm(f => ({ ...f, dateISO: e.target.value })); }} />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -3723,7 +3723,7 @@ export default function Holdings({
                         },
                         {
                           id: 'detail-import-opening', Icon: Upload, label: 'Import',
-                          hint: `Add trades through 31-Mar-2025 to ${name}'s opening basis, or download the template`,
+                          hint: `Add ${name}'s trades dated on or before 31-Mar-2025, or download the template`,
                           pressed: false,
                           run: () => setShowOpeningImport(true),
                         },
@@ -4207,7 +4207,11 @@ export default function Holdings({
             if (lastTxFetch) fetchTransactionsForStock(lastTxFetch.companyName, lastTxFetch.isin);
           }}
         />
-        {/* Per-stock opening-trades import — ADDS to the opening basis (Google portfolios only). */}
+        {/* Per-stock trade import — ADDS to what is already recorded (Google portfolios only).
+            The destination is still the `Opening Holdings` / `Opening Txns` tabs, but the UI no
+            longer SAYS so (owner directive, 15-Sep-2026): from this screen the operation is
+            "add these trades", and calling it an opening-basis tool read as though it were the
+            portfolio-wide one under the Opening Basis tab, which replaces rather than adds. */}
         {activePortfolio !== 'local' && (
           <StockOpeningImportModal
             open={showOpeningImport}

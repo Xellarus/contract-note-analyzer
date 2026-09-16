@@ -12,7 +12,7 @@ import { downloadOpeningTemplate } from '../lib/openingTemplate';
  * Per-stock opening-trades import. Two ways in: upload this stock's trades (.xlsx or .csv), or
  * download the two-tab template to fill in first.
  *
- * The upload ADDS to the stock's pre-FY26 opening basis — it does not replace it (user
+ * The upload ADDS to what is already recorded for the stock — it does not replace it (user
  * directive 2026-09-14). The preview therefore shows THREE numbers that matter: what is on the
  * sheet now, what is being added, and what the position becomes. Showing only the file's own
  * reconstruction, as the replace version did, would read as the whole position and make an
@@ -97,7 +97,7 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
       return;
     }
     if (preview.freshRows === 0) {
-      setError(`Every row in this file is already in ${stockName}'s opening basis — nothing to add.`);
+      setError(`Every row in this file is already recorded for ${stockName} — nothing to add.`);
       return;
     }
     setError('');
@@ -115,7 +115,7 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
     } catch (err: any) {
       const msg = err?.result?.error?.message || err?.message || String(err);
       // Surface it IN the modal — a toast can render behind the overlay, so failures looked silent.
-      console.error('Opening-basis import failed:', err);
+      console.error('Stock trade import failed:', err);
       setError(`Import failed: ${msg}`);
       toast.error(`Import failed: ${msg}`);
     } finally {
@@ -131,10 +131,10 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
         <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200 bg-slate-50">
           <div>
             <h2 id="stock-import-title" className="text-sm font-black text-slate-900 flex items-center gap-1.5">
-              <Upload className="w-4 h-4 text-indigo-600" /> Import opening trades — {stockName}
+              <Upload className="w-4 h-4 text-indigo-600" /> Import trades — {stockName}
             </h2>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              Adds trades dated on or before {OPENING_CUTOFF_ISO} to this stock's opening position{accountLabel ? ` · ${accountLabel}` : ''}. Nothing already there is replaced; FY26 trades are untouched.
+              Adds trades dated on or before {OPENING_CUTOFF_ISO} to this stock's recorded history{accountLabel ? ` · ${accountLabel}` : ''}. Nothing already there is replaced; FY26 trades are untouched.
             </p>
           </div>
           <button onClick={close} disabled={applying} className="text-slate-400 hover:text-slate-700 disabled:opacity-40 cursor-pointer" aria-label="Close"><X className="w-4 h-4" /></button>
@@ -261,7 +261,7 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
               <div className="flex items-start gap-2 text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
                 <Info className="w-4 h-4 mt-0.5 shrink-0" />
                 <span>
-                  These <b>{preview.freshRows}</b> trade(s) are <b>added</b> to {stockName}'s opening basis — its existing{' '}
+                  These <b>{preview.freshRows}</b> trade(s) are <b>added</b> to what is already recorded for {stockName} — its existing{' '}
                   <b>{preview.existingLots}</b> lot(s) are kept and any sell here consumes the oldest of them, FIFO. Other stocks and FY26 trades are untouched.
                 </span>
               </div>
@@ -283,7 +283,7 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
               className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-black uppercase tracking-wider rounded-md text-white cursor-pointer ${(!parsed || !preview) ? 'bg-slate-400 hover:bg-slate-400' : 'bg-indigo-600 hover:bg-indigo-500'} disabled:opacity-40`}
             >
               {applying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-              {applying ? 'Importing…' : 'Add to opening basis'}
+              {applying ? 'Importing…' : 'Add trades'}
             </button>
           </div>
         </div>

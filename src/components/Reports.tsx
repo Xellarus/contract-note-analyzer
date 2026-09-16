@@ -5,7 +5,7 @@ import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
 import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
-import { formatDMY, formatDMMMY, isDateHeader } from '../lib/dates';
+import { formatDMY, formatDMMMY, isDateHeader, isDateInputSane, DATE_INPUT_MIN } from '../lib/dates';
 import { loadOpeningHoldings } from '../lib/openingHoldings';
 import { useVirtualRows } from './ui/useVirtualRows';
 import ExportMenu from './ExportMenu';
@@ -794,8 +794,9 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                   <input
                     type="date"
                     value={asOf}
+                    min={DATE_INPUT_MIN}
                     max={todayStr()}
-                    onChange={(e) => setAsOf(e.target.value)}
+                    onChange={(e) => { if (isDateInputSane(e.target.value)) setAsOf(e.target.value); }}
                     className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
                   />
                 </div>
@@ -811,8 +812,9 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                     <input
                       type="date"
                       value={fromDate}
+                      min={DATE_INPUT_MIN}
                       max={toDate || todayStr()}
-                      onChange={(e) => setFromDate(e.target.value)}
+                      onChange={(e) => { if (isDateInputSane(e.target.value)) setFromDate(e.target.value); }}
                       className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
                     />
                     <button
@@ -830,9 +832,9 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                     <input
                       type="date"
                       value={toDate}
-                      min={fromDate || undefined}
+                      min={fromDate || DATE_INPUT_MIN}
                       max={todayStr()}
-                      onChange={(e) => setToDate(e.target.value)}
+                      onChange={(e) => { if (isDateInputSane(e.target.value)) setToDate(e.target.value); }}
                       className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
                     />
                   </div>
