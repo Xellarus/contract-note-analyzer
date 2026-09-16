@@ -4,7 +4,7 @@
  * real loader against a stubbed Sheets API (see tmp-pe-fold-run.mjs), so the column
  * detection, the alias index and the listed-company guard are all live.
  */
-import { loadScripMaster, invalidateScripCache, isPeScrip, peEntry, ltDaysFor, lookupScrip, saveScripMaster } from './src/lib/scripMaster';
+import { loadScripMaster, invalidateScripCache, isPeScrip, peEntry, ltDaysFor, lookupScrip, resolveScrip, saveScripMaster } from './src/lib/scripMaster';
 import { makePriceResolver } from './src/lib/scripPrices';
 
 let pass = 0, fail = 0;
@@ -21,10 +21,14 @@ const MAIN = [
   ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name'],
   ['INE001A01036', 'Goodluck India Limited', 'GOODLUCK | 530655', 'GOODLUCK', ''],
   ['INE777X01011', 'Acme Foods Ltd', 'ACMEF | 500123', 'ACMEFOODS', ''],
+  // The owner's real second collision (16-Sep-2026): a listed company whose PE-tab twin is
+  // named with NOTHING to tell the two apart. Unlike Acme there is no Pvt/Private token, so
+  // no discriminating key exists and the row must be REFUSED and reported, not guessed at.
+  ['INE888X01019', 'Cranex Ltd.', '522001', '', ''],
 ];
 
 const PE = [
-  ['Company', 'Drive Link', 'Valuation', 'Valuation Date'],
+  ['Company', 'Drive Link', 'Valuation', 'Valuation Date', 'ISIN'],
   ['Stellar Robotics Private Limited', 'https://drive.google.com/drive/folders/stellar', 250, '2026-03-31'],
   ['Quiet Harbour Ventures Pvt Ltd', 'https://drive.google.com/drive/folders/quiet', '', ''],
   // Normalises to "acme foods" — the SAME key as the listed "Acme Foods Ltd" above.
@@ -38,6 +42,13 @@ const PE = [
   // real sheet and the cost of it silently failing is a 365-day holding period on a
   // 730-day asset.
   ['KESHWANA ISPAT PVT.LTD.', '', '', ''],
+  // Collides with the listed 'Cranex Ltd.' and carries no token that distinguishes it.
+  ['Cranex', '', '', ''],
+  // Carries its OWN ISIN and collides by name with the listed 'Goodluck India Limited'.
+  // An ISIN row takes the `!entry` path and CREATES an entry, whose `indexEntry` would claim
+  // the shared name slot. True Entry has no ISIN column, so every listed trade is looked up by
+  // name — losing that slot files them all against the private company at 730 days.
+  ['Goodluck India Pvt Ltd', '', '', '', 'INE999Z01010'],
 ];
 
 const MAIN_RANGE = "'Scrip Master'!A1:Z50000";
@@ -75,7 +86,23 @@ eq('listed LT is 365d', ltDaysFor(master, 'INE001A01036', 'Goodluck India Limite
 eq('collision: listed stays listed', isPeScrip(master, 'INE777X01011', 'Acme Foods Ltd'), false);
 eq('collision: still priced', !!lookupScrip(master, 'INE777X01011', 'Acme Foods Ltd').entry?.priceExcept, false);
 eq('collision: LT stays 365d', ltDaysFor(master, 'INE777X01011', 'Acme Foods Ltd'), 365);
-eq('collision: LT stays 365d (typed as Pvt)', ltDaysFor(master, '', 'Acme Foods Private Limited'), 365);
+// The LISTED company must still answer to its own name — this is the assertion that stops the
+// twin from stealing the shared slot, which `claimAlias` would happily have let it do.
+eq('collision: the listed twin still answers to its own name', isPeScrip(master, '', 'Acme Foods Ltd'), false);
+eq('collision: ...at 365 days, by name alone', ltDaysFor(master, '', 'Acme Foods Ltd'), 365);
+
+// CHANGED 16-Sep-2026. The owner holds BOTH a listed "Kusumgar Limited" and an unlisted
+// "Kusumgar Pvt Ltd", and before this they could not: the two collapse to one key and one name
+// slot. A name that CARRIES the Pvt/Private token now gets its own entry under the
+// discriminating key (`normNamePrivate`), so each resolves to itself.
+eq('twin: the Pvt spelling resolves to the PRIVATE company', isPeScrip(master, '', 'Acme Foods Private Limited'), true);
+eq('twin: ...at 730 days, not the listed 365', ltDaysFor(master, '', 'Acme Foods Private Limited'), 730);
+eq('twin: ...and "Pvt Ltd" is the same company as "Private Limited"', isPeScrip(master, '', 'Acme Foods Pvt Ltd'), true);
+eq('twin: the two are DIFFERENT entries',
+  lookupScrip(master, '', 'Acme Foods Private Limited').entry !== lookupScrip(master, '', 'Acme Foods Ltd').entry, true);
+eq('twin: the listed one keeps its ticker', lookupScrip(master, '', 'Acme Foods Ltd').entry?.nse, 'ACMEFOODS');
+eq('twin: the private one has none', lookupScrip(master, '', 'Acme Foods Private Limited').entry?.nse, undefined);
+eq('twin: ...and is never priced', !!lookupScrip(master, '', 'Acme Foods Private Limited').entry?.priceExcept, true);
 // The Drive link is still lent to it — a document link computes nothing.
 eq('collision: drive link attached', lookupScrip(master, '', 'Acme Foods Ltd').entry?.driveLink, 'https://drive.google.com/drive/folders/acme');
 // And no phantom valuation is applied to a listed company.
@@ -233,6 +260,139 @@ for (const e of master.entries.filter((x: any) => x.assetClass)) {
     /refreshScripAfterSave = \(fromDrawer[\s\S]{0,200}?if \(fromDrawer\) \{ setScrip\(fromDrawer\)/.test(src), true);
   eq('...and forces the read when there is none, or it would re-read the same stale cache',
     /refreshScripAfterSave[\s\S]{0,400}?loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID, \{ force: true \}\)/.test(src), true);
+}
+
+
+// ── A class dropped by a ticker collision is RECORDED, not swallowed ────────────────────────
+//
+// Reported 16-Sep-2026: "I added Kusumgar Pvt Ltd in private equities sheet, in the unlisted add
+// trade page it is not showing on dropdown."
+//
+// `Acme Foods Private Limited` is on the PE tab and normalises to the same key as the LISTED
+// `Acme Foods Ltd`, which carries a ticker. `foldAssetClass` therefore skips it — correctly,
+// because marking a live listed holding unlisted would swap its LTCG period to 24 months and
+// stop the price feed ever fetching it. What was WRONG is that it happened in silence.
+//
+// The Add Trade dropdown filters on `assetClass` (`ScripCombobox`, `peOnly && !e.assetClass`),
+// so a skipped row is on the sheet and invisible in the app, with nothing anywhere saying why.
+eq('collision: the skipped row is recorded', master.classSkippedByTicker.length, 1);
+eq('collision: ...by the name as TYPED on the tab', master.classSkippedByTicker[0].name, 'Cranex');
+eq('collision: ...with the key the two share', master.classSkippedByTicker[0].normalised, 'cranex');
+eq('collision: ...naming what it collided with', master.classSkippedByTicker[0].collidedWith, 'Cranex Ltd.');
+eq('collision: ...and the ticker that vetoed it', master.classSkippedByTicker[0].ticker, '522001');
+// Acme is NOT in this list any more: it carries the Pvt token, so it got its own identity
+// instead of being refused. Only a name with nothing to distinguish it is refused.
+eq('collision: a name WITH a distinguishing token is not refused',
+  master.classSkippedByTicker.some((x: any) => /Acme/i.test(x.name)), false);
+
+// The mechanism itself, asserted where the dropdown reads it: no assetClass, so `peOnly` skips
+// it. This is the line that turns "not in the dropdown" from a mystery into a stated fact.
+eq('collision: the refused entry carries NO assetClass, which is what hides it',
+  lookupScrip(master, '', 'Cranex').entry?.assetClass, undefined);
+eq('collision: ...and it is therefore not PE either', isPeScrip(master, '', 'Cranex'), false);
+
+// Only the colliding row. A list that fills up with healthy companies is a list nobody reads.
+eq('collision: a clean PE row is NOT reported',
+  master.classSkippedByTicker.some((x: any) => /Stellar|Quiet|KESHWANA/i.test(x.name)), false);
+
+// The discriminating key is a TIE-BREAKER, not a new lookup rule: it is consulted only when it
+// differs from the plain key, which is only for a name carrying the token. Everything else must
+// take exactly the path it always did.
+eq('twin: an ordinary name is unaffected', isPeScrip(master, '', 'Stellar Robotics Private Limited'), true);
+eq('twin: ...including one with no Pvt token at all', isPeScrip(master, '', 'Quiet Harbour Ventures Pvt Ltd'), true);
+eq('twin: a listed company with no unlisted twin still resolves', lookupScrip(master, '', 'Goodluck India Limited').entry?.nse, 'GOODLUCK');
+
+// `resolveScrip` is a SECOND, parallel implementation of the same resolution — and it is the one
+// the register uses (`keyOf`), so it decides the KEY a saved trade is filed under and therefore
+// which tax rules reach it. Patching only `lookupScrip` would leave the drawer showing the right
+// company while the register filed its trades against the listed one. Asserted separately
+// because the probe that disables resolveScrip's branch did NOT fail without this.
+{
+  const pvt = resolveScrip(master, '', 'Acme Foods Private Limited');
+  const listed = resolveScrip(master, '', 'Acme Foods Ltd');
+  eq('twin/resolve: the Pvt spelling resolves to the private company', pvt.status === 'resolved' && isPeScrip(master, '', pvt.entry!.canonicalName), true);
+  eq('twin/resolve: ...to a DIFFERENT key than the listed one', pvt.status === 'resolved' && listed.status === 'resolved' && pvt.key !== listed.key, true);
+  eq('twin/resolve: ...and the listed one still keeps its ticker', listed.status === 'resolved' ? listed.entry.nse : '', 'ACMEFOODS');
+}
+
+// The same protection where the PE row creates a BRAND NEW entry rather than matching one.
+// "Give the tab row its ISIN" was the advice the app itself printed, and without this it is
+// advice to break the LISTED company: the new entry's `indexEntry` claims the shared name slot
+// and every "Goodluck India Limited" trade then files against the private one at 730 days.
+eq('isin-row: the listed company keeps its own name', isPeScrip(master, '', 'Goodluck India Limited'), false);
+eq('isin-row: ...at 365 days', ltDaysFor(master, '', 'Goodluck India Limited'), 365);
+eq('isin-row: ...and its ticker', lookupScrip(master, '', 'Goodluck India Limited').entry?.nse, 'GOODLUCK');
+eq('isin-row: while the Pvt spelling reaches the private company', isPeScrip(master, '', 'Goodluck India Pvt Ltd'), true);
+eq('isin-row: ...at 730 days', ltDaysFor(master, '', 'Goodluck India Pvt Ltd'), 730);
+
+// ── The drawer must not show a master older than the sheet ──────────────────────────────────
+//
+// `activeMaster` is `recheckedMaster || master || selfMaster`, and it preferred the STALEST of
+// the three: the `master` PROP, which Holdings loads once on mount and keeps for the life of
+// the page. The drawer is the screen the owner opens straight after editing a non-listed tab,
+// so it is the one that must re-read. Source-checked: React state wiring, no browser in the loop.
+{
+  const fs = await import('node:fs');
+  const src = fs.readFileSync('src/components/AddTradeModal.tsx', 'utf8');
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  eq('drawer: opening it FORCES a fresh master read',
+    /useEffect\(\(\) => \{[\s\S]{0,400}?loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID, \{ force: true \}\)/.test(code), true);
+  eq('drawer: ...into recheckedMaster, so it beats the parent\u2019s stale prop',
+    /force: true \}\)[\s\S]{0,200}?setRecheckedMaster/.test(code), true);
+  eq('drawer: ...and a failed force still falls back rather than emptying the dropdown',
+    /\.catch\(\(\) => \{[\s\S]{0,300}?loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID\)/.test(code), true);
+
+  // The refusal message. Telling someone to "add it to one of the tabs" when it is ALREADY on
+  // one talks them into a duplicate row — the split-identity failure, self-inflicted.
+  eq('drawer: the refusal consults the collision list before blaming the user',
+    /classSkippedByTicker[\s\S]{0,300}?normName\(l\.company\.trim\(\)\)/.test(code), true);
+  eq('drawer: ...and tells them NOT to add it again',
+    /Do NOT add it again/.test(code), true);
+}
+
+// ── A finished parse must clear a stale error ───────────────────────────────────────────────
+// The Add button stays clickable while a file is read, on purpose, so a click during the read
+// gives feedback instead of nothing. That feedback was then left standing once the read
+// finished — "Still reading the file" in red above a preview that had rendered perfectly.
+{
+  const fs = await import('node:fs');
+  const src = fs.readFileSync('src/components/StockOpeningImportModal.tsx', 'utf8');
+  eq('import modal: a successful parse clears the error it may have set',
+    /setParsed\(p\); setPreview\(pv\); setError\(''\);/.test(src), true);
+}
+
+
+// ── The unlisted dropdown must not truncate the list it exists to show ──────────────────────
+//
+// Reported 16-Sep-2026, twice: a company added to the Private Equities tab was not in the Add
+// Trade dropdown. Two causes were fixed first (a stale master, and a class dropped by a ticker
+// collision) and it was STILL missing. This is the third and it is the one that hid a company
+// whose master entry was perfectly fine.
+//
+// `ScripCombobox` scanned `master.entries` and did `if (out.length >= 60) break` — in SHEET
+// ORDER, not alphabetical. In PE scope an empty box matches every entry, so the scan stopped at
+// the 60th row of the tab and nothing below it could ever be reached. A newly added company
+// goes at the BOTTOM. It then sliced to 30 for display, with no marker, so a list cut short was
+// indistinguishable from "that company is not registered" — which sends the owner off to add a
+// duplicate row for one that already exists.
+{
+  const fs = await import('node:fs');
+  const src = fs.readFileSync('src/components/ScripCombobox.tsx', 'utf8');
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  eq('combobox: the scan cap applies to the LISTED universe only',
+    /if \(!peOnly && out\.length >= 60\) break;/.test(code), true);
+  eq('combobox: ...and there is no unguarded cap left',
+    /if \(out\.length >= \d+\) break;/.test(code), false);
+  eq('combobox: PE scope is shown in full, never sliced',
+    /const shown = peOnly \? out : out\.slice\(0, 30\);/.test(code), true);
+  eq('combobox: the total is carried out of the memo so truncation can be stated',
+    /return \{ matches: shown, total: out\.length \};/.test(code), true);
+  eq('combobox: ...and IS stated when the list is cut short',
+    /total > matches\.length &&/.test(code), true);
+  eq('combobox: peOnly is in the memo deps, or the list would not refresh with scope',
+    /\}, \[value, master, peOnly\]\);/.test(code), true);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

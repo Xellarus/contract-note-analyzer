@@ -12,6 +12,7 @@
 import {
   findHeader, parseCellDate, rowIsForeign, parseStockTxnGrid, parseSingleStockTxnCsv,
   dedupeAgainstExisting, batchIsOutOfOrder, reconstructStockOpening, txnKey,
+  creditCorpActionRows,
 } from './src/lib/stockOpeningImport';
 import type { SeedLot, TxnStatementRow } from './src/lib/openingBasis';
 
@@ -289,6 +290,169 @@ async function templateRoundTrip(): Promise<void> {
 // ───────────────────────────────────────────────────────────────────────────────────────────
 
 await templateRoundTrip().catch((e: any) => { fail++; failures.push(`H round trip — threw: ${e?.message || e}`); });
+
+
+// ── I. The duplicate guard counts, it does not merely recognise ─────────────────────────────
+//
+// Two identical fills on one day are real — one broker order split across two contract notes.
+// The guard used a Set of existing keys, so ONE such row already on the sheet masked EVERY
+// incoming row sharing its key. The difference is "one of your three is already filed" versus
+// "none of your three will be added", which is the shape the owner reported on 16-Sep-2026.
+{
+  const sheetHasOne = [row('2024-05-02', 'BUY', 10, 100)];
+  const fileHasThree = [
+    row('2024-05-02', 'BUY', 10, 100),
+    row('2024-05-02', 'BUY', 10, 100),
+    row('2024-05-02', 'BUY', 10, 100),
+  ];
+  eq('I1 one existing row masks exactly ONE of three identical incoming rows',
+    () => dedupeAgainstExisting(sheetHasOne, fileHasThree).fresh.length, 2);
+  eq('I2 ...and counts one duplicate, not three',
+    () => dedupeAgainstExisting(sheetHasOne, fileHasThree).duplicates, 1);
+  eq('I3 two on the sheet mask two',
+    () => dedupeAgainstExisting([...sheetHasOne, ...sheetHasOne], fileHasThree).fresh.length, 1);
+  eq('I4 three on the sheet mask all three',
+    () => dedupeAgainstExisting([...sheetHasOne, ...sheetHasOne, ...sheetHasOne], fileHasThree).fresh.length, 0);
+  eq('I5 nothing on the sheet masks nothing',
+    () => dedupeAgainstExisting([], fileHasThree).fresh.length, 3);
+}
+
+// ── J. Bonus / Rights rows are CREDITED, and nothing is dropped in silence ───────────────────
+//
+// Reported 16-Sep-2026: "it is not adding the trades I asked it to via excel." The cause was
+// `replayScrip` deriving a corp action's share count from a stored RATIO while this importer
+// passes `{}` as the resolutions map — so every Bonus / Split / Rights row was parsed, counted
+// as "for this stock", WRITTEN to Opening Txns, and then contributed nothing at all. The
+// position came out short, and re-uploading could never fix it because the row was by then a
+// duplicate of itself.
+//
+// A row on this template does not need a ratio: it carries a QUANTITY the owner typed.
+{
+  // The owner's own NSE shape, off their filed ITR schedule: 24,000 held, a 96,000 share
+  // allotment at nil cost on 11-Nov-2024, then 24,000 sold. The filed closing is 96,000.
+  const nse = [
+    row('2023-06-15', 'BUY', 24000, 3018.28),
+    row('2024-11-11', 'BONUS', 96000, 0),
+    row('2025-01-20', 'SELL', 24000, 1690.69),
+  ];
+  const built = reconstructStockOpening(nse, 'INE721A01013');
+  // DISJOINT from the old behaviour, which silently dropped the bonus row and left the sells
+  // consuming everything: 0 shares, which is exactly what the owner was shown.
+  close('J1 the bonus is credited, so the filed 96,000 survives', () => built.qty, 96000);
+  eq('J2 ...and it is reported, not applied behind the owner\'s back', () => built.corpActions.credited.length, 1);
+  eq('J3 ...naming the date and quantity', () => built.corpActions.credited[0].iso, '2024-11-11');
+  close('J4 ...at the quantity typed on the row', () => built.corpActions.credited[0].qty, 96000);
+  eq('J5 ...at NO cost', () => built.corpActions.credited[0].price, 0);
+  eq('J6 nothing was ignored', () => built.corpActions.ignored.length, 0);
+  // The cost is the original purchase alone — bonus shares add shares, never basis.
+  close('J7 the bonus adds shares but no cost', () => Math.round(built.invested), Math.round(24000 * 3018.28 - 24000 * 3018.28));
+
+  // The control: strip the bonus row and the position collapses to zero, which is the number
+  // the owner was actually shown. Without this the fixture would pass on a bonus that was
+  // ignored but happened to leave shares behind for some other reason.
+  const withoutBonus = reconstructStockOpening(nse.filter(r => r.type !== 'BONUS'), 'INE721A01013');
+  close('J8 CONTROL: with no bonus row the position is 0 — the reported symptom', () => withoutBonus.qty, 0);
+}
+
+// A RIGHTS row is a PAID credit: its price is the cost basis, not zero.
+{
+  const built = reconstructStockOpening([
+    row('2024-02-01', 'BUY', 1000, 100),
+    row('2024-08-01', 'RIGHTS', 500, 60),
+  ], '');
+  close('J9 rights are credited at their quantity', () => built.qty, 1500);
+  close('J10 ...and cost what the row says', () => Math.round(built.invested), 100000 + 30000);
+  eq('J11 ...reported at that price, not zeroed like a bonus', () => built.corpActions.credited[0].price, 60);
+}
+
+// A statement that carries BOTH a Bonus line and a same-day ₹0 share credit describes ONE
+// event. Crediting both doubles the position.
+{
+  const built = reconstructStockOpening([
+    row('2024-01-01', 'BUY', 1000, 10),
+    row('2024-06-01', 'BONUS', 1000, 0),
+    row('2024-06-01', 'BUY', 1000, 0),      // the accompanying credit for the SAME shares
+  ], '');
+  close('J12 a bonus accompanied by a same-day zero-price credit is NOT doubled', () => built.qty, 2000);
+  eq('J13 ...and the corp-action row is not reported as credited', () => built.corpActions.credited.length, 0);
+}
+
+// A SPLIT is NOT credited from its quantity: that column is ambiguous (shares added, or the
+// resulting total?) and guessing doubles or halves a position. Ignored — and SAID.
+{
+  const built = reconstructStockOpening([
+    row('2024-01-01', 'BUY', 100, 500),
+    row('2024-09-01', 'SPLIT', 900, 0),
+  ], '');
+  close('J14 a split adds no shares', () => built.qty, 100);
+  eq('J15 ...and is REPORTED as unapplied rather than dropped quietly', () => built.corpActions.ignored.length, 1);
+  eq('J16 ...naming what it was', () => built.corpActions.ignored[0].kind, 'SPLIT');
+  eq('J17 ...and why', () => /ambiguous/.test(built.corpActions.ignored[0].reason), true);
+}
+
+// A bonus with no quantity has nothing to credit AND no ratio to derive one from. It must say
+// so rather than look like it worked.
+{
+  const built = reconstructStockOpening([
+    row('2024-01-01', 'BUY', 100, 500),
+    row('2024-09-01', 'BONUS', 0, 0),
+  ], '');
+  close('J18 a quantity-less bonus adds nothing', () => built.qty, 100);
+  eq('J19 ...and is reported', () => built.corpActions.ignored.length, 1);
+  eq('J20 ...as a bonus with no quantity', () => /no quantity/.test(built.corpActions.ignored[0].reason), true);
+}
+
+// A BONUS row that CARRIES A PRICE is noise — a mistake, or a notional figure some broker
+// exports. Bonus shares are free by definition, so that price must never reach the cost basis:
+// letting it in inflates the basis and under-reports every later gain, silently and forever.
+// (Added because the probe that swaps `price: 0` for `t.price` originally changed nothing —
+// every bonus fixture happened to have a zero price already, so the rule was unpinned.)
+{
+  const built = reconstructStockOpening([
+    row('2024-01-01', 'BUY', 100, 500),
+    row('2024-09-01', 'BONUS', 100, 250),
+  ], '');
+  close('J27 a priced bonus row is still credited', () => built.qty, 200);
+  close('J28 ...at NIL cost, not at the price on the row', () => Math.round(built.invested), 50000);
+  eq('J29 ...and reported as costing nothing', () => built.corpActions.credited[0].price, 0);
+}
+
+// A corporate action landing on the SAME DAY as a sale must not be netted against it.
+// `squareOffDaily` implements the intraday square-off convention — a same-day buy and sell in a
+// trading account cancel — and a bonus allotment is not a trade. The owner's NSE file sells on
+// 11-Nov-2024, the very day 96,000 bonus shares were allotted.
+//
+// Both answers hold the same 118,000 shares, so only the COST BASIS tells them apart, and the
+// two are disjoint: FIFO must consume the older PRICED lot (66,402,160 left) rather than net
+// the free shares away (72,438,720 left). Their filed return puts NSE's closing cost at nil,
+// which is the un-netted reading.
+{
+  const built = reconstructStockOpening([
+    row('2023-06-15', 'BUY', 24000, 3018.28),
+    row('2024-11-11', 'BONUS', 96000, 0),
+    row('2024-11-11', 'SELL', 2000, 1555),
+  ], '');
+  close('J30 a same-day bonus and sale both stand', () => built.qty, 118000);
+  close('J31 ...and the SALE consumes the older priced lot, not the free shares',
+    () => Math.round(built.invested), Math.round(22000 * 3018.28));
+}
+
+// The pure helper on its own, so the conversion is pinned independently of the replay.
+{
+  const { rows, credited, report } = creditCorpActionRows([
+    row('2024-01-01', 'BUY', 10, 5),
+    row('2024-02-01', 'BONUS', 20, 0),
+    row('2024-03-01', 'SPLIT', 30, 0),
+  ]);
+  // The credit is handed back SEPARATELY, not spliced into the trades. That separation is what
+  // keeps it out of `squareOffDaily` — see J30.
+  eq('J21 ordinary trades come back on their own', () => rows.map(r => r.type), ['BUY']);
+  eq('J22 the bonus comes back as a BUY, carrying its own quantity', () => credited[0].qty, 20);
+  eq('J23 ...at zero price', () => credited[0].price, 0);
+  eq('J24 the split is in NEITHER list', () => [...rows, ...credited].some(r => r.type === 'SPLIT'), false);
+  eq('J25 ...and appears in the ignored list instead', () => report.ignored.length, 1);
+  eq('J26 ordinary rows pass through untouched', () => rows[0].qty, 10);
+}
 
 console.log(`\nopening-import: ${pass} passed, ${fail} failed`);
 if (failures.length) {

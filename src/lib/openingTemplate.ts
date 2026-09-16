@@ -47,7 +47,7 @@ export const TEMPLATE_COLS: TemplateCol[] = [
   { header: 'Date', width: 13, mandatory: true, description: 'Date of trade', fieldType: 'Date (DD/MM/YYYY)', example: '27/03/2025' },
   { header: 'Company Name', width: 30, mandatory: false, description: 'Checked against the stock you opened this from — a different company is rejected, never relabelled', fieldType: 'Text', example: '' },
   { header: 'ISIN', width: 16, mandatory: false, description: 'ISIN, or the BSE code / NSE symbol. Checked the same way as the name', fieldType: 'INE00WC01027 / 542752 / AFFLE', example: '' },
-  { header: 'Trans Type', width: 12, mandatory: true, description: 'Whether the trade was a buy or a sell', fieldType: 'Dropdown (BUY / SELL)', example: 'BUY' },
+  { header: 'Trans Type', width: 12, mandatory: true, description: 'Buy, sell, or shares received without a trade — BONUS (free) or RIGHTS (paid, at Price)', fieldType: 'Dropdown (BUY / SELL / BONUS / RIGHTS)', example: 'BUY' },
   { header: 'Quantity', width: 12, mandatory: true, description: 'Number of shares', fieldType: 'Number', example: '100' },
   { header: 'Price', width: 14, mandatory: true, description: 'Price per share, excluding charges. Keep the full precision your broker shows', fieldType: 'Number', example: '250.09' },
   { header: 'Total Amount (Turnover)', width: 20, mandatory: false, description: 'Quantity × Price, EXCLUDING every charge. Fill it and it becomes the cost basis (more precise than a rounded price); leave it blank and Price is used', fieldType: 'Number', example: '25009.00' },
@@ -71,7 +71,8 @@ const notes = (stockName: string): string[] => [
   `Uploading the same file twice is safe: a row already present (same date, type, quantity and price) is skipped.`,
   `Add older trades BEFORE newer ones when a batch also contains sells, so the FIFO order matches the order the trades actually happened in.`,
   `Charges (brokerage, STT, fees, IPF, demat) are recorded but do NOT enter the cost basis: every gain in this app is computed on turnover, and under s.48 STT is not a deductible expense.`,
-  `Bonus, split and rights rows are not handled here — enter those on the stock's page so their ratio is stored.`,
+  `BONUS and RIGHTS rows ARE handled: put the NUMBER OF SHARES RECEIVED in Quantity. A bonus costs nothing (leave Price blank or 0, and any price typed there is ignored); rights are costed at the Price you paid.`,
+  `A SPLIT is NOT handled here — its quantity is ambiguous (shares added, or the new total?). Record a split on the stock's page so its ratio is stored.`,
 ];
 
 /**
@@ -109,8 +110,12 @@ export async function buildOpeningTemplateBlob(stockName: string, isin: string):
   for (let r = 2; r <= ROWS + 1; r++) {
     ws.getCell(`${dateCol}${r}`).numFmt = 'dd/mm/yyyy';
     ws.getCell(`${typeCol}${r}`).dataValidation = {
-      type: 'list', allowBlank: true, formulae: ['"BUY,SELL"'],
-      showErrorMessage: true, errorTitle: 'Trans Type', error: 'Enter BUY or SELL.',
+      // BONUS and RIGHTS are in the list because the importer credits them from the QUANTITY
+      // typed on the row (16-Sep-2026). Leaving them out was the last half of that bug: the
+      // reader accepted them and the template forbade typing them, so a bonus allotment had
+      // nowhere to go and the position came out short with nothing saying why.
+      type: 'list', allowBlank: true, formulae: ['"BUY,SELL,BONUS,RIGHTS"'],
+      showErrorMessage: true, errorTitle: 'Trans Type', error: 'Enter BUY, SELL, BONUS or RIGHTS.',
     };
   }
 

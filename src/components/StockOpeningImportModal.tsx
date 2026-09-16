@@ -63,7 +63,12 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
         );
       }
       const pv = await previewStockOpeningAdd(spreadsheetId, stockName, isin, p.txns);
-      setParsed(p); setPreview(pv);
+      // Clear the error HERE, not only in `reset()` at the top. The Add button stays clickable
+      // while a file is being read, on purpose, so that a click during the read gives feedback
+      // instead of doing nothing — and that feedback ("Still reading the file") is then left
+      // standing once the read finishes, sitting in red above a preview that rendered perfectly.
+      // Reported 16-Sep-2026, and it reads as though the import had failed when it had not.
+      setParsed(p); setPreview(pv); setError('');
     } catch (err: any) {
       setError(err?.message || String(err));
     } finally {
@@ -254,6 +259,32 @@ export default function StockOpeningImportModal({ open, onClose, spreadsheetId, 
                   <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
                   <span>
                     <b>{parsed.amountDiverged}</b> row(s) have a Total Amount that isn't Quantity × Price — Total Amount wins and becomes the cost basis. If those figures include brokerage, clear the column so Price is used: charges must not enter the basis.
+                  </span>
+                </div>
+              )}
+
+              {/* Corporate-action rows. These used to be parsed, counted, written and then
+                  contribute NOTHING — the replay derives a bonus from a stored ratio and this
+                  importer has none to give it. Saying what happened to them is the difference
+                  between a short position you can act on and one you cannot explain. */}
+              {preview.result.corpActions.credited.length > 0 && (
+                <div className="flex items-start gap-2 text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                  <Info className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>
+                    <b>{preview.result.corpActions.credited.length}</b> bonus / rights row(s) credited at the quantity typed on the row
+                    {' '}({preview.result.corpActions.credited.map(c => `${fmtNum(c.qty)} on ${c.iso}`).join(', ')}).
+                    A bonus carries <b>no cost</b>; rights are costed at their Price.
+                  </span>
+                </div>
+              )}
+
+              {preview.result.corpActions.ignored.length > 0 && (
+                <div className="flex items-start gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>
+                    <b>{preview.result.corpActions.ignored.length}</b> row(s) add <b>no shares</b> and are not in the figures above:{' '}
+                    {preview.result.corpActions.ignored.map(x => `${x.kind} ${x.iso} — ${x.reason}`).join('; ')}.
+                    Enter the resulting shares as a <b>Buy</b> row with the quantity, priced 0 for a bonus.
                   </span>
                 </div>
               )}

@@ -11,6 +11,31 @@ import {
 // Repoint here to use a different sheet.
 export const SCRIP_MASTER_SPREADSHEET_ID = "1gLDfmeQe0wzfHWfaBReVk-6KsAvy1ZamfQAMrIVWsHg";
 
+/**
+ * `normName` with the PRIVATE / PVT token KEPT, and spelled one way.
+ *
+ * "Kusumgar Pvt Ltd" → "kusumgar pvt", where `normName` gives "kusumgar".
+ *
+ * `normName` strips `private|pvt` so a broker's "ACME PVT LTD" matches the master's "Acme
+ * Private Limited", and that is right almost always. It is catastrophically wrong when the book
+ * holds BOTH a listed "X Limited" and an unlisted "X Pvt Ltd" — which the owner does, for
+ * Kusumgar (16-Sep-2026). The two collapse to ONE key, there is one name slot, and `claimAlias`
+ * hands it to whichever came last: the listed company is then taxed on private-equity rules at
+ * 730 days, or the unlisted one at 365. Nothing downstream can detect either.
+ *
+ * Used ONLY as a tie-breaker: it is consulted before the plain key and only when the two differ,
+ * which is to say only for a name that actually carries the token. Every other name is
+ * untouched by it.
+ */
+export const normNamePrivate = (s: string): string =>
+  (s || "")
+    .toLowerCase()
+    .replace(/[-.,()'"]/g, " ")
+    .replace(/\b(private|pvt)\b/g, "pvt")          // one spelling, so "Private" and "Pvt" agree
+    .replace(/\b(limited|ltd|the|co)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
 // "GOODLUCK INDIA LIMITED" / "Goodluck India Ltd." → "goodluck india".
 export const normName = (s: string): string =>
   (s || "")
@@ -105,6 +130,17 @@ export interface ScripMaster {
    * unpriced equity. Surfaces as a warning rather than a silently different book.
    */
   peFailed: boolean;
+  /**
+   * Rows on a non-listed tab whose CLASS was dropped because their normalised name landed on a
+   * listed entry carrying an exchange ticker (see `foldAssetClass`). Such a company IS on the
+   * tab and is invisible to everything that keys off `assetClass` - above all the Add Trade
+   * dropdown, which filters on exactly that.
+   *
+   * Recorded rather than swallowed because "I added it and it isn't in the dropdown" has two
+   * causes whose fixes are OPPOSITE: a stale master, which Recheck fixes, and this, which no
+   * amount of Rechecking will ever change.
+   */
+  classSkippedByTicker: { name: string; normalised: string; collidedWith: string; ticker: string }[];
 }
 
 export type ResolveResult =
@@ -119,6 +155,7 @@ const emptyMaster = (): ScripMaster => ({
   dirty: false,
   genericTokens: new Set(),
   peFailed: false,
+  classSkippedByTicker: [],
 });
 
 // A token appearing in at least this many DISTINCT entries is "generic" (a common company
@@ -480,8 +517,21 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
     const byIsin = isin ? master.byIsin.get(isin) : undefined;
     let entry = byIsin || (!isin && nk ? master.byAliasNorm.get(nk) : undefined) || null;
     if (!entry) {
+      // A row carrying its own ISIN creates its own entry — and it must NOT take the shared
+      // NAME slot off a listed company that already holds it. True Entry has no ISIN column, so
+      // every listed trade is looked up BY NAME; lose that slot and they all file against this
+      // private company at 730 days. `claimAlias` hands it over without complaint, because both
+      // canonical names normalise alike. So: index normally, then give the slot straight back
+      // and key this entry under the discriminating one instead.
+      const holder = nk ? master.byAliasNorm.get(nk) : undefined;
+      const guarded = !!(holder && (holder.nse || holder.bse));
       entry = makeEntry(name, isin, [], "confirmed");
       indexEntry(master, entry);
+      if (guarded) {
+        master.byAliasNorm.set(nk, holder!);
+        const dkNew = normNamePrivate(name);
+        if (dkNew && dkNew !== nk) master.byAliasNorm.set(dkNew, entry);
+      }
     } else if (isin && !entry.isin) {
       enrich(master, entry, isin, name);
     }
@@ -513,7 +563,38 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
         + `tab. If it has listed, remove it from that tab.`,
       );
     } else if (entry.nse || entry.bse) {
-      continue;
+      // The name collides with a LISTED entry carrying a ticker. Before giving up, ask whether
+      // the two differ by the Pvt/Private token that `normName` throws away — because if they
+      // do, they are two different companies and the owner may well hold both. Kusumgar is
+      // exactly that: "Kusumgar Limited" on the exchange, "Kusumgar Pvt Ltd" on the PE tab.
+      //
+      // Give the unlisted one its OWN entry under the discriminating key, and never let it
+      // touch the shared one — `indexEntry` would call `claimAlias` on the plain key, which
+      // (per its own rule) the unlisted row WOULD win, sending every listed "Kusumgar Limited"
+      // trade to the private company at 730 days. Indexed by hand for that reason.
+      const dk = normNamePrivate(name);
+      if (dk && dk !== nk && !master.byAliasNorm.has(dk)) {
+        const twin = makeEntry(name, isin, [], "confirmed");
+        master.entries.push(twin);
+        if (isin && !master.byIsin.has(isin)) master.byIsin.set(isin, twin);
+        master.byAliasNorm.set(dk, twin);   // the DISCRIMINATING slot only
+        entry = twin;
+      } else {
+        // NOTHING distinguishes the two names — "Cranex" against a listed "Cranex Ltd." has no
+        // token to tell them apart — so there is no honest way to keep both, and inventing one
+        // would put a listed holding on private-equity rules or the reverse.
+        //
+        // Silent until 16-Sep-2026, which was the whole problem: the row is on the tab, the
+        // owner can see it there, and the app behaves as though it were not. The Add Trade
+        // dropdown filters on `assetClass`, so the company never appears, and the refusal
+        // message used to say "isn't on any of the ... tabs. Add it to one" — talking the owner
+        // into a DUPLICATE row for a company already on it. Recorded instead, with the remedy:
+        // give the tab row a name that actually distinguishes it.
+        master.classSkippedByTicker.push({
+          name, normalised: nk, collidedWith: entry.canonicalName, ticker: entry.nse || entry.bse,
+        });
+        continue;
+      }
     }
 
     // The row's own tab decides the class. Where a company somehow appears on two tabs the
@@ -617,6 +698,16 @@ export function resolveScrip(master: ScripMaster, isin: string, name: string): R
     return { status: "resolved", key: entry.key, entry };
   }
 
+  // 1b. The discriminating key, for an unlisted twin of a listed company — see
+  // `normNamePrivate`. Ahead of the plain name, and reachable only by a name that carries the
+  // Pvt/Private token, so every other lookup takes exactly the path it always did.
+  const dk = normNamePrivate(name);
+  if (dk && dk !== nk && master.byAliasNorm.has(dk)) {
+    const entry = master.byAliasNorm.get(dk)!;
+    if (isin && !entry.isin) enrich(master, entry, isin, name);
+    return { status: "resolved", key: entry.key, entry };
+  }
+
   // 2. Exact normalized name / alias
   if (nk && master.byAliasNorm.has(nk)) {
     const entry = master.byAliasNorm.get(nk)!;
@@ -659,6 +750,11 @@ export function lookupScrip(master: ScripMaster, isin: string, name: string): Sc
   isin = (isin || "").trim();
   if (isin && master.byIsin.has(isin)) return { entry: master.byIsin.get(isin)!, foundBy: "isin" };
   const nk = normName(name);
+  // A name carrying "Pvt"/"Private" is checked against the discriminating key FIRST, so an
+  // unlisted twin of a listed company resolves to itself. `dk !== nk` only for such names, so
+  // nothing else changes path. See `normNamePrivate`.
+  const dk = normNamePrivate(name);
+  if (dk && dk !== nk && master.byAliasNorm.has(dk)) return { entry: master.byAliasNorm.get(dk)!, foundBy: "name" };
   if (nk && master.byAliasNorm.has(nk)) return { entry: master.byAliasNorm.get(nk)!, foundBy: "name" };
   const toks = tokenSet(name);
   if (toks.size > 0) {

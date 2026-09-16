@@ -299,6 +299,8 @@ export interface OpeningReconstruction {
   longLots: number;
   shortLots: number;
   issues: ReconIssue[];
+  /** What became of any Bonus / Split / Rights rows. Always present, usually empty. */
+  corpActions: CorpActionReport;
 }
 
 /**
@@ -309,12 +311,26 @@ export interface OpeningReconstruction {
  */
 export function reconstructStockOpening(txns: TxnStatementRow[], isin: string, seed: SeedLot[] = []): OpeningReconstruction {
   const name = txns[0]?.name || seed[0]?.name || "";
-  const netted = squareOffDaily(txns, name);
-  const res = accumulateOpeningLots(seed, netted, {}, []);
+  // Bonus / Rights rows become share credits. Without this they reach `replayScrip`, find no
+  // ratio in the empty resolutions map below, and vanish without a word.
+  //
+  // The credits are held BACK from `squareOffDaily` and added after it. That function exists
+  // for the intraday square-off convention — a same-day buy and sell in a trading account net
+  // against each other — and a corporate action is NOT a trade. The owner's own NSE file has a
+  // sale on 11-Nov-2024, the very day 96,000 bonus shares were allotted; netting the two would
+  // leave the position right (96,000) and the COST BASIS wrong, because 2,000 of the priced
+  // lots would survive in place of 2,000 free ones. Their filed return puts NSE's closing cost
+  // at nil, which is the un-netted answer.
+  //
+  // The double-credit guard inside `creditCorpActionRows` still reads the RAW rows, so a
+  // statement carrying both a Bonus line and its own ₹0 credit is still counted once.
+  const { rows, credited, report } = creditCorpActionRows(txns);
+  const netted = squareOffDaily(rows, name);
+  const res = accumulateOpeningLots(seed, [...netted, ...credited], {}, []);
   const lots = res.lots.map(l => ({ ...l, isin: isin || l.isin }));
   const qty = lots.reduce((s, l) => s + l.qty, 0);
   const invested = lots.reduce((s, l) => s + l.invested, 0);
-  return { lots, qty, invested, longLots: res.summary.longLots, shortLots: res.summary.shortLots, issues: res.issues };
+  return { lots, qty, invested, longLots: res.summary.longLots, shortLots: res.summary.shortLots, issues: res.issues, corpActions: report };
 }
 
 const seedToOpeningLot = (s: OpeningSeedLot): OpeningLot => ({
@@ -337,12 +353,103 @@ const stockMatches = (name: string, rowIsin: string | undefined, wantKey: string
 export const txnKey = (t: TxnStatementRow): string =>
   `${t.iso}|${classifyTxn(t.type)}|${Math.round(t.qty * 1e6)}|${Math.round(t.price * 1e4)}`;
 
-/** Rows of `incoming` that are not already in `existing` (same date/type/qty/price). Pure.
- *  Duplicates WITHIN `incoming` are kept — two identical fills on one day are real. */
+/**
+ * Rows of `incoming` that are not already in `existing` (same date/type/qty/price). Pure.
+ *
+ * MULTIPLICITY MATTERS, and a `Set` gets it wrong. Two identical fills on one day are real —
+ * the same broker order split across two contract notes — so if the sheet holds ONE row with a
+ * given key it must mask exactly ONE incoming row with that key, not every one of them. A Set
+ * of existing keys swallowed all of them, which is the difference between "one of these three
+ * is already filed" and "none of your three trades will be added". Counted instead.
+ */
 export function dedupeAgainstExisting(existing: TxnStatementRow[], incoming: TxnStatementRow[]): { fresh: TxnStatementRow[]; duplicates: number } {
-  const seen = new Set(existing.map(txnKey));
-  const fresh = incoming.filter(t => !seen.has(txnKey(t)));
+  const remaining = new Map<string, number>();
+  for (const t of existing) {
+    const k = txnKey(t);
+    remaining.set(k, (remaining.get(k) || 0) + 1);
+  }
+  const fresh: TxnStatementRow[] = [];
+  for (const t of incoming) {
+    const k = txnKey(t);
+    const n = remaining.get(k) || 0;
+    if (n > 0) remaining.set(k, n - 1);   // this incoming row is masked by one existing row
+    else fresh.push(t);
+  }
   return { fresh, duplicates: incoming.length - fresh.length };
+}
+
+/**
+ * What happened to the Bonus / Split / Rights rows in an uploaded file.
+ *
+ * `replayScrip` derives a corp action's share count from a stored RATIO
+ * (`heldNow() * num/den`) and this importer has no ratio to give it — it passes `{}` as the
+ * resolutions map. So until 16-Sep-2026 every such row was parsed, counted as "for this
+ * stock", written to `Opening Txns`, and then **silently contributed nothing**: the position
+ * came out short, and re-uploading the same file could never fix it because the row was by
+ * then a duplicate. Reported by the owner as "it is not adding the trades I asked it to".
+ *
+ * A row on THIS template does not need a ratio. It carries a QUANTITY, typed by the owner,
+ * which states the share count outright — so a Bonus or Rights row is credited at its own
+ * quantity and its own price (0 for a bonus). That is a reading of what was typed, not a
+ * derivation.
+ *
+ * A SPLIT is NOT credited: its quantity column is ambiguous — shares added, or the resulting
+ * total? — and guessing between them on tax data doubles or halves a position. It is reported
+ * instead.
+ */
+export interface CorpActionReport {
+  /** Bonus / Rights rows credited at their stated quantity. */
+  credited: { iso: string; kind: string; qty: number; price: number }[];
+  /** Rows this importer still cannot apply, each with the reason. NEVER silent. */
+  ignored: { iso: string; kind: string; reason: string }[];
+}
+
+export const EMPTY_CORP_REPORT: CorpActionReport = { credited: [], ignored: [] };
+
+/**
+ * Turn quantity-bearing Bonus / Rights rows into ordinary share credits before the replay.
+ *
+ * Runs on the RAW rows, before `squareOffDaily`, for two reasons: the same-day-credit check
+ * below reads zero-price BUYs that netting would have consumed, and a credited row must then
+ * behave exactly as a hand-typed zero-price BUY does, netting included.
+ */
+export function creditCorpActionRows(txns: TxnStatementRow[]): { rows: TxnStatementRow[]; credited: TxnStatementRow[]; report: CorpActionReport } {
+  // Some statements carry BOTH a Bonus line and a same-day ₹0 share credit for the very same
+  // shares. Crediting the Bonus row as well would double the position, so the accompanying
+  // credit wins and the corp-action row is dropped — the same rule `alreadyCreditedCorpActions`
+  // applies inside the replay.
+  const zeroPriceBuyDays = new Set<string>();
+  const anyBuyDays = new Set<string>();
+  for (const t of txns) {
+    if (classifyTxn(t.type) !== "BUY" || !(t.qty > 0)) continue;
+    anyBuyDays.add(t.iso);
+    const perShare = t.amount > 0 ? t.amount / t.qty : t.price;
+    if (!(perShare > 1e-4)) zeroPriceBuyDays.add(t.iso);
+  }
+
+  const report: CorpActionReport = { credited: [], ignored: [] };
+  const rows: TxnStatementRow[] = [];       // ordinary trades — these get same-day netted
+  const credited: TxnStatementRow[] = [];   // corp-action credits — these must NOT be
+  for (const t of txns) {
+    const kind = classifyTxn(t.type);
+    if (kind === "BONUS" || kind === "RIGHT") {
+      const alreadyCredited = kind === "BONUS" ? zeroPriceBuyDays.has(t.iso) : anyBuyDays.has(t.iso);
+      if (alreadyCredited) continue;              // its shares are on the accompanying buy row
+      if (t.qty > 0) {
+        report.credited.push({ iso: t.iso, kind, qty: t.qty, price: kind === "BONUS" ? 0 : t.price });
+        credited.push({ ...t, type: "BUY", price: kind === "BONUS" ? 0 : t.price, amount: kind === "BONUS" ? 0 : t.amount });
+        continue;
+      }
+      report.ignored.push({ iso: t.iso, kind, reason: "no quantity on the row, and there is no ratio to derive one from" });
+      continue;
+    }
+    if (kind === "SPLIT") {
+      report.ignored.push({ iso: t.iso, kind, reason: "a split's quantity is ambiguous (shares added, or the resulting total?)" });
+      continue;
+    }
+    rows.push(t);
+  }
+  return { rows, credited, report };
 }
 
 /**

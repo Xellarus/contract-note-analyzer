@@ -25,7 +25,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
-| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, and a SOURCE check that Add Trade's save path refreshes the page's scrip master (49) |
+| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules (91) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
 | `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write (270; 271 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
@@ -33,7 +33,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
 | `node tmp-holdings-sort.mjs` | Sort order: the holdings grid (default biggest-first, click direction, tiebreaks) **and** the Portfolios page cards, incl. a guard that `PORTFOLIOS` is never sorted in place (19). Reads the comparators OUT of `Holdings.tsx`, so it fails if the source drifts — and needs no `ROOT` edit |
 | `node tmp-transfer-run.mjs` | Cross-portfolio transfer: FIFO, cost carryover, no gain realised (83) |
-| `node tmp-opening-import-run.mjs` | Per-stock opening-trades import: header detection (incl. the template's own Instructions tab NOT matching, and a bare `Amount` never adopted as turnover), Excel date serials, the foreign-security rejection, the duplicate guard, the FIFO-order warning, and the **additive merge** — plus fixture H, which BUILDS the shipped .xlsx template and reads it straight back through the shipped reader (71) |
+| `node tmp-opening-import-run.mjs` | Per-stock opening-trades import: header detection (incl. the template's own Instructions tab NOT matching, and a bare `Amount` never adopted as turnover), Excel date serials, the foreign-security rejection, the duplicate guard (ONE existing row masks ONE incoming row, not all of them), the FIFO-order warning, the **additive merge**, and the **corp-action credit** — plus fixture H, which BUILDS the shipped .xlsx template and reads it straight back through the shipped reader, and fixture J, the owner's real NSE shape, whose right and wrong answers are DISJOINT (96,000 shares versus 0) and whose same-day variant separates the two COST bases (107) |
 | `node tmp-axis-run.mjs` | Axis Securities parser (68) |
 | `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
@@ -435,7 +435,10 @@ lots and `Opening Txns` rows and write the file's own reconstruction in their pl
   answer (120 sh / ₹3,600 vs 60 sh / ₹3,000), probed by passing `[]` as the seed.
 - **Re-uploading the same file must not double the position.** Rows matching an existing
   `Opening Txns` row on date · type · qty · price are skipped and counted. Duplicates WITHIN one
-  upload are kept — two identical fills on one day are real.
+  upload are kept — two identical fills on one day are real — and that needs COUNTING, not a
+  `Set`. One row on the sheet must mask exactly ONE incoming row with that key; a Set of
+  existing keys masked every one of them, which is the difference between "one of these three
+  is already filed" and "none of your three trades will be added" (fixed 16-Sep-2026).
 - **`replayScrip` PUSHES new buys after the seed** (`openingBasis.ts:387`), so a batch that both
   buys at dates older than lots already on the sheet AND sells consumes the wrong lots.
   Buy-only batches are safe — every downstream engine re-sorts opening lots by date, so queue
@@ -473,8 +476,44 @@ lots and `Opening Txns` rows and write the file's own reconstruction in their pl
   `StockOpeningImportModal.tsx`) are unchanged: they describe the sheet tabs, which really are
   called that.
 
-Known gap, unchanged: bonus / split / rights rows are not handled by this importer (they need a
-ratio), and `openingBasis.ts`'s corp-action resolution is not wired to it.
+**Bonus and Rights rows are CREDITED FROM THEIR QUANTITY; a Split still is not** (changed
+16-Sep-2026, and this was the worst bug in the feature). `replayScrip` derives a corp action's
+share count from a stored RATIO — `heldNow() * num/den` — and this importer passes `{}` as the
+resolutions map, so `if (res && res.den > 0)` failed and **every Bonus / Split / Rights row was
+silently worth nothing**. The row was parsed, counted as "for this stock", written to
+`Opening Txns`, and contributed no shares; the position came out short, and re-uploading the
+same file could never fix it because the row was by then a duplicate of itself. Reported as
+*"it is not adding the trades I asked it to via excel"* against an NSE file whose true closing
+position was 96,000 shares and which reconstructed to 0.
+
+- A row on THIS template needs no ratio: it carries a QUANTITY the owner typed. Reading that is
+  not a derivation. `creditCorpActionRows` turns a Bonus or Rights row into an ordinary BUY at
+  its own quantity.
+- **The credits are held BACK from `squareOffDaily` and added after it.** That function
+  implements the intraday square-off convention — a same-day buy and sell in a trading account
+  cancel — and a corporate action is NOT a trade. The owner's NSE file sells on 11-Nov-2024,
+  the very day 96,000 bonus shares were allotted; netting the two leaves the QUANTITY right and
+  the COST BASIS wrong, because 2,000 priced shares survive in place of 2,000 free ones. Both
+  readings hold 118,000 shares, so only the cost tells them apart — which is what fixture J30/J31
+  pins, and why entering a bonus as a plain ₹0 BUY is NOT an equivalent workaround.
+- **The template offers BONUS and RIGHTS in its Trans Type dropdown.** Leaving them out was the
+  other half of the bug: the reader accepted them and the template forbade typing them
+  (`showErrorMessage: true`), so an allotment had nowhere to go. A SPLIT is still absent from
+  the list on purpose.
+- **A bonus is credited at NIL cost even when the row carries a price.** Bonus shares are free
+  by definition; a price there is a mistake or a broker's notional figure, and letting it into
+  the basis inflates it and under-reports every later gain. Rights ARE costed at their price.
+- **A SPLIT is still not applied**, and that is deliberate: its quantity column is ambiguous —
+  shares added, or the resulting total? — and guessing doubles or halves a position.
+- **Nothing is dropped in silence.** `OpeningReconstruction.corpActions` carries what was
+  credited and what was ignored WITH ITS REASON, and the dialog prints both. A row that adds no
+  shares now says so and says what to type instead.
+- A statement carrying BOTH a Bonus line and a same-day ₹0 share credit describes ONE event;
+  the accompanying credit wins and the corp-action row is dropped, the same rule
+  `alreadyCreditedCorpActions` applies inside the replay.
+
+Known gap, unchanged: a SPLIT needs a ratio, and `openingBasis.ts`'s corp-action resolution is
+still not wired to this importer.
 
 **A controlled `<input type="date">` must never fall back to a non-empty `value`.** A native
 date input reports `value === ""` for every INTERMEDIATE state while it is typed into — it only
@@ -533,6 +572,54 @@ Adding a field to `AddTradeModal`'s `LineDraft` needs one more edit than it look
 `keyof Omit<LineDraft, …>` over a hand-listed set, so a new field that is not added to that Omit
 list silently becomes a CHARGE field.
 
+**"I added it to the tab and it isn't in the dropdown" has THREE causes** (16-Sep-2026,
+reported three times over). Two were fixed, it was still missing, and the third turned out to
+hide a company whose master entry was perfectly correct — so **check the third first**, it is
+the cheapest to rule out.
+
+0. **`ScripCombobox` truncated the list.** It scanned `master.entries` and did
+   `if (out.length >= 60) break` — in SHEET ORDER, not alphabetical — then sliced to 30 for
+   display with no marker. In PE scope an empty box matches EVERY entry, so the scan stopped at
+   the 60th row of the tab and nothing below it could be reached. **A newly added company is at
+   the bottom of the sheet**, which makes the newest one the likeliest to vanish. The cap is now
+   `!peOnly` (it exists for the 5,000-entry listed universe; the non-listed one is bounded by
+   four hand-maintained tabs), PE scope shows its whole list, and any truncation SAYS
+   "Showing N of M". A silently cut list is indistinguishable from "that company is not
+   registered", which sends the owner off to add a duplicate row for one that already exists.
+
+The other two, whose fixes are opposite to each other: The Add Trade dropdown lists only entries carrying an `assetClass`
+(`ScripCombobox`, `peOnly && !e.assetClass`), so a non-listed company goes missing when either:
+
+1. **The master is stale.** `activeMaster` is `recheckedMaster || master || selfMaster`, and it
+   preferred the STALEST of the three — the `master` PROP, which `Holdings` loads once on mount
+   and keeps for the life of the page, so hours old by the time anyone opens the drawer. The
+   drawer's own unforced load is at worst 90s behind and was never even reached while the prop
+   was non-null. The drawer now **forces a fresh read every time it opens**: one batched read of
+   one spreadsheet on an explicit user action, the same trade `rebuildHolding` and the PE CMP
+   write already make. The `master` prop still renders while it loads, so the dropdown is never
+   empty, and the result lands in `recheckedMaster` so it wins — and rides back through
+   `onSaved`, refreshing the page for free.
+2. **`foldAssetClass` dropped the class.** A PE row whose normalised name lands on a LISTED entry
+   carrying a ticker hits `else if (entry.nse || entry.bse) continue`. That guard is RIGHT —
+   marking a live listed holding unlisted swaps its LTCG period to 24 months and stops the price
+   feed ever fetching it — but until now it was **silent**, and no amount of Rechecking changes
+   it. `ScripMaster.classSkippedByTicker` records each one (the name as typed, the shared
+   normalised key, what it collided with, and the vetoing ticker).
+
+**The PE panel now states what the app actually READ** — the count of unlisted companies, and
+any ticker collisions by name — not only when that count is zero. Three reports of this symptom
+produced three different causes and every diagnosis was guesswork, because nothing on screen said
+what the app had read. Add a company, press Recheck: if the number does not go up, the row is not
+reaching the app at all (wrong tab, wrong column, a stray space); if it does, the problem is
+downstream of the read.
+
+The drawer's refusal message consults that list BEFORE saying *"isn't on any of the ... tabs,
+add it to one"* — which, for a company already on a tab, talks the owner into a **duplicate
+row**: the split-identity failure, self-inflicted, and the exact trap the `peFailed` message
+already sidesteps. It now names the collision and says *do not add it again*. The fix is to give
+the tab row its ISIN (an ISIN match is not a guess and overrides the ticker veto) or to rename
+one of the two.
+
 **The page holds its OWN scrip master, and it goes stale** (found 14-Sep-2026). `Holdings.tsx`
 loads the master ONCE on mount, unforced, into React state, and keeps it for the life of the
 page. The Add Trade drawer loads its own, and force-reloads it when you press
@@ -554,6 +641,36 @@ app: a stale master and a SPLIT IDENTITY (two entries normalising alike, one car
 flag and the other winning the name lookup) produce the identical symptom. The resolution path
 was probed in four shapes and is sound, so `tmp-pe-fold-run.mjs` now pins the invariant — every
 entry the dropdown lists as PE must also RESOLVE as PE by name — to tell the two apart next time.
+
+**A LISTED "X Limited" and an UNLISTED "X Pvt Ltd" are two companies, and the book holds both**
+(16-Sep-2026 — the owner has exactly this for Kusumgar). `normName` strips
+`limited|ltd|private|pvt|the|co`, so the two collapse to ONE key, there is ONE name slot in
+`byAliasNorm`, and `claimAlias` hands it to whichever folded last. The listed company is then
+taxed on private-equity rules at 730 days, or the private one at 365. Nothing downstream can see
+it, and True Entry has no ISIN column so **every trade is looked up by name** — the slot is the
+whole identity.
+
+- `normNamePrivate` is `normName` with the private/pvt token KEPT and spelled one way:
+  `Kusumgar Pvt Ltd` → `kusumgar pvt`, where `normName` gives `kusumgar`. It is a **tie-breaker,
+  not a new rule**: consulted only when it DIFFERS from the plain key, which is only for a name
+  actually carrying the token. Every other lookup takes exactly the path it always did.
+- `lookupScrip` AND `resolveScrip` both consult it, ahead of the plain key. Patching only the
+  first leaves the drawer showing the right company while the REGISTER files its trades against
+  the other — `keyOf` uses `resolveScrip`. The probe that disables `resolveScrip`'s branch alone
+  found nothing until a test was written through it.
+- **The twin is indexed BY HAND, never through `indexEntry`.** That helper calls `claimAlias` on
+  every alias including the plain key, and `claimAlias`'s own rule lets the unlisted row WIN it.
+  The twin takes the discriminating slot and nothing else. Probed: indexing it normally makes
+  the LISTED company resolve as PE at 730 days.
+- **Same trap where the PE row carries its own ISIN** and creates a brand-new entry through the
+  `!entry` branch. Its `indexEntry` claims the shared name too, so the slot is handed straight
+  back to the ticker-carrying holder and the new entry keyed distinctly. This matters because
+  *"give the tab row its ISIN"* was the remedy the app itself printed — advice that would have
+  broken the listed company.
+- **A name with NOTHING to distinguish it is still refused and reported** — the owner's other
+  collision is a PE row named just `Cranex` against a listed `Cranex Ltd.`, where no honest
+  discriminator exists. The remedy printed for those is now *rename the tab row*, and adding
+  "Pvt" is enough to make the app keep them apart by itself.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

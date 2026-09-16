@@ -5,7 +5,7 @@ import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateActio
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
 import { dateInputValue, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
 import { CorpActionType } from '../lib/corporateActions';
-import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, normName, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { appendPrivateEquity } from '../lib/privateEquityWrite';
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { gapi } from 'gapi-script';
@@ -144,11 +144,33 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   // precedence the Recheck button spins, reloads, and visibly changes nothing.
   const [recheckedMaster, setRecheckedMaster] = useState<ScripMaster | null>(null);
   const activeMaster = recheckedMaster || master || selfMaster;
+  //
+  // FORCE a re-read every time the drawer opens (16-Sep-2026). This is the one screen the
+  // owner reaches IMMEDIATELY after adding a company to a non-listed tab — "I added it and it
+  // isn't in the dropdown" was reported twice — and `activeMaster` preferred the STALEST of
+  // its three sources: the `master` PROP, which `Holdings` loads once on mount and keeps for
+  // the life of the page, so hours old by the time anyone opens this. The drawer's own
+  // unforced load would at worst have been 90 seconds behind, and it was never even reached
+  // while the prop was non-null.
+  //
+  // One batched read of ONE spreadsheet on an explicit user action — the same trade
+  // `rebuildHolding` and the PE CMP write-back already make. The 60-reads-per-minute rule is
+  // about the 13-portfolio fan-outs, not this. The `master` prop still renders while it loads,
+  // so the dropdown is never empty, and the result goes into `recheckedMaster` so it WINS over
+  // the prop (and is handed back through `onSaved`, refreshing the page for free).
   useEffect(() => {
-    if (open && !master && !selfMaster && hasValidGoogleToken()) {
-      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then(setSelfMaster).catch(() => {});
-    }
-  }, [open, master, selfMaster]);
+    if (!open || !hasValidGoogleToken()) return;
+    let cancelled = false;
+    loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true })
+      .then((m) => { if (!cancelled) setRecheckedMaster(m); })
+      // A failed force must not leave the drawer with nothing when the parent had nothing
+      // either — fall back to the cached copy rather than an empty dropdown.
+      .catch(() => {
+        if (cancelled || master) return;
+        loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then((m) => { if (!cancelled) setSelfMaster(m); }).catch(() => {});
+      });
+    return () => { cancelled = true; };
+  }, [open]);
 
   // Corporate-action mode (merger / demerger → dedicated tab).
   const [mode, setMode] = useState<'trades' | 'corpaction'>('trades');
@@ -420,6 +442,19 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       // Which one it is decides the tax and charge treatment, but not whether it belongs here.
       if (!isNonListedScrip(activeMaster, l.isin, l.company)) {
         const tabs = ASSET_CLASS_IDS.map(id => `“${ASSET_CLASSES[id].tab}”`).join(', ');
+        // The company IS on a non-listed tab, but the fold-in dropped its class because the
+        // normalised name landed on a LISTED entry carrying a ticker. Saying "add it to one of
+        // the tabs" here would talk the owner into a DUPLICATE row for a company already on it
+        // — the split-identity failure that quietly divides a position between two entries.
+        // Name the collision instead, because that is the only thing that can be acted on.
+        const clash = (activeMaster.classSkippedByTicker || [])
+          .find(x => x.normalised === normName(l.company.trim()));
+        if (clash) {
+          return `${clash.name} is on a non-listed tab, but the scrip master already has `
+            + `“${clash.collidedWith}” (${clash.ticker}) under the same name, so it is being read as `
+            + `LISTED. Rename the tab row so the two differ — adding “Pvt” or “Private” is enough, and `
+            + `both are then kept apart automatically. Do NOT add it again.`;
+        }
         return lookupScrip(activeMaster, l.isin.trim(), l.company.trim()).entry
           ? `${l.company.trim()} is a LISTED security — switch this drawer to “Listed” to record it.`
           : `${l.company.trim()} isn’t on any of the ${tabs} tabs. Add it to one (the app only reads them), then Recheck.`;
@@ -804,6 +839,28 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                       {rechecking ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
                       {rechecking ? 'Rechecking…' : 'Just added a company? Recheck'}
                     </button>
+                    {/* The count the app actually read, stated always — not only when it is 0.
+                        "I added it to the tab and it isn't in the dropdown" was reported three
+                        times, with three different causes, and every diagnosis was guesswork
+                        because nothing on screen said what the app had read. This number ends
+                        that: add a company, press Recheck, and if it does not go up then the
+                        row is not reaching the app at all (wrong tab, wrong column, a stray
+                        space) — and if it does, the problem is downstream of the read. */}
+                    {peRegistered > 0 && (
+                      <p className="text-[10px] text-indigo-700/80 mt-1">
+                        <b className="font-bold">{peRegistered}</b> unlisted compan{peRegistered === 1 ? 'y' : 'ies'} read from the
+                        {' '}{ASSET_CLASS_IDS.map(id => ASSET_CLASSES[id].tab).join(' / ')} tabs.
+                        {(activeMaster?.classSkippedByTicker || []).length > 0 && (
+                          <> {' '}<b className="font-bold text-amber-700">
+                            {activeMaster!.classSkippedByTicker.length} row(s) on those tabs were read as LISTED
+                          </b>{' '}because the scrip master already has that name with a ticker:{' '}
+                          {activeMaster!.classSkippedByTicker.map(x => `${x.name} → ${x.collidedWith} (${x.ticker})`).join('; ')}.
+                          Rename the tab row so the two differ — adding <b className="font-bold">Pvt</b> or
+                          {' '}<b className="font-bold">Private</b> is enough, and the app then keeps them apart
+                          automatically. Do not add the company a second time.</>
+                        )}
+                      </p>
+                    )}
                   </div>
                 </div>
               )}

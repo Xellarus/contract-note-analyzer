@@ -30,12 +30,12 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);
 
-  const matches = useMemo(() => {
+  const { matches, total } = useMemo(() => {
     const term = (value || '').trim().toLowerCase();
     // Normally the list stays shut until you type — 5,000 entries are useless unfiltered. The
     // unlisted list is a handful, so in PE scope an empty box shows all of them: "which of my
     // private companies is this" is answerable from the list itself.
-    if (!master || (term.length < 1 && !peOnly)) return [] as { name: string; tag: string }[];
+    if (!master || (term.length < 1 && !peOnly)) return { matches: [] as { name: string; tag: string }[], total: 0 };
     const out: { name: string; tag: string }[] = [];
     const seen = new Set<string>();
     for (const e of master.entries) {
@@ -56,16 +56,27 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
         seen.add(name);
         out.push({ name, tag: e.assetClass ? ASSET_CLASSES[e.assetClass].badge : (e.nse || e.bse || '') });
       }
-      if (out.length >= 60) break;   // scan cap; ranked + sliced below
+      // The scan cap exists for the LISTED universe — 5,000 entries, where stopping early is
+      // the difference between a typeahead and a stall. It must NOT apply to the non-listed
+      // one: that is bounded by four hand-maintained tabs, and breaking out of the loop there
+      // drops companies BY SHEET ORDER. With an empty box in PE scope every entry matches, so
+      // the scan stopped at the 60th row of the tab and nothing below it could ever be found
+      // — including a company added at the bottom, which is where a newly added one goes.
+      if (!peOnly && out.length >= 60) break;
     }
-    // Rank prefix matches first, then alphabetical; show at most 30.
+    // Rank prefix matches first, then alphabetical.
     out.sort((a, b) => {
       const ap = a.name.toLowerCase().startsWith(term) ? 0 : 1;
       const bp = b.name.toLowerCase().startsWith(term) ? 0 : 1;
       return ap - bp || a.name.localeCompare(b.name);
     });
-    return out.slice(0, 30);
-  }, [value, master]);
+    // The unlisted list is the whole point of PE scope — "which of my private companies is
+    // this" is answerable from the list itself — so show all of it. The listed one stays
+    // capped, and SAYS it is capped: a silent slice at 30 is indistinguishable from a company
+    // that is not registered at all, which is exactly how this was reported.
+    const shown = peOnly ? out : out.slice(0, 30);
+    return { matches: shown, total: out.length };
+  }, [value, master, peOnly]);
 
   const pick = (name: string) => { onChange(name); setOpen(false); };
 
@@ -87,6 +98,14 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
       />
       {open && matches.length > 0 && (
         <ul className="absolute z-30 mt-1 w-full max-h-56 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg text-xs">
+          {/* Never truncate in silence. A list cut at 30 with no marker reads as "that company
+              is not registered", which sends the user off to add a duplicate row for one that
+              already exists. */}
+          {total > matches.length && (
+            <li className="px-3 py-1.5 text-[10px] text-slate-500 bg-slate-50 border-b border-slate-200 sticky top-0">
+              Showing {matches.length} of {total} — keep typing to narrow.
+            </li>
+          )}
           {matches.map((m, i) => (
             <li
               key={m.name}
