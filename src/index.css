@@ -74,6 +74,32 @@ html, body, #root, * {
   }
 }
 
+/* ── Number inputs carry no stepper ──────────────────────────────────
+   32 `<input type="number">` fields hold quantities, prices, turnovers and nine kinds of
+   charge. Every one of them shipped with the browser's up/down spinner, and an arrow that
+   nudges a money figure by ±1 is wrong in all three ways that matter here: the step is
+   meaningless (₹149.35 → ₹150.35 is not a correction of anything), a mis-click is
+   indistinguishable from a typed figure once written, and the thing it edits goes to a filed
+   tax tab. Owner directive, 16-Sep-2026: remove it everywhere.
+
+   ONE rule instead of 32 edits, and it cannot be forgotten on the next field added. Kept
+   UNLAYERED on purpose — the focus block above is inside `@layer base` precisely so a
+   component can override it, and this is the opposite case: nothing may re-grow a spinner.
+
+   Both halves are load-bearing. `::-webkit-*-spin-button` covers Chrome and Edge (this app's
+   browser); `appearance: textfield` covers Firefox, which draws its spinner with no
+   pseudo-element to target. Dropping either leaves the arrows standing on one engine, which is
+   the shape of bug nobody sees until they open the app somewhere else.
+
+   What this does NOT remove: `min` / `max` / `step="any"` still validate, and the field still
+   refuses letters — those are the reasons these stay `type="number"` rather than becoming
+   text inputs. The keyboard ↑/↓ still steps a FOCUSED field; that takes a deliberate focus
+   plus a deliberate key, and it is the only way a keyboard-only user can adjust one. The MOUSE
+   WHEEL is handled in App.tsx, because CSS cannot reach it. ── */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
 /* Slide-over panels (e.g. the Add Trade drawer) ease in from the right. */
 @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .animate-slideIn { animation: slideIn 0.18s ease-out; }

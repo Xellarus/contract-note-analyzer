@@ -575,6 +575,36 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
       const dk = normNamePrivate(name);
       if (dk && dk !== nk && !master.byAliasNorm.has(dk)) {
         const twin = makeEntry(name, isin, [], "confirmed");
+
+        // THE KEY, and this is the half that was missing until 16-Sep-2026. Resolving to a
+        // separate ENTRY is only half of being a separate company: every engine buckets
+        // holdings, FIFO lots and gains by `entry.key` (`byKey.get(key)` in holdingsCalc's
+        // `resolve`, the same in the register), so two entries sharing a key are ONE position
+        // on screen and on every filed tab, under whichever name got there first.
+        //
+        // `makeEntry` computes `isin || normName(canonicalName)`. With no ISIN on the PE row
+        // AND none on the listed master row, BOTH sides fall back to normName and both keys are
+        // "kusumgar". Reported as "kusumgar ltd and pvt ltd showing transaction in same PE":
+        // one detail page, both companies' trades, and a YAHOO price on an unlisted company.
+        //
+        // It hid behind a green suite because every listed fixture here carried an ISIN, which
+        // made the two keys differ no matter what the twin did. A hand-maintained master row
+        // with just a name and a ticker is perfectly ordinary.
+        twin.key = isin || dk;
+
+        // The twin must also ANSWER to its discriminating name, not only be filed under it.
+        // `aliasNorms` is what `prefixHit` and the step-3 fallback scan.
+        twin.aliasNorms.add(dk);
+        twin.tokenSets.push(tokenSet(name));
+
+        // Note what is deliberately NOT done: the plain key is LEFT in `aliasNorms`, where
+        // `makeEntry` put it. It looks wrong - the twin should not advertise the shared name -
+        // but that set is also `enrich`'s gate (`!entry.aliasNorms.has(nk)`), and `enrich` calls
+        // `claimAlias`, whose own rule hands the shared slot to the unlisted row. Removing the
+        // plain key here would OPEN that door: the first trade resolved against this twin would
+        // enrich it, claim "kusumgar", and send every listed trade to the private company at
+        // 730 days - the original disaster, through a back entrance. Keeping it shut is what
+        // makes the slot stable. Asserted directly.
         master.entries.push(twin);
         if (isin && !master.byIsin.has(isin)) master.byIsin.set(isin, twin);
         master.byAliasNorm.set(dk, twin);   // the DISCRIMINATING slot only

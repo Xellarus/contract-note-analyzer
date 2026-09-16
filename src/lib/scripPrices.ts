@@ -1,7 +1,7 @@
 import { gapi } from "gapi-script";
 import { invalidateDashboard } from "./dashboardCache";
 import { ensureSheetTabs } from "./sheetTabs";
-import { lookupScrip, normName, ScripMaster } from "./scripMaster";
+import { lookupScrip, normName, ScripEntry, ScripMaster } from "./scripMaster";
 
 /**
  * Current-price snapshot store. Prices are per-security (not per-portfolio), so
@@ -347,6 +347,30 @@ export async function saveScripPrices(
 }
 
 /**
+ * Does the PLAIN normalised name belong to somebody else?
+ *
+ * Both maps below fall back to `normName(name)`, and `normName` strips `private|pvt` — so a
+ * listed "Kusumgar Limited" and an unlisted "Kusumgar Pvt Ltd" share that string even though
+ * they are two different companies and the owner holds both. Without this guard, the unlisted
+ * holding takes the LISTED company's Yahoo quote through the name fallback: reported
+ * 16-Sep-2026 as a PE badge and a "₹549.20 · YAHOO" valuation side by side on one header, which
+ * is a combination that should not be able to exist.
+ *
+ * Deliberately phrased over the master rather than over `normNamePrivate`: the question is not
+ * "does this name carry the Pvt token" but "does the master say this normalised name is a
+ * DIFFERENT entry from the one this holding resolved to". That covers the twin case and any
+ * future collision the same shape, and it is inert — `other === e` — for every ordinary scrip.
+ *
+ * A wrong price here is money: it moves the holding's value, the portfolio's AUM and the NAV
+ * timeline, and it looks entirely plausible while doing it.
+ */
+const plainNameIsAnotherCompany = (master: ScripMaster | null, e: ScripEntry | null, name: string): boolean => {
+  if (!master || !e) return false;
+  const other = master.byAliasNorm.get(normName(name));
+  return !!other && other !== e;
+};
+
+/**
  * Build a (isin, name) → "is this scrip a price exception?" test from the Prices tab's
  * user-maintained exception column. Matched by ISIN first, then normalized name, then the
  * scrip-master canonical key, so a flag set on either identity is honoured.
@@ -356,13 +380,21 @@ export function makeExceptionResolver(master: ScripMaster | null, prices: ScripP
   for (const p of prices) {
     if (!p.except) continue;
     if (p.isin) keys.add('isin:' + p.isin.toUpperCase());
-    if (p.name) keys.add('name:' + normName(p.name));
-    if (master) { const e = lookupScrip(master, p.isin, p.name).entry; if (e) keys.add('key:' + e.key); }
+    const pe = master ? lookupScrip(master, p.isin, p.name).entry : null;
+    // A row may claim the plain name slot only when that name is its OWN — see
+    // `plainNameIsAnotherCompany`. An unlisted twin's row claiming it would flag the listed
+    // namesake instead.
+    if (p.name && !plainNameIsAnotherCompany(master, pe, p.name)) keys.add('name:' + normName(p.name));
+    if (pe) keys.add('key:' + pe.key);
   }
   return (isin: string, name: string) => {
     if (isin && keys.has('isin:' + isin.toUpperCase())) return true;
-    if (name && keys.has('name:' + normName(name))) return true;
-    if (master) { const e = lookupScrip(master, isin, name).entry; if (e && keys.has('key:' + e.key)) return true; }
+    const e = master ? lookupScrip(master, isin, name).entry : null;
+    // The name test runs only when that name is not another company's — see
+    // `plainNameIsAnotherCompany`. Skipping falls through to the canonical-key test below, which
+    // is the identity that actually distinguishes an unlisted twin from its listed namesake.
+    if (name && !plainNameIsAnotherCompany(master, e, name) && keys.has('name:' + normName(name))) return true;
+    if (e && keys.has('key:' + e.key)) return true;
     return false;
   };
 }
@@ -378,14 +410,23 @@ export function makePriceResolver(master: ScripMaster | null, prices: ScripPrice
   for (const p of prices) {
     if (!(p.price > 0)) continue;
     if (p.isin) m.set('isin:' + p.isin.toUpperCase(), p.price);
-    if (p.name) m.set('name:' + normName(p.name), p.price);
-    if (master) { const e = lookupScrip(master, p.isin, p.name).entry; if (e) m.set('key:' + e.key, p.price); }
+    const pe = master ? lookupScrip(master, p.isin, p.name).entry : null;
+    // Same guard as the lookup below, and it must be on BOTH sides. Guarding only the read stops
+    // the unlisted holding taking the listed quote and leaves the reverse open: this row would
+    // still claim 'name:kusumgar', and the LISTED company would then read the private company's
+    // price out of it. That is the direction the first version of this fix missed.
+    if (p.name && !plainNameIsAnotherCompany(master, pe, p.name)) m.set('name:' + normName(p.name), p.price);
+    if (pe) m.set('key:' + pe.key, p.price);
   }
   return (isin: string, name: string, lastTradePrice?: number) => {
     const e = master ? lookupScrip(master, isin, name).entry : null;
     if (e) { const v = m.get('key:' + e.key); if (v !== undefined) return v; }
     if (isin) { const v = m.get('isin:' + isin.toUpperCase()); if (v !== undefined) return v; }
-    const byName = m.get('name:' + normName(name));
+    // The plain name is the LAST resort and the one that crosses companies, so it is skipped
+    // when the master says that name belongs to a different entry than this holding resolved to.
+    // Falling through here is correct: an unlisted company with no price of its own should reach
+    // its hand-entered valuation or its last traded price below, NOT the other one's quote.
+    const byName = plainNameIsAnotherCompany(master, e, name) ? undefined : m.get('name:' + normName(name));
     if (byName !== undefined) return byName;
     // No fetched price. An UNLISTED company has two fallbacks, in this order:
     //

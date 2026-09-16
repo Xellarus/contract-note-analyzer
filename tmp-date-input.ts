@@ -1,5 +1,10 @@
 /**
- * Controlled `<input type="date">` — the one rule, and a sweep of every date input in the app.
+ * Native input affordances that change a figure behind your back — and the sweeps that pin them.
+ *
+ * Two families live here because they are the same kind of bug: the browser does something to a
+ * field that no `tsc`, no `vite build` and no other test in this repo can see, and the altered
+ * value reaches a FILED TAX TAB looking exactly like a typed one. Sections A-E are the date
+ * input; section F is the number input's stepper.
  *
  * The bug this exists for (reported 14-Sep-2026, Add Trade line date): a native date input
  * reports `value === ""` for every INTERMEDIATE state while it is typed into, so
@@ -243,6 +248,93 @@ ok('C12 the bounds are four-digit years — Chrome sizes the year segment from `
   ok('E8 free-share actions are not warned about',
     /const lineWarning[\s\S]{0,200}isFreeShares\(l\.action\)\) return null;/.test(code));
 }
+
+// ── F. Number inputs carry NO stepper ────────────────────────────────────
+//
+// Owner directive, 16-Sep-2026: "remove this add/reduce amount from everywhere we have it".
+// A spinner that nudges a price by ±1 is wrong in every way that matters here — the step is
+// meaningless on money, a mis-click cannot be told from a typed figure, and the figure is filed.
+//
+// There is no CSS test of any kind in this repo and no browser in the loop, so the ONLY thing
+// standing between a tidy-up and 32 fields growing their arrows back is this section.
+
+const cssPath = join(process.cwd(), 'src', 'index.css');
+const css = readFileSync(cssPath, 'utf8');
+
+// Both halves are load-bearing and they cover DIFFERENT engines. Chrome/Edge draw the spinner as
+// a pseudo-element; Firefox draws it with no pseudo-element to target and needs `appearance`.
+// Dropping either leaves the arrows standing on one browser — invisible to whoever removed it.
+ok('F1 the webkit spin buttons are removed',
+  /::-webkit-(outer|inner)-spin-button[\s\S]{0,160}appearance:\s*none/.test(css));
+ok('F2 ...and Firefox\'s, which has no pseudo-element to target',
+  /input\[type="number"\][^{]*\{[^}]*appearance:\s*textfield/.test(css));
+
+// UNLAYERED on purpose. The focus ring above it sits inside `@layer base` precisely so a
+// component CAN override it; this is the opposite case — nothing may re-grow a spinner. Moving
+// the rule into a layer would let any Tailwind utility outrank it and would look like tidying.
+const spinAt = css.search(/input\[type="number"\]::-webkit-outer-spin-button/);
+ok('F3 the sweep located the rule', spinAt > 0);
+let depth = 0;
+for (let i = 0; i < spinAt; i++) {
+  if (css[i] === '{') depth++;
+  else if (css[i] === '}') depth--;
+}
+ok('F4 ...and it is UNLAYERED, so nothing can outrank it', depth === 0, `brace depth ${depth}`);
+
+// A second, per-field definition of the same rule is how the two drift apart. One place only.
+const arbitrarySpin = tsxFiles.filter(f => /\[&::-webkit-[a-z-]*spin/.test(readFileSync(f, 'utf8')));
+ok('F5 no component re-declares the spinner as an arbitrary variant',
+  arbitrarySpin.length === 0, arbitrarySpin.join(', '));
+
+// The canary. Every assertion above is about a rule that protects number inputs; if the app had
+// none, they would all pass while protecting nothing.
+let numberInputs = 0;
+for (const f of tsxFiles) {
+  for (const el of inputElements(stripComments(readFileSync(f, 'utf8')))) {
+    if (/type=\{?["']number["']\}?/.test(el)) numberInputs++;
+  }
+}
+ok('F6 there are number inputs for the rule to reach', numberInputs >= 25, `found ${numberInputs}`);
+
+// ── The other stepper: the mouse wheel ──────────────────────────────────
+// A browser steps a FOCUSED number input on every wheel tick over it. Removing the arrows makes
+// this worse, not better — they were the only clue the field stepped at all — so the guard and
+// the CSS ship together and are pinned together.
+const appSrc = stripComments(readFileSync(join(process.cwd(), 'src', 'App.tsx'), 'utf8'));
+const wheelEffect = (appSrc.match(/const onWheel[\s\S]{0,700}?removeEventListener\('wheel'[^)]*\)/) || [''])[0];
+ok('F7 App installs a document-level wheel guard', wheelEffect.length > 0);
+ok('F8 ...that is removed on unmount', /removeEventListener\('wheel'/.test(wheelEffect));
+
+// PASSIVE, and therefore BLUR. `preventDefault()` on a passive listener does nothing at all, so
+// a future edit that switches to preventDefault without also dropping `passive` would stop
+// guarding silently. And a NON-passive wheel listener makes the browser wait on JS before every
+// scroll frame in the app — paid on the 300-row holdings grid, to fix a field nobody is using.
+ok('F9 ...registered passive, so page scrolling keeps its fast path',
+  /addEventListener\('wheel',\s*onWheel,\s*\{\s*passive:\s*true\s*\}/.test(appSrc));
+ok('F10 ...and it BLURS rather than calling preventDefault, which passive would ignore',
+  /\.blur\(\)/.test(wheelEffect) && !/preventDefault/.test(wheelEffect));
+
+// Only the FOCUSED field steps, and only under the pointer. Acting on any number input the
+// pointer crosses would steal focus mid-scroll from a field the user is typing into.
+ok('F11 ...only for the focused element', /document\.activeElement/.test(wheelEffect));
+ok('F12 ...and only when the pointer is over that same field',
+  /contains\(e\.target/.test(wheelEffect));
+ok('F13 ...and only for number inputs', /\.type === 'number'/.test(wheelEffect));
+
+// Blur is only safe while blurring a NUMBER input does nothing. The guard blurs those and
+// nothing else, so that — not the app's onBlur count — is the question. An onBlur on a number
+// field would be fired by a stray scroll; one that wrote to Sheets would make a scroll a WRITE.
+//
+// Written as "no number input has an onBlur" rather than "the app has N onBlurs" deliberately:
+// the first version counted every onBlur in the app, so it failed on `ScripCombobox`'s text box
+// — a field this guard cannot reach — and would have failed again on the next dropdown added.
+// A test that fires on things that are not the bug gets disabled, and then it guards nothing.
+const numberInputsWithBlur = tsxFiles.flatMap(f =>
+  inputElements(stripComments(readFileSync(f, 'utf8')))
+    .filter(el => /type=\{?["']number["']\}?/.test(el) && /onBlur=/.test(el))
+    .map(() => f));
+ok('F14 no number input has an onBlur for a stray wheel to fire',
+  numberInputsWithBlur.length === 0, [...new Set(numberInputsWithBlur)].join(', '));
 
 console.log(`\ndate-input: ${pass} passed, ${failures.length} failed`);
 if (failures.length) {

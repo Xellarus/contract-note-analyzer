@@ -11,7 +11,7 @@
  * Run: node tmp-holding-lastpx-run.mjs
  */
 import { rebuildHoldingTab } from './src/lib/holdingsCalc';
-import { makePriceResolver } from './src/lib/scripPrices';
+import { makePriceResolver, makeExceptionResolver } from './src/lib/scripPrices';
 import { loadScripMaster, invalidateScripCache, SCRIP_MASTER_SPREADSHEET_ID } from './src/lib/scripMaster';
 import { invalidatePrivateEquityCache } from './src/lib/privateEquities';
 import { formatDMY } from './src/lib/dates';
@@ -52,12 +52,18 @@ const te = (
 const SCRIP_ROWS = [
   ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name'],
   ['INE001A01011', 'ALPHA INDUSTRIES LIMITED', '500001', 'ALPHA', ''],
+  // The owner's real pair (16-Sep-2026): a LISTED company whose unlisted twin is on the PE tab.
+  // Deliberately given NO ISIN here — a hand-maintained master row with just a name and a
+  // ticker is ordinary, and it is the shape under which the two collide hardest.
+  ['', 'KUSUMGAR LIMITED', 'KUSUMGAR | 500900', 'KUSUMGAR', ''],
 ];
 /** ACME is unlisted with NO valuation; ZENITH is unlisted WITH one. */
 const PE_ROWS = [
   ['Company', 'Drive Link', 'ISIN', 'Valuation', 'Valuation Date', 'Notes'],
   ['ACME VENTURES PRIVATE LIMITED', '', '', '', '', ''],
   ['ZENITH CAPITAL LLP', '', '', 250, serial(2025, 6, 30), ''],
+  // Normalises to "kusumgar", exactly as the listed row above does.
+  ['Kusumgar Pvt Ltd', '', '', '', '', ''],
 ];
 
 function install(trueEntry: any[][]) {
@@ -104,6 +110,55 @@ async function main() {
     // feed's job, and substituting one would hide a broken import behind a plausible number.
     eq('a LISTED security ignores the last trade entirely',
       noFeed('INE001A01011', 'ALPHA INDUSTRIES LIMITED', 400), undefined);
+
+    // ── The listed/unlisted twin must not inherit the other's quote ─────────────────
+    //
+    // Reported 16-Sep-2026: the unlisted "Kusumgar Pvt Ltd" detail page carried a PE badge and
+    // a "₹549.20 · YAHOO" valuation at the same time — a combination that should not exist.
+    // Both maps in `makePriceResolver` fall back to `normName`, which strips private/pvt, so
+    // the private company read the LISTED one's feed price straight off the shared string.
+    //
+    // This is money: it moves the holding's value, the portfolio's AUM and the NAV timeline,
+    // and it looks entirely plausible while doing it.
+    const yahoo = makePriceResolver(master, [{ isin: '', name: 'KUSUMGAR LIMITED', price: 549.2 } as any]);
+    eq('the listed company takes its own feed price', yahoo('', 'KUSUMGAR LIMITED', 0), 549.2);
+    eq('the UNLISTED twin does NOT inherit it', yahoo('', 'Kusumgar Pvt Ltd', 0), undefined);
+    // ...and still reaches its own fallbacks, which is the point of skipping rather than failing.
+    eq('...and falls through to its own last traded price', yahoo('', 'Kusumgar Pvt Ltd', 383.25), 383.25);
+
+    // The reverse direction: a price row filed under the PRIVATE name reaches the private
+    // company (by its canonical key) and must not become the listed company's quote.
+    const pePrice = makePriceResolver(master, [{ isin: '', name: 'Kusumgar Pvt Ltd', price: 383.25 } as any]);
+    eq('a price filed under the PRIVATE name reaches the private company',
+      pePrice('', 'Kusumgar Pvt Ltd', 0), 383.25);
+    eq('...and does NOT become the listed company\'s quote',
+      pePrice('', 'KUSUMGAR LIMITED', 0), undefined);
+
+    // ── The SAME crossover in the price-exception flag ───────────────────────────
+    //
+    // `makeExceptionResolver` had NO coverage at all before this (16-Sep-2026) — found because
+    // the probe that removes its guard changed nothing. It keys the same way and crosses the
+    // same way, and it decides whether a scrip's price is left alone: flag the unlisted twin and
+    // the LISTED company stops taking its feed price, which reads as a broken price import.
+    const exFlagOnPrivate = makeExceptionResolver(master, [{ isin: '', name: 'Kusumgar Pvt Ltd', price: 0, except: true } as any]);
+    ok('an exception flagged on the PRIVATE company applies to it', exFlagOnPrivate('', 'Kusumgar Pvt Ltd'));
+    ok('...and NOT to its listed namesake', !exFlagOnPrivate('', 'KUSUMGAR LIMITED'));
+
+    const exFlagOnListed = makeExceptionResolver(master, [{ isin: '', name: 'KUSUMGAR LIMITED', price: 0, except: true } as any]);
+    ok('an exception flagged on the LISTED company applies to it', exFlagOnListed('', 'KUSUMGAR LIMITED'));
+    ok('...and NOT to its unlisted twin', !exFlagOnListed('', 'Kusumgar Pvt Ltd'));
+
+    // Inert where there is no collision — the ordinary case must be untouched.
+    const exPlain = makeExceptionResolver(master, [{ isin: '', name: 'ACME VENTURES PRIVATE LIMITED', price: 0, except: true } as any]);
+    ok('a scrip with no twin is still flagged by name', exPlain('', 'ACME VENTURES PRIVATE LIMITED'));
+    ok('...and an unflagged one is not', !exPlain('', 'ZENITH CAPITAL LLP'));
+
+    // An ordinary scrip must take exactly the path it always did — the guard is phrased over the
+    // master ("is this name a DIFFERENT entry?"), so it is inert wherever there is no collision.
+    const plain = makePriceResolver(master, [{ isin: '', name: 'ACME VENTURES PRIVATE LIMITED', price: 111 } as any]);
+    eq('an unlisted company with no twin still matches by name', plain('', 'ACME VENTURES PRIVATE LIMITED', 0), 111);
+    const alpha = makePriceResolver(master, [{ isin: '', name: 'ALPHA INDUSTRIES LIMITED', price: 222 } as any]);
+    eq('a listed company with no twin still matches by name', alpha('', 'ALPHA INDUSTRIES LIMITED', 0), 222);
   }
 
   console.log('\n── rebuildHoldingTab: capturing the last trade ' + '─'.repeat(14));

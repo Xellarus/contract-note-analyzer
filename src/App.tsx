@@ -147,6 +147,40 @@ const dateFromFileName = (name: string): number => {
 };
 
 export default function App() {
+  // ── The mouse wheel is the spinner you cannot see ──────────────────────────────
+  // `index.css` removes the up/down arrows from every `<input type="number">` (owner directive,
+  // 16-Sep-2026). That leaves the OTHER stepper: a browser steps a FOCUSED number input on every
+  // wheel tick over it. Half the forms here — the Add Trade drawer, the trade-row editor, the
+  // corp-action resolver — are taller than the viewport, so the gesture is "type a price, scroll
+  // down to the next field", and the scroll silently re-prices the field just left. Nothing
+  // downstream can tell an edited figure from a typed one, and the figure goes to a filed tax tab.
+  //
+  // Removing the arrows makes this WORSE, not better: the arrows were the only clue the field
+  // stepped at all. So the two changes ship together.
+  //
+  // BLUR, not `preventDefault()`. preventDefault on a wheel event needs a non-passive listener,
+  // which makes the browser wait on JS before every scroll frame in the whole app — a real cost
+  // on the 300-row holdings grid, to fix a field that is not being used. Blurring drops the focus
+  // that made the field steppable and lets the page scroll exactly as it always did.
+  //
+  // Safe because NO number input in the app has an `onBlur` — which is the only thing this can
+  // fire, since it blurs number inputs and nothing else. (There are two onBlur handlers in the
+  // app; both are on text/date fields this never touches.) A blur handler on a number field
+  // would turn a stray scroll into whatever that handler does, and one that wrote to Sheets
+  // would make it a WRITE, so `tmp-date-input.ts` F14 keeps the count at zero. ──
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      const el = document.activeElement;
+      // Only the focused field steps, and only when the pointer is over it — scrolling the page
+      // with a number field focused somewhere else must not steal the focus.
+      if (el instanceof HTMLInputElement && el.type === 'number' && el.contains(e.target as Node)) {
+        el.blur();
+      }
+    };
+    document.addEventListener('wheel', onWheel, { passive: true });
+    return () => document.removeEventListener('wheel', onWheel);
+  }, []);
+
   useEffect(() => {
     try {
       // Record a "session resumed" row when a saved token is reused on load.

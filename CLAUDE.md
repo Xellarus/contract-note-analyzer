@@ -25,10 +25,10 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
-| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules (91) |
+| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules — including that the twin gets its OWN `key`, which is what stops two companies sharing one holding bucket (105) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
 | `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write (270; 271 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
-| `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence (24) |
+| `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence, plus the listed/unlisted TWIN crossover in BOTH price maps and in both directions, and the first coverage `makeExceptionResolver` has ever had (37) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
 | `node tmp-holdings-sort.mjs` | Sort order: the holdings grid (default biggest-first, click direction, tiebreaks) **and** the Portfolios page cards, incl. a guard that `PORTFOLIOS` is never sorted in place (19). Reads the comparators OUT of `Holdings.tsx`, so it fails if the source drifts — and needs no `ROOT` edit |
@@ -39,7 +39,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
-| `npx tsx tmp-date-input.ts` | Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about (36) |
+| `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
@@ -568,6 +568,45 @@ proceeds; a zero-consideration sell books the entire cost of the shares as a los
 visible anywhere on the row once written. Bonus/Split are not warned about: they are free BY
 DEFINITION, and warning on them trains the user to ignore the warning.
 
+**A number input has NO stepper — neither the arrows nor the wheel** (owner directive,
+16-Sep-2026: *"remove this add/reduce amount from everywhere we have it"*). 32
+`<input type="number">` fields hold quantities, prices, turnovers and nine kinds of charge, and
+every one of them shipped with the browser's spinner. An arrow that nudges a figure by ±1 is
+wrong in all three ways that matter here: the step is meaningless on money (₹149.35 → ₹150.35
+corrects nothing), a mis-click is indistinguishable from a typed figure once written, and the
+field it edits goes to a filed tax tab.
+
+- **One CSS rule, not 32 edits**, in `src/index.css`, and **UNLAYERED on purpose**. The focus
+  ring above it is inside `@layer base` precisely so a component CAN override it; this is the
+  opposite case — nothing may re-grow a spinner. Both halves are load-bearing and they cover
+  DIFFERENT engines: `::-webkit-*-spin-button` for Chrome/Edge, `appearance: textfield` for
+  Firefox, which draws its spinner with no pseudo-element to target. Drop either and the arrows
+  stand on one browser, invisibly to whoever dropped it.
+- **The mouse wheel is the spinner you cannot see, and removing the arrows makes it WORSE** —
+  they were the only clue the field stepped at all. A browser steps a FOCUSED number input on
+  every wheel tick over it, and half these forms are taller than the viewport, so the ordinary
+  gesture is "type a price, scroll to the next field". The scroll re-prices the field just left,
+  and nothing downstream can tell an edited figure from a typed one. Guarded by ONE
+  document-level listener in `App.tsx`; the CSS and the guard ship together.
+- **BLUR, not `preventDefault()`.** preventDefault on a wheel event needs a NON-passive
+  listener, which makes the browser wait on JS before every scroll frame in the app — paid on
+  the 300-row holdings grid, to fix a field nobody is using. Blurring drops the focus that made
+  the field steppable and leaves scrolling untouched. The two are coupled: switching to
+  preventDefault while leaving `passive: true` stops the guard **silently**, so the suite pins
+  both.
+- **Safe only while no number input has an `onBlur`**, since that is the one thing the guard can
+  fire. It currently has none (the app's two `onBlur`s are on a text and a date field, which it
+  never touches); one that wrote to Sheets would turn a stray scroll into a stray WRITE.
+- **What is deliberately NOT removed**: `min` / `max` / `step="any"` still validate and the
+  field still refuses letters — those are why these stay `type="number"` instead of becoming
+  text inputs. The keyboard ↑/↓ still steps a focused field: that takes a deliberate focus AND
+  a deliberate key, and it is the only way a keyboard-only user can adjust one.
+
+There is **no CSS test of any kind** in this repo and no browser in the loop, so `tmp-date-input.ts`
+section F is the only thing between a tidy-up and 32 fields growing their arrows back. All eight
+probes fire, including the two that matter most: moving the rule into `@layer base`, and swapping
+`blur()` for `preventDefault()`.
+
 Adding a field to `AddTradeModal`'s `LineDraft` needs one more edit than it looks: `ChargeKey` is
 `keyof Omit<LineDraft, …>` over a hand-listed set, so a new field that is not added to that Omit
 list silently becomes a CHARGE field.
@@ -671,6 +710,49 @@ whole identity.
   collision is a PE row named just `Cranex` against a listed `Cranex Ltd.`, where no honest
   discriminator exists. The remedy printed for those is now *rename the tab row*, and adding
   "Pvt" is enough to make the app keep them apart by itself.
+- **THE TWIN NEEDS ITS OWN `key`, and resolving to a separate entry is only half the job**
+  (16-Sep-2026, reported as *"kusumgar ltd and pvt ltd showing transaction in same PE"*). Every
+  engine buckets holdings, FIFO lots and gains by `entry.key` — `byKey.get(key)` in
+  `holdingsCalc`'s `resolve`, the same in the register — so two entries sharing a key are ONE
+  position on screen and on every filed tab, under whichever name got there first.
+  `makeEntry` computes `isin || normName(canonicalName)`, so with **no ISIN on the PE row AND
+  none on the listed master row** both fall back to `normName` and both keys are `kusumgar`.
+  The twin now takes `isin || dk`.
+  **It hid behind a green suite because every listed fixture carried an ISIN**, which made the
+  keys differ no matter what the twin did; a hand-maintained master row with just a name and a
+  ticker is perfectly ordinary. Fixture `Zenmark` is that row.
+- **The plain key is deliberately LEFT in the twin's `aliasNorms`**, which reads backwards. That
+  set is also `enrich`'s gate (`!entry.aliasNorms.has(nk)`), and `enrich` calls `claimAlias`,
+  whose rule hands the shared slot to the unlisted row. Strip it "for tidiness" and the first
+  ISIN-bearing trade resolved against the twin claims `kusumgar` and sends every listed trade to
+  the private company at 730 days — the original disaster, through a back entrance. Probed: the
+  shared slot flips to `Kusumgar Pvt Ltd`.
+- **The price maps cross the same way, and a wrong price here is MONEY.** `makePriceResolver`
+  and `makeExceptionResolver` both fall back to `normName`, so the unlisted twin read the listed
+  company's Yahoo quote straight off the shared string — a PE badge and a
+  "₹549.20 · YAHOO" valuation on one header, which is a combination that should not exist. It
+  moves the holding's value, the portfolio's AUM and the NAV timeline while looking entirely
+  plausible. `plainNameIsAnotherCompany` guards it, phrased over the MASTER ("does this
+  normalised name resolve to a different entry than this holding did?") rather than over
+  `normNamePrivate`, so it covers any collision of the same shape and is inert for every
+  ordinary scrip.
+  - **The guard must run on the BUILD side as well as the READ side**, and the first version had
+    only the read. Guarding the read alone stops the unlisted holding taking the listed quote
+    and leaves the reverse wide open: the PE price row still CLAIMS `name:kusumgar`, so the
+    listed company reads the private one's price out of a slot it should never have held. Both
+    directions are pinned.
+  - A *discriminating name slot* was tried alongside the guard and **removed**: with a master
+    present the `key:` lookup always wins first, so those branches were unreachable, and without
+    a master there is no way to know the two names are different companies anyway. Two probes
+    came back silent, which is what found it. Unreachable code that looks like a safeguard is
+    worse than none.
+  - `makeExceptionResolver` had **no coverage of any kind** before this, found the same way — by
+    a probe that removed its guard and changed nothing.
+
+**None of this repairs rows already written.** `manualTrades`' `buildRecord` stores
+`entry.canonicalName`, resolved at SAVE time, so every trade entered while the two companies
+shared one entry went to the sheet under ONE name. The resolver fix is forward-looking; the
+ledger has to be corrected by hand.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

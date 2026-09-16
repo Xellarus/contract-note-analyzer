@@ -25,6 +25,10 @@ const MAIN = [
   // named with NOTHING to tell the two apart. Unlike Acme there is no Pvt/Private token, so
   // no discriminating key exists and the row must be REFUSED and reported, not guessed at.
   ['INE888X01019', 'Cranex Ltd.', '522001', '', ''],
+  // A listed row with a TICKER and NO ISIN. Ordinary in a hand-maintained master, and the
+  // case that every other fixture here accidentally excluded: with no ISIN, this entry's key
+  // falls back to normName(), which is the very key its unlisted twin also falls back to.
+  ['', 'Zenmark Industries Limited', 'ZENMARK | 500999', 'ZENMARK', ''],
 ];
 
 const PE = [
@@ -42,6 +46,8 @@ const PE = [
   // real sheet and the cost of it silently failing is a 365-day holding period on a
   // 730-day asset.
   ['KESHWANA ISPAT PVT.LTD.', '', '', ''],
+  // The twin of the ISIN-less listed row above.
+  ['Zenmark Industries Pvt Ltd', '', '', ''],
   // Collides with the listed 'Cranex Ltd.' and carries no token that distinguishes it.
   ['Cranex', '', '', ''],
   // Carries its OWN ISIN and collides by name with the listed 'Goodluck India Limited'.
@@ -301,6 +307,54 @@ eq('collision: a clean PE row is NOT reported',
 eq('twin: an ordinary name is unaffected', isPeScrip(master, '', 'Stellar Robotics Private Limited'), true);
 eq('twin: ...including one with no Pvt token at all', isPeScrip(master, '', 'Quiet Harbour Ventures Pvt Ltd'), true);
 eq('twin: a listed company with no unlisted twin still resolves', lookupScrip(master, '', 'Goodluck India Limited').entry?.nse, 'GOODLUCK');
+
+// ── The KEY, not just the entry ─────────────────────────────────────────
+// Resolving to two different ENTRIES is only half of being two companies. Every engine buckets
+// holdings, FIFO lots and gains by `entry.key` — `byKey.get(key)` in holdingsCalc's `resolve`,
+// and the same in the register — so two entries sharing a key are ONE position on screen and on
+// every filed tab, under whichever name got there first.
+//
+// `makeEntry` sets `key: isin || normName(canonicalName)`. On the ISIN-less listed row above,
+// BOTH sides fall back to normName and both keys are "zenmark industries". Reported by the owner
+// (16-Sep-2026) as "kusumgar ltd and pvt ltd showing transaction in same PE" — one detail page,
+// both companies' trades, PE badge, and a YAHOO price on an unlisted company.
+//
+// Invisible to every assertion above, all of which compare entries.
+const zListed = resolveScrip(master, '', 'Zenmark Industries Limited');
+const zTwin = resolveScrip(master, '', 'Zenmark Industries Pvt Ltd');
+eq('key: the ISIN-less listed company resolves', zListed.status, 'resolved');
+eq('key: ...and so does its unlisted twin', zTwin.status, 'resolved');
+eq('key: they are different entries',
+  (zListed as any).entry !== (zTwin as any).entry, true);
+eq('key: ...and they DO NOT SHARE A BUCKET, which is what puts both on one page',
+  (zListed as any).key !== (zTwin as any).key, true);
+eq('key: the listed side keeps its ticker', (zListed as any).entry?.nse, 'ZENMARK');
+eq('key: the unlisted side is PE', isPeScrip(master, '', 'Zenmark Industries Pvt Ltd'), true);
+eq('key: ...at 730 days', ltDaysFor(master, '', 'Zenmark Industries Pvt Ltd'), 730);
+eq('key: while the listed side stays at 365', ltDaysFor(master, '', 'Zenmark Industries Limited'), 365);
+
+// The twin must ANSWER to its discriminating name, not merely be filed under it.
+eq('key: the twin carries the discriminating name as its own alias',
+  (zTwin as any).entry?.aliasNorms?.has('zenmark industries pvt'), true);
+
+// And it KEEPS the plain key in that set, which reads backwards and is the point. `aliasNorms`
+// is `enrich`'s gate: `enrich` fires only for a name NOT already in it, and then calls
+// `claimAlias`, whose rule hands the shared slot to the unlisted row. Strip the plain key and
+// the first trade resolved against the twin re-opens the original disaster from behind.
+eq('key: ...and KEEPS the plain one, which is what keeps `enrich` from claiming the shared slot',
+  (zTwin as any).entry?.aliasNorms?.has('zenmark industries'), true);
+
+// The invariant that actually matters, stated head-on and AFTER both resolves above have had
+// their chance to mutate the master: the shared name slot still points at the LISTED company.
+eq('key: the shared name slot still belongs to the listed company',
+  (master.byAliasNorm.get('zenmark industries') as any)?.canonicalName, 'Zenmark Industries Limited');
+// ...and it survives the ISIN-carrying path through `enrich` too — a broker row naming the
+// private company WITH an ISIN is the one call that reaches `enrich` on the twin.
+resolveScrip(master, 'INE555Z01015', 'Zenmark Industries Pvt Ltd');
+eq('key: ...even after an ISIN-bearing trade enriches the twin',
+  (master.byAliasNorm.get('zenmark industries') as any)?.canonicalName, 'Zenmark Industries Limited');
+eq('key: ...and the two keys are still distinct afterwards',
+  (resolveScrip(master, '', 'Zenmark Industries Limited') as any).key !== (resolveScrip(master, '', 'Zenmark Industries Pvt Ltd') as any).key, true);
 
 // `resolveScrip` is a SECOND, parallel implementation of the same resolution — and it is the one
 // the register uses (`keyOf`), so it decides the KEY a saved trade is filed under and therefore
