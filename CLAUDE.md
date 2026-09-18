@@ -910,6 +910,84 @@ inside a company name matches first. `normName` strips `limited|ltd|private|pvt|
 different companies can normalise identically. `lookupScrip` is read-only; `resolveScrip` mutates
 the shared 90-second-cached master.
 
+**Share India: "This contract note only has FnO Transactions" was the answer to EVERY failure**
+(17-Sep-2026, reported as *"SHARE INDIA CONTRACT NOTE HAS A BIG PROBLEM THIS IS CONSIDERING A
+FEW CONTRACT NOTES AS FNO TRANSACTIONS"*). It was never a classification. Two throw sites said
+it and neither had evidence:
+
+- `parsePdfText` / `parseHtml`, on zero raw trades, guarded by a substring scan for
+  `derivative` / `future` / `option` / `fno`. **That test can never be false on a Share India
+  note**: the clearing-corporation header prints `NCL CAPITAL   NCL DERIVATIVES   NCL CURRENCY`
+  whether or not those segments traded, the annexure has a
+  *"Closing Rate per Unit (Only for Derivatives)"* column, and page 2's SEBI boilerplate says
+  *"shares at any future date"*. `looksLikeDerivativesNote` now asks for an INSTRUMENT instead
+  — `FUTIDX`/`OPTIDX`/`FUTSTK`/`OPTSTK`, an `NCL FO`-style segment marker, or a literal
+  "Derivatives Segment" heading. Boilerplate carries none of those.
+- `finalizeContractNote`, on zero VALIDATED trades, which did not even look at the note. This
+  was the one that actually fired.
+
+**The real defect: the description cell wraps FORWARD and only BACKWARD was handled.** pdf.js's
+Y-then-X grouping puts the overflow on a neighbouring line, and it can be either side:
+
+```
+ ... 11:38:07   Manbro Industries SELL   -1   800   0   800   0   800   D
+Limited-(INE348N01034)
+```
+
+The row parses perfectly — qty 1, price 800, the negative `-1` handled by `Math.abs` — and
+carries NO ISIN, because the recovery only read `lines[i - 1]` (here, `NCL CM`). The two
+directions are **not symmetric**: a backward line holds the WHOLE description and replaces the
+name; a forward line holds only its TAIL and must be APPENDED, or `Manbro Industries` silently
+becomes `Limited`. Both branches require the neighbour to carry an ISIN and no BUY/SELL, so a
+following trade cannot donate its identity.
+
+**A trade with no ISIN is now IMPORTED, not discarded** (owner directive). The old
+`if (!t.isin || t.isin.length < 12) return false` is how a correctly read sale vanished. True
+Entry has no ISIN column at all — the app already identifies holdings BY NAME and the
+confirm-company popup is the backstop — so an ISIN is an optimisation here, never the identity.
+Dropping a real trade is the worse failure.
+
+**`Taxable Value of Supply` is NOT brokerage on a Share India note — it is the GST BASE**, which
+is brokerage PLUS exchange transaction charges, SEBI turnover fees and clearing charges (STT and
+stamp duty sit outside it; they are not a supply of services). Everything downstream assumes that
+field means BROKERAGE, so leaving the GST base in it counted the exchange charge **twice**. On the
+reported note brokerage was genuinely 0, the taxable value 0.80 and the ETC 0.80 — the same 80
+paise — and the trade showed ₹2.54 of expenses against the note's ₹1.74.
+
+- **Normalised ONCE, in the parser**, not at each consumer: `finalizeContractNote` reduces
+  `summary.taxableValue` to `max(0, taxable − etc − sebi − clearing)`. **It must run AFTER the GST
+  fallback**, which derives 18% from the real GST base — that ordering is the whole correctness
+  argument.
+- **Fixing it in `buildReconciliation` instead would be wrong.** That function is SHARED by every
+  broker and its charge total starts `summary.taxableValue + // brokerage` — which is correct
+  there: Axis reads the field from a column its note literally labels
+  *"Taxable Value of Supply (Brokerage...)"*, and Integrated overwrites it with its own summed
+  brokerage. Share India is the odd one out, so Share India is where it gets normalised.
+- Patching only the per-trade allocation is what the first attempt did, and it left the
+  RECONCILIATION still computing ₹2.54 — the trades were right and the Mismatch Warning stayed
+  up. Two definitions of one field, one of them wrong.
+- It also gets a zero-brokerage plan right: brokerage 0 with ETC > 0 used to trip the
+  "no per-share brokerage printed" fallback on every single note.
+
+**No capital gain moves** — every gain here is computed on charge-free turnover — but the expense
+columns of anything imported before this are overstated by the exchange charge, and re-importing
+is what corrects them.
+
+**A residual 20 paise is NOT a parser fault: the broker settles STT to the nearest rupee.** The
+note prints STT twice and the two disagree on purpose — Annexure II (the STT statement) computes
+`0.80`, the Obligation Details table settles `1`. `800 − 1 − 0.80 − 0.14 = 798.06` is the note's
+cash figure; `800 − 0.80 − 0.80 − 0.14 = 798.26` is what the app derives from the STT statement,
+which is the anchor `allocateStt` already uses. `buildReconciliation` still counts that
+difference and raises the Mismatch Warning, so a sub-rupee STT will flag on most Share India
+notes until the reconciler learns to name `round(stt) − stt` instead of flagging it. **Open
+decision, not an oversight.**
+
+**Share India has NO test suite**, which is why all of this shipped (Nuvama 159, Axis 68, Share
+India 0). `tmp-si-probe.ts` + `tmp-si-probe-run.mjs` run the real parser over real
+`tmp-extract.mjs` output, print each trade with its charge block, and reconcile those charges
+against the note's own printed totals. Its notes are **password-protected** — 115 of the owner's
+116 need one — so a sweep needs the password as a command-line argument, never in a file.
+
 **Parsers.** Fixtures must come from `tmp-extract.mjs`, never hand-typed — reconciliation cannot
 catch a self-consistent misparse. STT allocation goes through the shared `allocateStt`
 (`src/lib/brokers/stt.ts`); the note's printed total is the anchor.

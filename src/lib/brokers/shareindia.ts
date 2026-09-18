@@ -12,6 +12,28 @@ import {
   stripIsin
 } from './utils';
 
+/**
+ * Does this note actually carry DERIVATIVES trades?
+ *
+ * The old test scanned the whole document for "derivative" / "future" / "option" / "fno". Every
+ * Share India note fails that test, always — the clearing-corporation header prints
+ * "NCL CAPITAL   NCL DERIVATIVES   NCL CURRENCY" on every note whether or not those segments
+ * traded, the annexure has a "Closing Rate per Unit (Only for Derivatives)" column, and page 2's
+ * SEBI boilerplate contains "shares at any future date". So the test was unconditionally true,
+ * and ANY note that failed to parse — for any reason at all — was reported to the owner as
+ * "This contract note only has FnO Transactions". Reported 17-Sep-2026 against a plain equity
+ * note carrying one delivery sale.
+ *
+ * A derivatives note is identified by an INSTRUMENT, not by a word: the F&O segment marker
+ * (`NCL FO` / `NSE FO` against this note's `NCL CM`) or an instrument type on a contract
+ * description. Boilerplate carries none of those.
+ */
+export function looksLikeDerivativesNote(text: string): boolean {
+  return /\b(FUTIDX|OPTIDX|FUTSTK|OPTSTK|FUTCUR|OPTCUR|FUTIVX)\b/i.test(text)
+    || /\b(NCL|NSE|BSE|MSEI)[\s_-]*(FO|FNO|CDS)\b/i.test(text)
+    || /\bderivatives?\s+segment\b/i.test(text);
+}
+
 export class ShareIndiaBrokerStrategy implements BrokerStrategy {
   id = 'shareindia';
   name = 'Share India';
@@ -31,11 +53,16 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     const rawTrades = this.extractTrades(doc);
 
     if (rawTrades.length === 0) {
-      const lowerHtml = html.toLowerCase();
-      if (lowerHtml.includes("fno") || lowerHtml.includes("f&o") || lowerHtml.includes("f & o") || lowerHtml.includes("future") || lowerHtml.includes("option") || lowerHtml.includes("derivative")) {
-        throw new Error("This contract note only has FnO Transactions");
+      // Say which it is. "FnO" used to be the answer to every failure here — see
+      // `looksLikeDerivativesNote` for why that test could never be false.
+      if (looksLikeDerivativesNote(html)) {
+        throw new Error("This contract note only has F&O transactions, which this app does not import.");
       }
-      return null;
+      throw new Error(
+        "Couldn't read any trade rows from this Share India note. It is not an F&O note — the "
+        + "equity rows are there and did not match. Run `node tmp-extract.mjs \"<note>.pdf\"` and "
+        + "check the Annexure/Transactions lines.",
+      );
     }
 
     // Merge identical consecutive trades for consistency
@@ -60,11 +87,16 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     const rawTrades = this.extractTradesFromText(text);
 
     if (rawTrades.length === 0) {
-      const lowerText = text.toLowerCase();
-      if (lowerText.includes("fno") || lowerText.includes("f&o") || lowerText.includes("f & o") || lowerText.includes("future") || lowerText.includes("option") || lowerText.includes("derivative")) {
-        throw new Error("This contract note only has FnO Transactions");
+      // Say which it is. "FnO" used to be the answer to every failure here — see
+      // `looksLikeDerivativesNote` for why that test could never be false.
+      if (looksLikeDerivativesNote(text)) {
+        throw new Error("This contract note only has F&O transactions, which this app does not import.");
       }
-      return null;
+      throw new Error(
+        "Couldn't read any trade rows from this Share India note. It is not an F&O note — the "
+        + "equity rows are there and did not match. Run `node tmp-extract.mjs \"<note>.pdf\"` and "
+        + "check the Annexure/Transactions lines.",
+      );
     }
 
     // Merge identical consecutive trades for consistency
@@ -664,6 +696,33 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       // mistaken for a security name.
       let isin = extractIsin(securityPart);
       let name = stripIsin(securityPart).replace(/^[\d\s\-\,\.\/:]+/, "").replace(/\s+/g, " ").trim();
+
+      // The description cell wraps, and pdf.js's Y-then-X grouping puts the overflow on a
+      // NEIGHBOURING line — which may be either side of the trade row:
+      //
+      //   BACKWARD  the row is bare ("SELL 1 800 ...") and the line ABOVE holds "Name-(ISIN)"
+      //   FORWARD   the row holds the HEAD of the name and the line BELOW holds the tail + ISIN:
+      //
+      //       ... 11:38:07   Manbro Industries SELL   -1   800   0   800   0   800   D
+      //       Limited-(INE348N01034)
+      //
+      // Only the backward case was handled. The forward one (reported 17-Sep-2026) left the
+      // trade with NO ISIN, after which `finalizeContractNote` dropped it and the note was
+      // announced as F&O. The two are not symmetric: a backward line carries the WHOLE
+      // description and replaces the name, a forward line carries only its TAIL and must be
+      // APPENDED, or "Manbro Industries" silently becomes "Limited".
+      if (!isin && i + 1 < lines.length) {
+        const nextRaw = (lines[i + 1] || "").trim();
+        const nextIsin = extractIsin(nextRaw);
+        // Same guard the backward branch uses: the neighbour must carry an ISIN and must not
+        // itself be a trade row, so a following trade cannot donate its identity to this one.
+        if (nextIsin && !/\b(BUY|SELL)\b/i.test(nextRaw)) {
+          isin = nextIsin;
+          const tail = stripIsin(nextRaw).replace(/^[\d\s\-\,\.\/:]+/, "").replace(/[\s-]+$/, "").replace(/\s+/g, " ").trim();
+          if (tail.length >= 2) name = name.length >= 2 ? `${name} ${tail}` : tail;
+        }
+      }
+
       if ((!isin || name.length < 2) && i > 0) {
         const prevRaw = (lines[i - 1] || "").trim();
         const prevIsin = extractIsin(prevRaw);
@@ -721,18 +780,52 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     }
     summary.gst = providedGst;
 
+    // ── `taxableValue` now means BROKERAGE, as every consumer downstream assumes ─────────
+    // On a Share India note "Taxable Value of Supply" is the GST BASE - brokerage PLUS exchange
+    // transaction charges, SEBI turnover fees and clearing charges. (STT and stamp duty are
+    // outside it; they are not a supply of services.) Every other consumer of this field treats
+    // it as brokerage, including `buildReconciliation`'s own charge total, so leaving the GST
+    // base in it counted the exchange charge TWICE.
+    //
+    // Reported 17-Sep-2026 on a note whose brokerage was genuinely 0, taxable value 0.80 and
+    // ETC 0.80 - the same 80 paise: the trade showed ₹2.54 of expenses against the note's ₹1.74,
+    // and the reconciliation showed ₹2.54 against a net that could not be made to tie.
+    //
+    // MUST run AFTER the GST fallback above, which needs the real GST base to derive 18% from.
+    // Ordering is the whole correctness argument here.
+    const taxableOther = rt(summary.etc) + rt(summary.sebiFees) + rt(summary.clearingCharges);
+    summary.taxableValue = Math.max(0, rt(summary.taxableValue - taxableOther));
+
     const exchangeNames = ["NSE", "BSE", "MCX", "NCDEX"];
     const validatedTrades = rawTrades.filter(t => {
       if (!t.securityName || t.securityName.trim().length === 0) return false;
       const cleanName = t.securityName.trim().toUpperCase();
       if (exchangeNames.includes(cleanName)) return false;
       if (t.quantity >= 10000000) return false;
-      if (!t.isin || t.isin.length < 12) return false;
+      // NO ISIN REQUIREMENT (owner directive, 17-Sep-2026). This used to be
+      // `if (!t.isin || t.isin.length < 12) return false;` and it is how a correctly parsed
+      // trade disappeared: the security description wraps, the ISIN lands on a neighbouring
+      // line, and a note whose one sale read perfectly — Manbro Industries, 1 @ 800 — was
+      // dropped here and then announced as "only has FnO Transactions".
+      //
+      // Dropping a real trade is the worse failure. True Entry has no ISIN column at all, so
+      // the whole app already identifies an unlisted holding BY NAME, and the confirm-company
+      // popup is the backstop for a name that does not resolve. An ISIN is an optimisation
+      // here, never the identity.
       return t.quantity > 0 && t.price > 0;
     });
 
     if (validatedTrades.length === 0) {
-      throw new Error("This contract note only has FnO Transactions");
+      // Say what actually happened. Claiming F&O here was always a guess and usually a wrong
+      // one — this branch never even looked at the note for evidence of a derivative.
+      if (rawTrades.length > 0) {
+        const names = rawTrades.map((t: any) => t.securityName).filter(Boolean).slice(0, 4).join(", ");
+        throw new Error(
+          `Read ${rawTrades.length} trade row(s) from this note but none survived validation`
+          + `${names ? ` (${names})` : ""}. This is NOT an F&O note — the rows parsed and were then rejected.`,
+        );
+      }
+      throw new Error("No trade rows could be read from this contract note.");
     }
 
     let tradesToProcess = validatedTrades;
@@ -873,7 +966,12 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
 
       // KEEP INDEPENDENT: Extract directly from the trade row!
       let brokerage = rt(t.quantity * (t.brokeragePerShare || 0));
-      // Fallback only if raw brokerage is totally 0
+
+      // Fallback when the row prints no per-share brokerage. `summary.taxableValue` was reduced
+      // to actual BROKERAGE at the top of this function — do NOT subtract the other taxable
+      // charges again here. A zero-brokerage plan therefore lands on 0, which is the point:
+      // this fallback used to fire on every note because brokerage 0 with ETC > 0 looked like
+      // a missing figure rather than a real zero.
       if (brokerage === 0 && summary.taxableValue > 0) {
         // Here we use totalTurnover because brokerage still applies across the board, including mutual funds if no per-share is given.
         const totalRatio = totalTurnover > 0 ? grossTotal / totalTurnover : 0;
