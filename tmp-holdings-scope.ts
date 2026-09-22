@@ -54,12 +54,51 @@ ok('...and all five are accounted for (effect, identity, carry-forward, render, 
 // not be able to disagree about what was held on a date.
 ok('the position comes from the shared computeHoldingsAsOf',
   /import \{ computeHoldingsAsOf \} from '\.\.\/lib\/holdingsCalc'/.test(MODAL)
-  && /computeHoldingsAsOf\(sid, ts\)/.test(MODAL));
+  && /computeHoldingsAsOf\(sid, new Date\(/.test(MODAL));
 
 // End of day, so a trade stamped the action's own date is INCLUDED — an allotment sits on top
 // of whatever that day's trading left.
 ok('the as-of instant is the END of the action\'s day',
   /new Date\(`\$\{d\}T23:59:59`\)\.getTime\(\)/.test(MODAL));
+
+// ── THE READ MUST ACTUALLY COMPLETE ─────────────────────────────────────────────────────
+// Reported 22-Sep-2026: *"2 mins in still couldnt read the ledger"*. The first version of this
+// effect depended on a freshly-built ARRAY (new identity on every `lines` change, i.e. every
+// keystroke) and on `asOfPos`, and carried a `cancelled` flag in its cleanup. So typing the
+// ratio - the one interaction guaranteed to happen while the read is in flight - re-ran the
+// effect, the cleanup cancelled the run that owned the request, the reply was DISCARDED, and
+// the key stayed in the issued set so it was never asked for again. Permanently stuck.
+{
+  const fn = MODAL.slice(MODAL.indexOf('const fetchAsOf ='));
+  const body = fn.slice(0, fn.indexOf('\n  useEffect('));
+  ok('the as-of read carries NO cancellation flag',
+    !/cancelled/.test(body),
+    'a late reply is keyed by portfolio+date and is simply correct - discarding it strands the key');
+
+  // NEVER silent. A swallowed error leaves "reading the ledger…" on screen indefinitely, which
+  // is indistinguishable from a slow read - exactly how this was reported.
+  ok('a failed read is recorded with its reason, not swallowed',
+    /setAsOfFailed\(\(p\) => \(\{[\s\S]*?e\?\.result\?\.error\?\.message \|\| e\?\.message/.test(body));
+  ok('...and the key is released so it can be retried',
+    /asOfIssued\.current\.delete\(key\)/.test(body));
+  // Starting is not guaranteed either: no token means no read, and saying nothing there is the
+  // same eternal "reading the ledger…".
+  ok('...and a read that cannot even START says so',
+    /Google Sheets is not connected/.test(body));
+}
+
+// The dep is a PRIMITIVE, so the effect fires when the SET of dates changes and not on every
+// keystroke; and `asOfPos` is NOT a dep, or every successful write re-runs it.
+ok('the effect is keyed on a primitive, not a rebuilt array',
+  /const neededAsOfKey = useMemo\(/.test(MODAL)
+  && /\}, \[open, portfolio, neededAsOfKey\]\);/.test(MODAL));
+ok('...and the result cache is not one of its dependencies',
+  !/\[open, portfolio, neededAsOfKey, asOfPos\]/.test(MODAL));
+
+// The retry has to re-issue the read directly: clearing the failure alone would not fire the
+// effect, because the set of needed dates has not changed.
+ok('the retry button calls the fetch directly',
+  /onClick=\{\(\) => fetchAsOf\(heldOn\)\}/.test(MODAL));
 
 // Keyed by BOTH, or switching account inside the drawer reuses the other account's position.
 ok('the cache is keyed by portfolio AND date',
@@ -78,8 +117,19 @@ ok('changing a free-share line\'s date clears the held figure',
 // The figure legitimately differs from the holdings grid whenever the action is back-dated.
 // Without the date on screen that difference reads as a bug, which is how this was reported.
 ok('the field says which date it answered', /· as at \{formatDMY\(heldOn\)\}/.test(MODAL));
-ok('...and distinguishes "still reading" from "not held"',
-  /const heldPending = free && !heldKnown/.test(MODAL) && /reading the ledger/.test(MODAL));
+// FOUR states, not one. The first version showed "reading the ledger…" whenever there was no
+// answer - running, failed, or never started - so a read that had given up looked identical to
+// a slow one, which is what left the box stuck for two minutes with nothing to act on.
+ok('the four outcomes are distinguished',
+  /const heldLoading = free && !heldKnown && !!asOfLoading\[asOfKey\];/.test(MODAL)
+  && /const heldFailedMsg = free && !heldKnown \? \(asOfFailed\[asOfKey\] \|\| ''\) : '';/.test(MODAL)
+  && /const heldNone = free && !heldKnown && !heldLoading && !heldFailedMsg/.test(MODAL));
+ok('...and each says something different on screen',
+  /couldn.t read the ledger/.test(MODAL)
+  && /nothing held on \{formatDMY\(heldOn\)\}/.test(MODAL)
+  && /reading the ledger/.test(MODAL));
+ok('a failed read still lets the figure be typed',
+  /type the shares held yourself/.test(MODAL));
 
 // The auto-fill effect must re-run when a replay lands, or the box stays empty until an
 // unrelated keystroke happens to re-render it.

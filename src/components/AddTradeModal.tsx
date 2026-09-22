@@ -254,44 +254,91 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
    * fresh master (see the quota rule) — and it does not.
    */
   const [asOfPos, setAsOfPos] = useState<Record<string, { name: string; isin: string; qty: number }[]>>({});
-  const asOfPending = useRef<Set<string>>(new Set());
-  useEffect(() => { if (!open) { setAsOfPos({}); asOfPending.current = new Set(); } }, [open]);
+  /** Keys with a replay IN FLIGHT, and keys whose replay FAILED (with the reason). */
+  const [asOfLoading, setAsOfLoading] = useState<Record<string, boolean>>({});
+  const [asOfFailed, setAsOfFailed] = useState<Record<string, string>>({});
+  /** Keys already issued, so a re-render cannot fire a second read for the same date. */
+  const asOfIssued = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!open) { setAsOfPos({}); setAsOfLoading({}); setAsOfFailed({}); asOfIssued.current = new Set(); }
+  }, [open]);
 
-  /** The dates this drawer currently needs a position for — one per free-share line. */
-  const neededAsOf = useMemo(() => {
+  /**
+   * The dates this drawer needs a position for, as ONE STRING.
+   *
+   * A primitive, not an array, and that is the whole point: a `useMemo` returning `[...set]`
+   * gets a new identity on every `lines` change - i.e. on every keystroke - and an effect
+   * keyed on it therefore re-runs while a read is still in flight.
+   */
+  const neededAsOfKey = useMemo(() => {
     const out = new Set<string>();
     for (const l of lines) {
       if (!isFreeShares(l.action)) continue;
       const d = (l.date || tradeDate || '').trim();
       if (isDateInputSane(d) && /^\d{4}-\d{2}-\d{2}$/.test(d)) out.add(d);
     }
-    return [...out];
+    return [...out].sort().join(',');
   }, [lines, tradeDate]);
 
-  useEffect(() => {
-    if (!open || portfolio === 'local') return;
+  /**
+   * Replay one date's position.
+   *
+   * Extracted so the Retry button can re-issue it: clearing the failure alone would not, since
+   * the effect below only fires when the SET of needed dates changes.
+   *
+   * NOTE THE ABSENCE OF A `cancelled` FLAG, which is what broke the first version of this
+   * (reported 22-Sep-2026: *"2 mins in still couldnt read the ledger"*). The effect depended on
+   * a freshly-built array AND on `asOfPos`, so typing the ratio while the read was in flight
+   * re-ran it, and the cleanup set `cancelled = true` on the run that owned the request. The
+   * reply then arrived, saw the flag, and was DISCARDED - while the key stayed in the issued
+   * set, so it was never asked for again. Stuck for good, on the one interaction guaranteed to
+   * happen: typing the ratio.
+   *
+   * A late reply is not stale here. It is keyed by portfolio and date, both immutable for that
+   * request, so writing it whenever it lands is simply correct; and closing the drawer resets
+   * every one of these maps above.
+   */
+  const fetchAsOf = (d: string) => {
+    if (portfolio === 'local') return;
     const sid = sheetIdForId(portfolio);
-    if (!sid || !hasValidGoogleToken()) return;
-    let cancelled = false;
-    for (const d of neededAsOf) {
-      const key = `${portfolio}|${d}`;
-      if (asOfPos[key] || asOfPending.current.has(key)) continue;
-      asOfPending.current.add(key);
-      // End of the action's own day: a trade stamped that date must be INCLUDED, because a
-      // corporate action is allotted on top of whatever the day's trading left.
-      const ts = new Date(`${d}T23:59:59`).getTime();
-      computeHoldingsAsOf(sid, ts)
-        .then((r) => {
-          if (cancelled) return;
-          setAsOfPos((prev) => ({
-            ...prev,
-            [key]: r.positions.map((p) => ({ name: p.securityName, isin: p.isin, qty: p.quantity })),
-          }));
-        })
-        .catch(() => { asOfPending.current.delete(key); });   // retry on the next edit
+    const key = `${portfolio}|${d}`;
+    if (!sid) { setAsOfFailed((p) => ({ ...p, [key]: 'Unknown portfolio.' })); return; }
+    if (!hasValidGoogleToken()) {
+      setAsOfFailed((p) => ({ ...p, [key]: 'Google Sheets is not connected.' }));
+      return;
     }
-    return () => { cancelled = true; };
-  }, [open, portfolio, neededAsOf, asOfPos]);
+    asOfIssued.current.add(key);
+    setAsOfLoading((p) => ({ ...p, [key]: true }));
+    setAsOfFailed((p) => { const n = { ...p }; delete n[key]; return n; });
+    // End of the action's own day: a trade stamped that date must be INCLUDED, because a
+    // corporate action is allotted on top of whatever the day's trading left.
+    computeHoldingsAsOf(sid, new Date(`${d}T23:59:59`).getTime())
+      .then((r) => {
+        setAsOfPos((prev) => ({
+          ...prev,
+          [key]: r.positions.map((p) => ({ name: p.securityName, isin: p.isin, qty: p.quantity })),
+        }));
+        setAsOfLoading((p) => ({ ...p, [key]: false }));
+      })
+      .catch((e: any) => {
+        // NEVER silent. A swallowed error here leaves "reading the ledger…" on screen forever,
+        // which is indistinguishable from a slow read and is exactly how this was reported.
+        asOfIssued.current.delete(key);
+        setAsOfLoading((p) => ({ ...p, [key]: false }));
+        setAsOfFailed((p) => ({
+          ...p,
+          [key]: e?.result?.error?.message || e?.message || 'Could not read the ledger.',
+        }));
+      });
+  };
+
+  useEffect(() => {
+    if (!open || !neededAsOfKey) return;
+    for (const d of neededAsOfKey.split(',')) {
+      if (!d || asOfIssued.current.has(`${portfolio}|${d}`)) continue;
+      fetchAsOf(d);
+    }
+  }, [open, portfolio, neededAsOfKey]);
 
   // Opened from a stock's detail page → the whole drawer is about THAT security. Show it once
   // at the top and drop the per-line company picker: re-choosing it on every added line was
@@ -977,12 +1024,20 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   // dated 21-Aug filled 2,00,000 when 2,10,000 was held on that date, the
                   // difference being a sell on 31-Aug (reported 22-Sep-2026, Goodluck India).
                   const heldOn = (l.date || tradeDate || '').trim();
+                  const asOfKey = `${portfolio}|${heldOn}`;
                   const autoHeld = free ? heldFor(l.company, l.isin, heldOn) : null;
                   const heldKnown = autoHeld != null;
-                  // The replay for this date has not come back yet. Distinguished from "not
-                  // held" so the box does not read as a company we could not find.
-                  const heldPending = free && !heldKnown && portfolio !== 'local'
-                    && !!l.company.trim() && !asOfPos[`${portfolio}|${heldOn}`];
+                  // FOUR states, and the first version collapsed them into one - it showed
+                  // "reading the ledger…" whenever there was no answer, whether a read was
+                  // running, had failed, or had never been started. A read that failed then
+                  // looked exactly like a slow one, forever (reported 22-Sep-2026:
+                  // *"2 mins in still couldnt read the ledger"*).
+                  const heldLoading = free && !heldKnown && !!asOfLoading[asOfKey];
+                  const heldFailedMsg = free && !heldKnown ? (asOfFailed[asOfKey] || '') : '';
+                  // The replay landed and this company simply held nothing on that date. A
+                  // real answer, and not the same as "we could not find out".
+                  const heldNone = free && !heldKnown && !heldLoading && !heldFailedMsg
+                    && !!l.company.trim() && !!asOfPos[asOfKey];
                   const heldNum = num(l.held);   // the (auto-filled but editable) field is the source of truth
                   const freeNum = num(l.qty);                 // computed by applyRatio from held + ratio
                   const totalNum = heldNum + freeNum;
@@ -1087,9 +1142,13 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                                 Shares held{' '}
                                 {heldKnown
                                   ? <span className="font-normal normal-case text-emerald-600">· as at {formatDMY(heldOn)}</span>
-                                  : heldPending
+                                  : heldLoading
                                     ? <span className="font-normal normal-case text-slate-400">· reading the ledger…</span>
-                                    : null}
+                                    : heldFailedMsg
+                                      ? <span className="font-normal normal-case text-rose-600">· couldn’t read the ledger</span>
+                                      : heldNone
+                                        ? <span className="font-normal normal-case text-slate-400">· nothing held on {formatDMY(heldOn)}</span>
+                                        : null}
                               </label>
                               {/* Replayed to THIS LINE'S date and still editable. The label names the
                                   date on purpose: the figure differs from the one on the holdings
@@ -1097,7 +1156,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                                   screen that difference reads as a bug. */}
                               <input
                                 type="number" min="0" step="any"
-                                placeholder={heldPending ? 'reading the ledger…' : 'shares held before this action'}
+                                placeholder={heldLoading ? 'reading the ledger…' : 'shares held before this action'}
                                 value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
                                 title={heldKnown
                                   ? `Your holding on ${formatDMY(heldOn)}, replayed from the ledger. Trades AFTER that date are excluded. Editable.`
@@ -1159,13 +1218,29 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                               <b className="font-mono text-slate-900">{totalNum.toLocaleString('en-IN')}</b>.
                             </span>
                           ) : (
+                            heldFailedMsg ? (
+                            // Never a dead end: the box is editable, so the figure can always be
+                            // typed. What must not happen is the screen implying it is still
+                            // working when it has given up.
+                            <span className="text-rose-600">
+                              Couldn’t work out your holding on {formatDMY(heldOn)} — {heldFailedMsg}{' '}
+                              <button
+                                type="button"
+                                onClick={() => fetchAsOf(heldOn)}
+                                className="underline font-bold hover:text-rose-800 cursor-pointer"
+                              >Try again</button>, or type the shares held yourself.
+                            </span>
+                            ) : (
                             <span className="text-slate-400">
                               {heldKnown
                                 ? 'Enter the ratio — the free-share count and new total fill in automatically.'
-                                : heldPending
+                                : heldLoading
                                   ? `Working out what you held on ${formatDMY(heldOn)}…`
-                                  : 'Pick the company (must be a held stock) and enter the ratio; shares held and the new total then compute automatically.'}
+                                  : heldNone
+                                    ? `Nothing held in this company on ${formatDMY(heldOn)} — check the date, or type the shares held yourself.`
+                                    : 'Pick the company (must be a held stock) and enter the ratio; shares held and the new total then compute automatically.'}
                             </span>
+                            )
                           )}
                         </div>
                       ) : actionHint ? <p className="text-[10px] text-slate-400">{actionHint}</p> : null}

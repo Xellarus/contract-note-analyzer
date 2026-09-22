@@ -42,7 +42,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
-| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT or the wrong DATE (26). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Caught two undated call sites the author had missed, on its first run |
+| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT or the wrong DATE (35). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
 | `node tmp-xverify.mjs` | Cross-broker PDF extraction comparison |
@@ -917,6 +917,28 @@ only rewritten by an explicit Rebuild Holding, so it can lag True Entry on top o
   action's own date, so a split/bonus already saved with a wrong `held` is still filed
   correctly — what was wrong is the number on screen, the hint under it, and the `qty` written
   to the sheet, which a human reading that sheet would believe.
+
+**The as-of read must NOT carry a cancellation flag** (22-Sep-2026, reported as *"2 mins in
+still couldnt read the ledger"* — a bug introduced by the fix above, on the same day). The first
+version's effect depended on a freshly-built ARRAY (`useMemo` returning `[...set]`, so a new
+identity on every `lines` change, i.e. every keystroke) **and** on `asOfPos`, and its cleanup set
+`cancelled = true`. Typing the ratio — the one interaction guaranteed to happen while the read is
+in flight — re-ran the effect, cancelled the run that owned the request, and **discarded the
+reply**; the key stayed in the issued set, so it was never asked for again. Stuck for good.
+
+- **A late reply is not stale here.** It is keyed by portfolio and date, both immutable for that
+  request, so writing it whenever it lands is simply correct. Closing the drawer resets every
+  one of those maps, which is the only cancellation actually needed.
+- **The effect dep is a PRIMITIVE** (`neededAsOfKey`, the sorted dates joined), so it fires when
+  the SET of dates changes rather than on every keystroke — and `asOfPos` is not a dep, or every
+  successful write re-runs it.
+- **The catch is never silent.** A swallowed error leaves *"reading the ledger…"* on screen
+  indefinitely, which is indistinguishable from a slow read. It records the reason, releases the
+  key, and the hint offers **Try again** plus "type the shares held yourself" — the box is
+  editable, so this is never a dead end.
+- **FOUR states, not one**: loaded · in flight · failed · nothing held on that date. The first
+  version showed "reading the ledger…" for all of them, including *never started* (no token),
+  which is why a read that had given up looked like one still working.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not
