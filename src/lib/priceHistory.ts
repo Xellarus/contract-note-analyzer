@@ -1,5 +1,5 @@
 import { gapi } from "gapi-script";
-import { SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
+import { lookupScrip, normName, SCRIP_MASTER_SPREADSHEET_ID, type ScripMaster } from "./scripMaster";
 import { EMPTY_GRID, gridNum, tsOfYmd, ymdCell, type PriceGrid } from "./priceGrid";
 
 /**
@@ -24,9 +24,42 @@ export const BENCH_NIFTY50 = "^NIFTY50";
 export {
   COVERAGE_OK, MAX_CARRY_SESSIONS, EMPTY_GRID,
   tsOfYmd, ymdCell, gridNum,
-  sessionIndexAsOf, sessionIndexOnOrAfter, fillColumn, gridExtent,
+  sessionIndexAsOf, sessionIndexOnOrAfter, fillColumn, gridExtent, priceAsOf,
 } from "./priceGrid";
-export type { PriceGrid, FilledColumn } from "./priceGrid";
+export type { PriceGrid, FilledColumn, PriceAsOf } from "./priceGrid";
+
+/**
+ * Resolve a ledger position to its Price History column. The .gs keys columns as
+ * `isin || masterEntry.isin || normName(rawName)`, and the app's own canonical key is
+ * `isin || normName(canonicalName)` — those coincide most of the time but not always (a renamed
+ * scrip), so several candidates are probed rather than committing to one. Returns '' when the
+ * scrip has no column at all, which is reported as unpriced instead of valued at zero.
+ *
+ * Lives here, beside the grid reader, because BOTH the NAV timeline and the historical valuation
+ * report have to map a holding to a column and they must agree. A second copy is how this repo
+ * ended up with four hand-kept spellings of one read range.
+ */
+export function makeColumnResolver(grid: PriceGrid, master: ScripMaster | null) {
+  const cache = new Map<string, string>();
+  return (isin: string, name: string): string => {
+    const ck = `${isin}|${name}`;
+    const hit = cache.get(ck);
+    if (hit !== undefined) return hit;
+    const entry = master ? lookupScrip(master, isin, name).entry : null;
+    const cands = [
+      (isin || "").trim().toUpperCase(),
+      (entry?.isin || "").trim().toUpperCase(),
+      entry?.key || "",
+      normName(name),
+    ];
+    let found = "";
+    for (const c of cands) {
+      if (c && grid.colIndex.has(c)) { found = c; break; }
+    }
+    cache.set(ck, found);
+    return found;
+  };
+}
 
 /**
  * Read the whole grid in one call (500 × ~330 ≈ 165k cells; a single values.get handles it).

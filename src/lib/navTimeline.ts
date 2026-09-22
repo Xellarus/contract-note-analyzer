@@ -5,7 +5,7 @@ import { loadOpeningTxns } from "./openingTxns";
 import type { CashFlow } from "./xirr";
 import { loadScripMaster, lookupScrip, normName, SCRIP_MASTER_SPREADSHEET_ID } from "./scripMaster";
 import {
-  loadPriceGrid, fillColumn, sessionIndexOnOrAfter, sessionIndexAsOf,
+  loadPriceGrid, fillColumn, sessionIndexOnOrAfter, sessionIndexAsOf, makeColumnResolver,
   COVERAGE_OK, BENCH_SMALLCAP250, type PriceGrid, type FilledColumn,
 } from "./priceHistory";
 import { applyTwr, rebaseToIndex, NAV_START_TS, type NavPoint } from "./navMath";
@@ -151,35 +151,6 @@ async function trueEntryEvents(spreadsheetId: string, keyOf: (isin: string, name
     });
   }
   return out;
-}
-
-/**
- * Resolve a ledger position to its Price History column. The .gs keys columns as
- * `isin || masterEntry.isin || normName(rawName)`, and the app's own canonical key is
- * `isin || normName(canonicalName)` — those coincide most of the time but not always (a renamed
- * scrip), so several candidates are probed rather than committing to one. Returns '' when the
- * scrip has no column at all, which is reported as unpriced instead of valued at zero.
- */
-function makeColumnResolver(grid: PriceGrid, master: any) {
-  const cache = new Map<string, string>();
-  return (isin: string, name: string): string => {
-    const ck = `${isin}|${name}`;
-    const hit = cache.get(ck);
-    if (hit !== undefined) return hit;
-    const entry = master ? lookupScrip(master, isin, name).entry : null;
-    const cands = [
-      (isin || "").trim().toUpperCase(),
-      (entry?.isin || "").trim().toUpperCase(),
-      entry?.key || "",
-      normName(name),
-    ];
-    let found = "";
-    for (const c of cands) {
-      if (c && grid.colIndex.has(c)) { found = c; break; }
-    }
-    cache.set(ck, found);
-    return found;
-  };
 }
 
 export async function computeNavTimeline(

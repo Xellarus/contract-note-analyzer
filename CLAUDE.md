@@ -20,7 +20,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 
 ## Test suites
 
-30 `tmp-*` files at the repo root are the de-facto test suite (excluding the `-run.mjs` wrappers). No npm script runs them.
+32 `tmp-*` files at the repo root are the de-facto test suite (excluding the `-run.mjs` wrappers). No npm script runs them.
 
 | Command | Covers |
 |---|---|
@@ -41,6 +41,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
+| `npx tsx tmp-price-asof.ts` | **Pricing a PAST position** — `priceAsOf` driven directly over a hand-built grid whose 31-March is deliberately a holiday: the session lookup, the bounded carry at exactly its boundary, a date before the grid (unpriced, never the grid's first close) and one after it (clamps, correctly), and `null`-never-0. Plus a source sweep over comment-stripped source for the wiring `tsc` cannot see — that the report prices at its OWN date and never `Date.now()`, that unlisted is tested with `classOfEntryAsOf` rather than a raw `assetClass` read, that no cell takes a zero fallback, that `computeHoldingsAsOf` still does NOT read the price grid, and that every reason a cell is blank is disclosed, and that the SCREEN renders the same disclosure the file carries (38). All 19 probes fire |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, or a sheet the page never re-read (45). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
@@ -1038,6 +1039,72 @@ which is the owner's stated fear about this whole feature and the doubt the row 
 
 All nine source probes fire (`tmp-holdings-scope.ts`, 45), including dropping the listener,
 un-forcing the read, dropping the rate limit, and swapping `normNamePrivate` for `normName`.
+
+**THE HISTORICAL HOLDING REPORT PRICES AT ITS OWN DATE** (22-Sep-2026, asked for as *"in
+historical valuation report i want to add 2 columns current price and current amount … i take
+historical holding as on 31st March 2025, for the stock it will provide the closing MP of that
+day"*). `Current Price` and `Current Value` now sit beside `Invested Value` on the Reports page
+and in all four export formats, which come free because they all render one `ReportDoc`.
+
+The source is the **`Price History`** tab of the shared scrip master — daily un-adjusted closes,
+one column per scrip, read by `loadPriceGrid`. This is the same grid the NAV chart values past
+positions from, deliberately, so the report and the chart cannot disagree about what a stock was
+worth on a given day.
+
+`priceAsOf(grid, key, ts, maxCarry)` in `priceGrid.ts` is the single-date counterpart of
+`fillColumn` — pure, no `gapi`, so the part that decides a number on a filed page is testable
+without a browser. Two rules, each because the alternative is silently wrong rather than visibly
+missing:
+
+- **The session is found with `sessionIndexAsOf`, never by matching the date.** 31-March is a
+  non-trading day most years — it was Ramzan Id in 2025 — and these reports are run for exactly
+  that date. An equality match would report the whole book unpriced on the one day it is asked
+  about, which reads as "these securities had no price".
+- **A blank cell walks BACK at most 7 sessions and then gives up.** `null`, never 0 and never a
+  fall back to cost: a 0 reads as a worthless holding and foots into the total as though it had
+  been valued, and cost would make Current Value equal Invested Value and hide the gap instead
+  of showing it. `MAX_CARRY_SESSIONS` is shared with `fillColumn` — divergence between the
+  report and the chart is the disease here.
+
+**Every reason a cell is blank is NAMED and COUNTED**, because a blank column and a zero column
+are indistinguishable on a printed page and this file gets filed. Five footnotes, each fired only
+when it applies: unlisted holdings, listed holdings with no close, a report date preceding the
+history held, no price history at all, and — the one that matters most — **the totals no longer
+tie**. `Total Current Value` covers only the priced rows, so the note states the rupee cost
+sitting in unpriced positions and says the two totals are not comparable. Same discipline as the
+Combined holding tab's shortfall note: an unexplained difference between two figures on one filed
+statement is the thing nobody can debug six months later.
+
+**Unlisted holdings are never priced** (owner's decision, 22-Sep-2026: *"unlisted shares let them
+be"*). The scrip master carries ONE hand-entered valuation per unlisted company, which is a
+statement about today; printing it against a 31-Mar-2025 position would date this year's number
+to last year's statement. The test is `classOfEntryAsOf(entry, asOfTs)` at the REPORT's date, not
+a raw `assetClass` read — so a company that has since listed is priced for the sessions it was
+actually listed for, and its pre-listing years stay blank.
+
+**KNOWN LIMIT, disclosed rather than defended against.** The grid holds TRUE un-adjusted closes,
+so a carry crossing a split or bonus ex-date states a pre-adjustment price beside a
+post-adjustment quantity — a 10:1 split overstates the value tenfold. `fillColumn` takes a
+`boundaries` set for exactly this, but building one needs the scrip's event replay
+(`navTimeline.ts`), which a report priced at a single date does not have. So `carried` comes back
+per scrip and the footnote **names each carried position with the session it was priced from**.
+Wiring a half-populated boundary set would look like protection and provide none — the same trap
+as the discriminating name slot that was tried and removed.
+
+Three more things, each a way to get it wrong that costs nothing to get right:
+
+- **The pricing is NOT inside `computeHoldingsAsOf`.** That function is also what the Add Trade
+  drawer calls for "shares held as at this date", memoised per portfolio and date; a ~165k-cell
+  grid read in there would be paid on every back-dated corporate action, and the quota fault
+  would be attributed to anything but this. The report reads the grid itself, once, on an
+  explicit Generate.
+- **`makeColumnResolver` moved to `priceHistory.ts`** and `navTimeline.ts` imports it. Both have
+  to map a holding to a grid column and they must agree; a second copy is how this repo ended up
+  with four hand-kept spellings of one read range.
+- **The holding document is landscape, and the master is loaded for every holding run** — seven
+  columns no longer fit upright, and the price columns need the master whatever the scope. A
+  failed master read still only REFUSES a scoped run: an unpriced consolidated report beats no
+  report, and a failed grid read degrades to unpriced rather than throwing.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not

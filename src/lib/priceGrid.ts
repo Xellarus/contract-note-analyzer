@@ -139,3 +139,55 @@ export function gridExtent(grid: PriceGrid): { from: number; to: number } | null
   if (!grid.dates.length) return null;
   return { from: grid.ts[0], to: grid.ts[grid.ts.length - 1] };
 }
+
+export interface PriceAsOf {
+  /** The close, or null when this scrip has no usable price at that date. Never 0, never cost. */
+  price: number | null;
+  /** The session the price actually came from (`yyyy-mm-dd`), or "" when there is none. */
+  sessionDate: string;
+  /** True when `sessionDate` is EARLIER than the session the requested date resolves to. */
+  carried: boolean;
+}
+
+const NO_PRICE: PriceAsOf = { price: null, sessionDate: "", carried: false };
+
+/**
+ * One scrip's close **as at a past date** — what a historical valuation report needs, and the
+ * single-date counterpart of `fillColumn`'s whole-series fill.
+ *
+ * Two rules, both of which exist because the alternative is silently wrong rather than visibly
+ * missing:
+ *
+ *   • The session is found with `sessionIndexAsOf`, never by matching the date exactly. A report
+ *     dated 31-March lands on a Sunday two years in three, and an equality match would report
+ *     every holding as unpriced on precisely the dates these reports are run for.
+ *   • A blank cell (the scrip did not trade, or Yahoo had no bar) walks BACK at most `maxCarry`
+ *     sessions and then gives up. Returning null is the point: a valuation report that prints a
+ *     price it does not have is worse than one that admits a gap, and 0 would read as a total
+ *     loss while the cost basis would read as break-even.
+ *
+ * KNOWN LIMIT, disclosed rather than defended against: the grid holds TRUE (un-adjusted) closes,
+ * so a carry that crosses a split or bonus ex-date states the price in pre-adjustment terms while
+ * the quantity beside it is post-adjustment — a 10:1 split would overstate the value tenfold.
+ * `fillColumn` takes a `boundaries` set for exactly this, but building one needs the scrip's event
+ * replay (navTimeline.ts), which a report priced at a single date does not have. So `carried` is
+ * returned per scrip and the caller must SAY which positions were carried and from when. Wiring a
+ * half-populated boundary set here would look like protection and provide none.
+ */
+export function priceAsOf(
+  grid: PriceGrid,
+  key: string,
+  ts: number,
+  maxCarry: number = MAX_CARRY_SESSIONS,
+): PriceAsOf {
+  if (!key) return NO_PRICE;
+  const ord = grid.colIndex.get(key);
+  if (ord === undefined) return NO_PRICE;
+  const si = sessionIndexAsOf(grid, ts);
+  if (si < 0) return NO_PRICE;                       // the date precedes the grid entirely
+  for (let i = si; i >= 0 && si - i <= maxCarry; i--) {
+    const v = grid.rows[i][ord];
+    if (v !== null) return { price: v, sessionDate: grid.dates[i], carried: i < si };
+  }
+  return NO_PRICE;
+}

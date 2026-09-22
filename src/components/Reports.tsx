@@ -10,7 +10,158 @@ import { loadOpeningHoldings } from '../lib/openingHoldings';
 import { useVirtualRows } from './ui/useVirtualRows';
 import ExportMenu from './ExportMenu';
 import type { ReportDoc, ReportCol, ReportRow } from '../lib/reportDoc';
-import { inferCols, rowsFromGrid, fileSafe } from '../lib/reportDoc';
+import { inferCols, rowsFromGrid, fileSafe, fmtMoney } from '../lib/reportDoc';
+import {
+  loadPriceGrid, makeColumnResolver, priceAsOf, gridExtent, EMPTY_GRID, type PriceGrid,
+} from '../lib/priceHistory';
+
+/**
+ * A historical position with the market price it carried ON THE REPORT'S OWN DATE.
+ *
+ * The whole point of the two extra fields is that they are dated the same as the quantity beside
+ * them. Valuing a 31-Mar-2025 position at today's price produces a page on which every figure is
+ * plausible and nothing contradicts anything — the worst failure this app has, and the reason
+ * `mktPrice` is `null` rather than a fallback whenever the right price cannot be had.
+ */
+interface PricedPosition extends HistoricalHolding {
+  /** Close on the last session at or before the report date. `null` = unpriced. NEVER 0. */
+  mktPrice: number | null;
+  mktValue: number | null;
+  /** The session the price actually came from; '' when unpriced. */
+  priceDate: string;
+  /** Priced from an EARLIER session than the report date resolved to. */
+  carried: boolean;
+  /** Unlisted as at the report date, and therefore deliberately not priced. */
+  unlisted: boolean;
+}
+
+/** What the pricing pass has to DISCLOSE, so a blank column is never mistaken for a zero one. */
+interface PriceMeta {
+  /** Extent of the price history actually held, for saying when a date simply precedes it. */
+  gridFrom: string;
+  gridTo: string;
+  /** Unlisted positions — no market price by design. */
+  unlisted: number;
+  /** Listed positions the grid had no usable close for, by name. */
+  unpriced: string[];
+  /** Listed positions priced from an earlier session, with that session's date. */
+  carried: { name: string; date: string }[];
+  /** Sum of the market value that COULD be established. */
+  totalValue: number;
+  /** Invested cost sitting in positions with no market price — the footing shortfall. */
+  unpricedInvested: number;
+}
+
+/**
+ * Attach each position's close as at the report date.
+ *
+ * Deliberately NOT done inside `computeHoldingsAsOf`: that function is also what the Add Trade
+ * drawer calls for "shares held as at this date", memoised per portfolio and date, and dragging a
+ * ~165k-cell grid read onto that path would pay for a valuation nobody asked for on every
+ * back-dated corporate action.
+ *
+ * Unlisted holdings are left unpriced (owner's decision, 22-Sep-2026). The scrip master carries a
+ * single hand-entered valuation per unlisted company, which is a statement about TODAY; printing
+ * it against a past position would put this year's number on last year's statement. The class
+ * test is `classOfEntryAsOf` at the REPORT's date, not `assetClass` raw, so a company that has
+ * since listed is priced for the sessions it was actually listed for.
+ */
+async function priceAsOfDate(
+  positions: HistoricalHolding[],
+  asOfTs: number,
+  master: ScripMaster | null,
+): Promise<{ priced: PricedPosition[]; meta: PriceMeta }> {
+  let grid: PriceGrid = EMPTY_GRID;
+  // A missing or unreadable Price History tab degrades to "nothing is priced", which the
+  // footnotes then state. It must never fail the report — the cost columns are still valid.
+  try { grid = await loadPriceGrid(); } catch { /* no market history */ }
+  const colOf = makeColumnResolver(grid, master);
+  const ext = gridExtent(grid);
+  const meta: PriceMeta = {
+    gridFrom: ext ? grid.dates[0] : '',
+    gridTo: ext ? grid.dates[grid.dates.length - 1] : '',
+    unlisted: 0, unpriced: [], carried: [], totalValue: 0, unpricedInvested: 0,
+  };
+  const priced = positions.map((p): PricedPosition => {
+    const blank = { ...p, mktPrice: null, mktValue: null, priceDate: '', carried: false };
+    const entry = master ? lookupScrip(master, p.isin, p.securityName).entry : null;
+    if (entry && classOfEntryAsOf(entry, asOfTs)) {
+      meta.unlisted++;
+      meta.unpricedInvested += p.invested;
+      return { ...blank, unlisted: true };
+    }
+    const r = priceAsOf(grid, colOf(p.isin, p.securityName), asOfTs);
+    if (r.price === null) {
+      meta.unpriced.push(p.securityName);
+      meta.unpricedInvested += p.invested;
+      return { ...blank, unlisted: false };
+    }
+    const value = p.quantity * r.price;
+    meta.totalValue += value;
+    if (r.carried) meta.carried.push({ name: p.securityName, date: r.sessionDate });
+    return { ...p, mktPrice: r.price, mktValue: value, priceDate: r.sessionDate, carried: r.carried, unlisted: false };
+  });
+  return { priced, meta };
+}
+
+/** Name up to `n` of a list, then say how many more there are — never a silent truncation. */
+const nameSome = (xs: string[], n = 8): string =>
+  xs.slice(0, n).join(', ') + (xs.length > n ? `, and ${xs.length - n} more` : '');
+
+/**
+ * The disclosure block for the two price columns. Every line exists because the alternative is a
+ * blank cell the reader has to guess at, and this file gets filed.
+ */
+function buildPriceNotes(pm: PriceMeta, asOf: string): string[] {
+  const asOfTs = new Date(`${asOf}T23:59:59`).getTime();
+  const out: string[] = [];
+
+  if (!pm.gridFrom) {
+    out.push('No market price history was available when this report was generated, so Current Price and Current Value are blank throughout. The cost columns are unaffected.');
+    return out;
+  }
+
+  out.push(
+    `Current Price is the closing market price on ${formatDMMMY(asOf)} — or, where that day was not a trading session, the close of the last session before it. Current Value is that price multiplied by the quantity held on the same date. Closes are as reported, un-adjusted for splits and bonuses.`,
+  );
+
+  // A date before the grid starts blanks EVERY price, which otherwise reads as "none of these
+  // securities had a price" rather than "this app does not hold prices that far back".
+  if (asOfTs < Date.parse(`${pm.gridFrom}T00:00:00Z`)) {
+    out.push(`The price history held by this app begins ${formatDMMMY(pm.gridFrom)}, which is after the date of this report, so no Current Price could be established for any holding.`);
+  }
+
+  if (pm.unlisted > 0) {
+    out.push(
+      `${pm.unlisted} unlisted holding${pm.unlisted === 1 ? '' : 's'} ${pm.unlisted === 1 ? 'is' : 'are'} shown without a Current Price. Unlisted companies have no traded price history; the valuation recorded on the scrip master is a single present-day figure and stating it here would date it to this report instead.`,
+    );
+  }
+
+  if (pm.unpriced.length > 0) {
+    out.push(
+      `${pm.unpriced.length} listed holding${pm.unpriced.length === 1 ? '' : 's'} had no close on or before this date and ${pm.unpriced.length === 1 ? 'is' : 'are'} left blank: ${nameSome(pm.unpriced)}.`,
+    );
+  }
+
+  // The footing consequence, stated where the reader is looking at the totals. Two statements
+  // that do not tie and do not say why is the thing nobody can debug six months later.
+  if (pm.unpricedInvested > 0) {
+    out.push(
+      `Total Current Value therefore covers only part of the table: ₹${fmtMoney(pm.unpricedInvested)} of invested cost sits in positions carrying no market price, so the two totals are not comparable.`,
+    );
+  }
+
+  // A carry across a corporate action would state the price in pre-adjustment terms beside a
+  // post-adjustment quantity. The grid holds no event data at a single date, so this is
+  // disclosed per position rather than silently prevented.
+  if (pm.carried.length > 0) {
+    out.push(
+      `Priced from an earlier session, being the last on which the security actually traded: ${nameSome(pm.carried.map(c => `${c.name} (${formatDMMMY(c.date)})`))}. A price carried across a bonus or split ex-date is stated before that adjustment — check any of these that had a corporate action in the interval.`,
+    );
+  }
+
+  return out;
+}
 
 type Step = 'home' | 'portfolio' | 'config' | 'result';
 type ReportType = 'holding' | 'capgains' | 'transactions' | 'expenses' | 'expenses-detailed';
@@ -279,7 +430,8 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Holding result
-  const [positions, setPositions] = useState<HistoricalHolding[]>([]);
+  const [positions, setPositions] = useState<PricedPosition[]>([]);
+  const [priceMeta, setPriceMeta] = useState<PriceMeta | null>(null);
   const [totalInvested, setTotalInvested] = useState(0);
   const [tradeRows, setTradeRows] = useState(0);
   // Generic result (capital gains / transactions)
@@ -307,7 +459,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     setStep('home');
     setError(null);
     setScope('consolidated');
-    setPositions([]); setGenHeader([]); setGenRows([]);
+    setPositions([]); setPriceMeta(null); setGenHeader([]); setGenRows([]);
   }, [focus]);
 
   const readTab = async (sheetId: string, range: string): Promise<any[][]> => {
@@ -320,13 +472,17 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     if (reportType === 'holding' && !asOf) return;
     setLoading(true);
     setError(null);
-    setPositions([]); setGenHeader([]); setGenRows([]);
+    setPositions([]); setPriceMeta(null); setGenHeader([]); setGenRows([]);
     try {
       // Both the stock scope and the asset-class scope resolve through the scrip master, so
       // load it once. For a stock-scoped report the master lets a scrip RENAMED in the master
       // (old name now an alias) still match its True Entry / LTST rows, which were written
       // under the old canonical name at import.
-      const needsMaster = !!focus || scopeActive;
+      // The holding report needs it too, and not for a scope: the price columns resolve each
+      // holding to its Price History column through the master, and ask it which holdings were
+      // unlisted on the report's date. A failed read still only THROWS for a scoped run — an
+      // unpriced consolidated report is a lesser failure than no report.
+      const needsMaster = !!focus || scopeActive || reportType === 'holding';
       let master: ScripMaster | null = null;
       let masterError: string | null = null;
       if (needsMaster) {
@@ -451,7 +607,11 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
         let positions = res.positions;
         if (matchScrip) positions = positions.filter(p => matchScrip!(p.securityName, p.isin));
         if (inScope) positions = positions.filter(p => inScope!(p.securityName, p.isin));
-        setPositions(positions);
+        // Priced AFTER filtering, so a narrowed report reads no more of the grid than it needs
+        // and the disclosure counts describe the rows actually printed.
+        const { priced, meta: pm } = await priceAsOfDate(positions, asOfTs, master);
+        setPositions(priced);
+        setPriceMeta(pm);
         // Any filter at all → the total must be re-summed from what's left, or the footer would
         // report the whole portfolio's cost against a subset of its rows.
         setTotalInvested((matchScrip || inScope) ? positions.reduce((s, p) => s + p.invested, 0) : res.totalInvested);
@@ -589,6 +749,10 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
 
     if (reportType === 'holding') {
       params.push(['As on', formatDMMMY(asOf)]);
+      // Everything the price columns cannot say for themselves. A blank cell is indistinguishable
+      // from a zero one on a printed page, so each REASON a cell is blank is named and counted —
+      // same discipline as the register's STT pair and the Combined tab's shortfall note.
+      const priceNotes = priceMeta ? buildPriceNotes(priceMeta, asOf) : [];
       params.push(['Positions', `${positions.length}`]);
       // Relabelled, not refiltered: the replay must span every holding (a corporate action on
       // one moves another), so the number is right and only its label was misleading. A wrong
@@ -601,12 +765,23 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
         { key: 'qty', label: 'Quantity', type: 'int' },
         { key: 'avg', label: 'Avg Buy Price', type: 'rate' },
         { key: 'inv', label: 'Invested Value', type: 'money' },
+        // Named as every broker's valuation report names them. "Current" is anchored by the
+        // "As on" line in the parameter block above and restated in the footnote below — the
+        // price is that date's close, not today's.
+        { key: 'cmp', label: 'Current Price', type: 'rate' },
+        { key: 'val', label: 'Current Value', type: 'money' },
       ];
       const rows: ReportRow[] = positions.map(pos => ({
-        cells: { name: pos.securityName, isin: pos.isin, qty: pos.quantity, avg: pos.avgBuyPrice, inv: pos.invested },
+        cells: {
+          name: pos.securityName, isin: pos.isin, qty: pos.quantity, avg: pos.avgBuyPrice, inv: pos.invested,
+          // null renders BLANK in all four formats. A 0 here would read as a worthless holding
+          // and would foot into the total as though it had been valued.
+          cmp: pos.mktPrice, val: pos.mktValue,
+        },
       }));
-      // Matches the on-screen footer, and the row the CSV has always carried.
-      rows.push({ cells: { name: 'Total', isin: '', qty: '', avg: '', inv: totalInvested }, total: true });
+      // Matches the on-screen footer, and the row the CSV has always carried. The price column
+      // gets no total — averaging or summing per-share prices means nothing.
+      rows.push({ cells: { name: 'Total', isin: '', qty: '', avg: '', inv: totalInvested, cmp: '', val: priceMeta ? priceMeta.totalValue : '' }, total: true });
       return {
         holder: p.label,
         title: meta.title,
@@ -620,11 +795,15 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
           ranScope === 'consolidated'
             ? 'Positions are replayed from the portfolio’s full trade history as it stood on the date above, including mergers, demergers, splits and bonuses.'
             : 'Positions are replayed from the portfolio’s full trade history as it stood on the date above, including mergers, demergers, splits and bonuses. The replay covers the whole portfolio; only the positions in scope are listed below.',
+          ...priceNotes,
           SCOPE_NOTE[ranScope],
           emptyListNote,
           unclassifiedNote,
           'Amounts in ₹. Cost per share is carried at full precision, not rounded to paise. Negative amounts appear in parentheses; a negative quantity indicates an unreconciled position.',
         ].filter(Boolean),
+        // Seven columns no longer fit upright. The generic branch below already flips at the
+        // same width.
+        landscape: true,
         filenameBase: `Holding_${scopeTag}${stockTag}${p.code}_as_of_${asOf}`,
       };
     }
@@ -666,17 +845,17 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
     };
   };
 
-  const reset = () => { setStep('home'); setPortfolio(null); setError(null); setScope('consolidated'); setPositions([]); setGenHeader([]); setGenRows([]); };
+  const reset = () => { setStep('home'); setPortfolio(null); setError(null); setScope('consolidated'); setPositions([]); setPriceMeta(null); setGenHeader([]); setGenRows([]); };
   const openReport = (t: ReportType) => {
     // Scope resets with the report type: carrying "Private Equity" from a Capital Gains run
     // into a Transaction Report would silently narrow a report the user did not narrow.
-    setReportType(t); setError(null); setScope('consolidated'); setPositions([]); setGenHeader([]); setGenRows([]);
+    setReportType(t); setError(null); setScope('consolidated'); setPositions([]); setPriceMeta(null); setGenHeader([]); setGenRows([]);
     // Scoped mode: portfolio is already locked to the stock's account → jump straight
     // to date/period config. Otherwise fall through to the portfolio picker.
     if (focus && portfolio) setStep('config');
     else { setPortfolio(null); setStep('portfolio'); }
   };
-  const exitFocus = () => { onClearFocus?.(); setPortfolio(null); setStep('home'); setError(null); setScope('consolidated'); setPositions([]); setGenHeader([]); setGenRows([]); };
+  const exitFocus = () => { onClearFocus?.(); setPortfolio(null); setStep('home'); setError(null); setScope('consolidated'); setPositions([]); setPriceMeta(null); setGenHeader([]); setGenRows([]); };
 
   const hasResult = reportType === 'holding' ? positions.length > 0 : genRows.length > 0;
 
@@ -942,6 +1121,8 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                         <th className="px-5 py-3 text-right">Quantity</th>
                         <th className="px-5 py-3 text-right">Avg Buy Price</th>
                         <th className="px-5 py-3 text-right">Invested Value</th>
+                        <th className="px-5 py-3 text-right">Current Price</th>
+                        <th className="px-5 py-3 text-right">Current Value</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -952,16 +1133,43 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                           <td className="px-5 py-2.5 text-right text-slate-700 font-mono">{p.quantity.toLocaleString('en-IN')}</td>
                           <td className="px-5 py-2.5 text-right text-slate-700 font-mono">{inr(p.avgBuyPrice)}</td>
                           <td className="px-5 py-2.5 text-right text-slate-800 font-mono font-semibold">{inr(p.invested)}</td>
+                          {/* An em-dash, not ₹0.00: a holding with no price and a holding worth
+                              nothing are different facts, and the footnotes say which is which. */}
+                          <td className="px-5 py-2.5 text-right text-slate-700 font-mono" title={p.priceDate && p.carried ? `Close of ${formatDMY(p.priceDate)} — the last session this security traded` : undefined}>
+                            {p.mktPrice === null ? <span className="text-slate-400">—</span> : inr(p.mktPrice)}
+                          </td>
+                          <td className="px-5 py-2.5 text-right text-slate-800 font-mono font-semibold">
+                            {p.mktValue === null ? <span className="text-slate-400">—</span> : inr(p.mktValue)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                     <tfoot className="border-t border-slate-200 bg-slate-50">
                       <tr>
-                        <td className="px-5 py-3 font-black text-slate-800 uppercase text-xs" colSpan={4}>Total Invested</td>
+                        <td className="px-5 py-3 font-black text-slate-800 uppercase text-xs" colSpan={4}>Total</td>
                         <td className="px-5 py-3 text-right font-black text-slate-900 font-mono">{inr(totalInvested)}</td>
+                        <td className="px-5 py-3" />
+                        <td className="px-5 py-3 text-right font-black text-slate-900 font-mono">{priceMeta ? inr(priceMeta.totalValue) : '—'}</td>
                       </tr>
                     </tfoot>
                   </table>
+                  {/* The same disclosure the exported file carries. Without it the screen shows
+                      blank price cells and a total that does not tie, with nothing saying why —
+                      and the person reading the screen is the one deciding whether to export. */}
+                  {(() => {
+                    // The leading note explains what "Current Price" means, which the As-on date
+                    // above already says on screen — so only the EXCEPTIONS are shown here. When
+                    // there is no price history at all that single note IS the exception, and
+                    // dropping it would leave the emptiest table with the emptiest explanation.
+                    const notes = priceMeta ? buildPriceNotes(priceMeta, asOf) : [];
+                    const shown = priceMeta?.gridFrom ? notes.slice(1) : notes;
+                    if (shown.length === 0) return null;
+                    return (
+                      <div className="m-5 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800 space-y-1.5">
+                        {shown.map((n, i) => <p key={i}>{n}</p>)}
+                      </div>
+                    );
+                  })()}
                 </div>
               )
             )}
