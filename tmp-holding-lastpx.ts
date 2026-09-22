@@ -70,7 +70,7 @@ function install(trueEntry: any[][]) {
   g.__ranges = {
     [`${PORTFOLIO}::True Entry!A:T`]: trueEntry,
     [`${SCRIP_MASTER_SPREADSHEET_ID}::'${MASTER_TAB}'!A1:Z50000`]: SCRIP_ROWS,
-    [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`]: PE_ROWS,
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:N5000`]: PE_ROWS,
   };
   g.__firstTab = { [PORTFOLIO]: 'True Entry', [SCRIP_MASTER_SPREADSHEET_ID]: MASTER_TAB };
   g.__sheetTabs = { [PORTFOLIO]: ['True Entry', 'Holding'] };

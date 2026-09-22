@@ -1,8 +1,8 @@
 import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import {
-  normName, loadScripMaster, resolveScrip, lookupScrip, ScripMaster,
-  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor, assetClassOf, isSttRemoved,
+  normName, loadScripMaster, resolveScrip, lookupScrip, ScripMaster, ScripEntry,
+  SCRIP_MASTER_SPREADSHEET_ID, ltDaysFor, classOfEntryAsOf, listedFromTs, isSttRemoved,
 } from "./scripMaster";
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from "./privateEquities";
 import { loadCorporateActions, CORP_ACTIONS_TAB } from "./corporateActions";
@@ -292,6 +292,17 @@ export interface TrxRegisterResult {
   itrCompanies: number;
   itrMissingPan: string[];
   itrUnfooted: string[];
+  /**
+   * Companies whose `Listed From` date falls INSIDE this FY — the transition year, where the
+   * three tabs deliberately disagree: the gains and transactions sit on the unlisted tab
+   * (unlisted at some point this year), the FY-end holding sits on the equity tab (listed on
+   * 31-March), and the ITR schedule carries the company with its real closing balance.
+   *
+   * Surfaced because a reader who does not know the company listed will read those three as a
+   * contradiction and "fix" one of them. It is also the only year on which a preparer has to
+   * split s.112A from off-market by hand, and nothing else on the tabs says which year that is.
+   */
+  listedDuringFy: string[];
   fyLabel: string;
   /** One entry per non-listed asset class that produced output this run, in registry order. */
   classTabs: { id: AssetClassId; label: string; cgTab?: string; txnTab?: string }[];
@@ -502,13 +513,40 @@ export async function generateTrxRegister(
    * from corporate actions - a mutual fund bought before this FY has no trade row here at all,
    * and eager population from `trades` would have read it as listed.
    */
-  const classByKey = new Map<string, AssetClassId | undefined>();
-  const classOfKey = (key: string): AssetClassId | undefined => {
-    if (classByKey.has(key)) return classByKey.get(key);
-    const c = assetClassOf(master, isinByKey.get(key) || "", nameByKey.get(key) || key);
-    classByKey.set(key, c);
-    return c;
+  const entryByKey = new Map<string, ScripEntry | null>();
+  const entryOfKey = (key: string): ScripEntry | null => {
+    if (entryByKey.has(key)) return entryByKey.get(key)!;
+    const e = lookupScrip(master, isinByKey.get(key) || "", nameByKey.get(key) || key).entry;
+    entryByKey.set(key, e);
+    return e;
   };
+
+  /**
+   * THE THREE DATED QUESTIONS. An unlisted company that later LISTS keeps its row (and its
+   * class) on the asset-class tab forever, carrying a `Listed From` date — so "what class is
+   * this?" has no answer without a date, and asking it undated is how regenerating an old year
+   * silently refiles it under today's answer. See `classAsOf` in scripMaster.ts.
+   *
+   * The memo is on the ENTRY, not on the answer, precisely so three different dates cost one
+   * lookup: resolving is the expensive half (`lookupScrip`'s token-subset fallback rescans
+   * every master entry for a name it cannot match exactly, which on a multi-thousand row ledger
+   * would be a full scan per row), while the date test is two comparisons.
+   *
+   * WAS IT UNLISTED AT ANY TIME THIS FY? — and the answer is just "at FY start", because the
+   * transition only ever runs one way. Used for the capital-gains tabs, the transaction
+   * statements and the ITR schedule: all three are statements ABOUT a year, and a company that
+   * was unlisted for part of it belongs in the unlisted paperwork for that year.
+   */
+  const classOfKeyInFy = (key: string): AssetClassId | undefined =>
+    classOfEntryAsOf(entryOfKey(key), fyStartTs);
+  /**
+   * WHAT WAS IT ON 31-MARCH? Used by the FY-end holding statements and by nothing else: a
+   * holding statement is a snapshot of one date, so a company that listed in November is
+   * listed equity on that page even though its gains for the year sit on the unlisted tab.
+   * The two are answering different questions and are meant to differ.
+   */
+  const classOfKeyAtFyEnd = (key: string): AssetClassId | undefined =>
+    classOfEntryAsOf(entryOfKey(key), fyEndExclTs - 1);
   /**
    * Does this scrip's class have a decided long-term threshold?
    *
@@ -518,7 +556,10 @@ export async function generateTrxRegister(
    * apart: whatever is kept off the tabs is exactly what is not expected on them.
    */
   const keyHasLtRule = (key: string): boolean => {
-    const c = classOfKey(key);
+    // `classOfKeyInFy`, the SAME test the capital-gains tabs use to place a block. Whatever is
+    // kept off those tabs is exactly what is not expected on them, which is what keeps the
+    // charge-conservation guard from firing on a scrip it can no longer find.
+    const c = classOfKeyInFy(key);
     return !c || ASSET_CLASSES[c].ltDays !== null;
   };
 
@@ -851,7 +892,15 @@ export async function generateTrxRegister(
       // consumed - the position moved - but the sale cannot be filed as short or long, so it is
       // recorded as unclassified and left out of both P/L columns. Without this the `>= null`
       // comparison coerces to `>= 0` and every such sale prints as LONG TERM in a tax document.
-      const ltDaysOrNull = ltDaysFor(master, t.isin, t.name);
+      // `t.ts` — the TRANSFER date, and this argument is the whole tax half of the listing
+      // feature. s.2(42A) tests what the asset WAS when it changed hands: sell while the
+      // company is still unlisted and the threshold is 730 days; sell after it lists and it is
+      // 365, with the entire holding period counting, unlisted years included (there is no
+      // reacquisition, so `l.buyTs` is untouched and the original buy date carries).
+      //
+      // Undated, this returned today's answer for every sale ever made, so the day a company
+      // listed, every prior year's short-term PE gain silently became long-term.
+      const ltDaysOrNull = ltDaysFor(master, t.isin, t.name, t.ts);
       if (ltDaysOrNull === null) {
         let rem = t.qty;
         for (const l of lots) {
@@ -1335,10 +1384,44 @@ export async function generateTrxRegister(
    * being copied to a second one - two tabs carrying the same gain is a double count that
    * nothing downstream could detect.
    */
-  const listedActive = deliveryActive.filter(b => !classOfKey(b.key));
+  /**
+   * A BLOCK IS THE ATOM, so a company that listed mid-year is not split across two tabs.
+   *
+   * Each block prints one self-contained, self-footing section — opening lines, splits,
+   * purchases, corporate-action notes, sales, closing stock. Halving one at the listing date
+   * would leave opening and closing on whichever half got them and neither section would foot;
+   * duplicating the purchases so both foot would double their CHARGES, and the
+   * charge-conservation guard throws rather than writing, so the result would be NO REGISTER
+   * AT ALL rather than a cosmetically odd one.
+   *
+   * So the whole block goes where the YEAR belongs (`classOfKeyInFy` — unlisted at any time
+   * ⇒ the unlisted tab), and the mid-year boundary is disclosed IN the section instead, as a
+   * note line beside the trades it separates. The tax is unaffected either way: the short/long
+   * split is computed per sale from that sale's own date, above.
+   */
+  const listedDuringFy: string[] = [];
+  for (const b of deliveryActive) {
+    const e = entryOfKey(b.key);
+    if (!e || !e.listedFrom) continue;
+    const lts = listedFromTs(e);
+    if (!(lts > fyStartTs && lts < fyEndExclTs)) continue;   // listed in some OTHER year
+    listedDuringFy.push(b.name);
+    // Rides in as a corporate-action note: those already print as a full-width sentence row
+    // between the purchases and the sales, sorted by date among themselves, which is exactly
+    // where a reader needs this one. A preparer splitting s.112A from off-market cannot get
+    // it from the tab heading alone, because the heading is annual and this fact is not.
+    b.corpNotes.push({
+      ts: lts,
+      text: `LISTED FROM ${fmtDate(lts)} \u2014 sales on or after this date are transfers of a LISTED `
+        + `share (365-day threshold, s.112A); earlier sales in this year are off-market transfers `
+        + `of an unlisted share (730 days). The holding period runs unbroken through the listing.`,
+    });
+  }
+
+  const listedActive = deliveryActive.filter(b => !classOfKeyInFy(b.key));
   const classActive = new Map<AssetClassId, Block[]>();
   for (const b of deliveryActive) {
-    const c = classOfKey(b.key);
+    const c = classOfKeyInFy(b.key);
     if (!c) continue;
     const arr = classActive.get(c) || [];
     arr.push(b);
@@ -1551,9 +1634,13 @@ export async function generateTrxRegister(
     // in-FY-activity filter the Capital Gains tab uses.
     const heldAll = [...blocks.values()].filter(b => b.closing.length > 0)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
-    const heldListed = heldAll.filter(b => !classOfKey(b.key));
-    const heldPe = heldAll.filter(b => classOfKey(b.key) === "PE");
-    const heldOther = heldAll.filter(b => { const c = classOfKey(b.key); return !!c && c !== "PE"; });
+    // `classOfKeyAtFyEnd`, NOT the in-FY test the gains tabs use. A holding statement states a
+    // position on ONE date, so a company that listed in November is listed equity here — it is
+    // quoted, priced by the feed and long-term at 12 months from 31-March onwards. Its gains
+    // for the same year still sit on the unlisted tab, because that page is about the year.
+    const heldListed = heldAll.filter(b => !classOfKeyAtFyEnd(b.key));
+    const heldPe = heldAll.filter(b => classOfKeyAtFyEnd(b.key) === "PE");
+    const heldOther = heldAll.filter(b => { const c = classOfKeyAtFyEnd(b.key); return !!c && c !== "PE"; });
 
     // ── The ITR unlisted-equity-shares schedule's inputs ──────────────────────────────────
     //
@@ -1575,12 +1662,18 @@ export async function generateTrxRegister(
     const chargedLot = (c: Charges) =>
       c.brok + c.stt + c.gst + c.et + c.stamp + c.sebi + c.ipf + c.dmat > 0.005;
 
+    // `classOfKeyInFy` — the schedule's own title is the test: "held at ANY TIME during the
+    // previous year". A company that listed in November was an unlisted company for seven
+    // months of this year and is disclosed, with its real 31-March closing balance (owner's
+    // decision, 21-Sep-2026): a blank or zero closing would read as a disposal. From the NEXT
+    // year on, `listedFrom` is at or before FY start and it drops off by itself — which is the
+    // point, because the year it drops off is a year it should never have been on.
     const itrKeys = new Set<string>();
     for (const b of blocks.values()) {
-      if (classOfKey(b.key) !== "PE") continue;
+      if (classOfKeyInFy(b.key) !== "PE") continue;
       if (b.opening.length || b.purchases.length || b.sales.length || b.closing.length) itrKeys.add(b.key);
     }
-    for (const k of intraBlocks.keys()) if (classOfKey(k) === "PE") itrKeys.add(k);
+    for (const k of intraBlocks.keys()) if (classOfKeyInFy(k) === "PE") itrKeys.add(k);
 
     const itrCompanyInputs: ItrCompanyInput[] = [...itrKeys].map((key) => {
       const b = blocks.get(key);
@@ -1611,7 +1704,7 @@ export async function generateTrxRegister(
     });
 
     // The line that stops Equity + PE ≠ Combined from being a silent discrepancy.
-    const otherLabels = [...new Set(heldOther.map(b => ASSET_CLASSES[classOfKey(b.key)!].label))].sort();
+    const otherLabels = [...new Set(heldOther.map(b => ASSET_CLASSES[classOfKeyAtFyEnd(b.key)!].label))].sort();
     const combinedNote = heldOther.length
       ? `Includes ${heldOther.length} holding(s) in ${otherLabels.join(" / ")}, which appear on NO other holding tab — `
         + `"Holding Equity+Intraday" plus "Holding Private Equity Only" therefore does not add up to this total.`
@@ -1882,8 +1975,10 @@ export async function generateTrxRegister(
   const inFyTs = (ts: number) => ts >= fyStartTs && ts < fyEndExclTs;
   const txnTabByClass = new Map<AssetClassId, string>();
   for (const id of ASSET_CLASS_IDS) {
-    const mine = trades.filter(t => inFyTs(t.ts) && classOfKey(t.key) === id);
-    const mySplits = splitRows.filter(s => inFyTs(s.ts) && classOfKey(s.key) === id);
+    // `classOfKeyInFy`, matching the capital-gains tabs: a statement of the year's
+    // transactions belongs with the year's gains, or a sale appears on one and not the other.
+    const mine = trades.filter(t => inFyTs(t.ts) && classOfKeyInFy(t.key) === id);
+    const mySplits = splitRows.filter(s => inFyTs(s.ts) && classOfKeyInFy(s.key) === id);
     if (!mine.length && !mySplits.length) continue;      // no tab for a class this book doesn't trade
     const label = ASSET_CLASSES[id].label;
     const txnTabName = `${label} Transactions for ${fyLabel}`;
@@ -2058,7 +2153,7 @@ export async function generateTrxRegister(
   return {
     tabName, intradayTabName, holdingTabName, fyLabel,
     holdingTabs: { equity: equityHoldingTab, pe: peHoldingTab, combined: combinedHoldingTab },
-    itrUnlistedTab, itrCompanies, itrMissingPan, itrUnfooted,
+    itrUnlistedTab, itrCompanies, itrMissingPan, itrUnfooted, listedDuringFy,
     classTabs: ASSET_CLASS_IDS
       .filter(id => classCg.some(c => c.id === id) || txnTabByClass.has(id))
       .map(id => ({

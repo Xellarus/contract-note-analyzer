@@ -4,7 +4,7 @@
  * real loader against a stubbed Sheets API (see tmp-pe-fold-run.mjs), so the column
  * detection, the alias index and the listed-company guard are all live.
  */
-import { loadScripMaster, invalidateScripCache, isPeScrip, peEntry, ltDaysFor, lookupScrip, resolveScrip, saveScripMaster } from './src/lib/scripMaster';
+import { loadScripMaster, invalidateScripCache, isPeScrip, peEntry, ltDaysFor, lookupScrip, resolveScrip, saveScripMaster, assetClassOf, classAsOf, classOfEntryAsOf, listedFromTs } from './src/lib/scripMaster';
 import { makePriceResolver } from './src/lib/scripPrices';
 
 let pass = 0, fail = 0;
@@ -58,7 +58,7 @@ const PE = [
 ];
 
 const MAIN_RANGE = "'Scrip Master'!A1:Z50000";
-const PE_RANGE = 'Private Equities!A1:J5000';
+const PE_RANGE = 'Private Equities!A1:N5000';
 
 g.__sheetTabs = ['Scrip Master'];
 g.__ranges = { [MAIN_RANGE]: MAIN, [PE_RANGE]: PE };
@@ -172,9 +172,9 @@ eq('collision: no valuation applied', lookupScrip(master, '', 'Acme Foods Ltd').
   g.__ranges = {
     [MAIN_RANGE]: MAIN,
     [PE_RANGE]: PE,
-    'AIF!A1:J5000': [],
-    'Mutual Fund!A1:J5000': [],
-    'Bonds!A1:J5000': [],
+    'AIF!A1:N5000': [],
+    'Mutual Fund!A1:N5000': [],
+    'Bonds!A1:N5000': [],
   };
   g.__reads = { get: 0, batchGet: 0, meta: 0, ranges: [], batched: [] };
 
@@ -447,6 +447,131 @@ eq('isin-row: ...at 730 days', ltDaysFor(master, '', 'Goodluck India Pvt Ltd'), 
     /total > matches\.length &&/.test(code), true);
   eq('combobox: peOnly is in the memo deps, or the list would not refresh with scope',
     /\}, \[value, master, peOnly\]\);/.test(code), true);
+}
+
+// ── AN UNLISTED COMPANY THAT LISTS: `Listed From` ─────────────────────────────────────────
+//
+// Reported 21-Sep-2026. The app's own advice for a company that had listed was to DELETE its
+// row from the tab — which silently rewrote every year already filed, because `assetClass` is
+// read as current state by every engine. The row now STAYS and carries a listing date, and
+// `classAsOf` answers the class for a GIVEN DATE instead of only for today.
+//
+// This is where the two features collide, and the collision is the interesting part: the
+// Kusumgar twin logic exists to stop a PE row marking a LIVE listed company unlisted, and a
+// company that has listed hits exactly that guard for the opposite reason. If the guard runs,
+// the company's own history is cut in half at the listing date — pre-listing lots on a twin,
+// post-listing trades on the ticker entry, two positions, two cost bases, and the continuous
+// holding period destroyed. So `Listed From` has to switch the guard OFF, and only then.
+{
+  const MAIN2 = [
+    ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name'],
+    // Ticker, NO ISIN - the Zenmark shape, where both keys fall back to normName and a twin
+    // is actually minted. Anything with an ISIN would hide the bug behind distinct keys.
+    ['', 'Helix Biosciences Limited', 'HELIX | 500777', 'HELIX', ''],
+    // Ticker AND ISIN - the other arm of the guard, the one that used to print
+    // "If it has listed, remove it from that tab": the advice this column replaces.
+    ['INE555Q01014', 'Orbit Logistics Ltd', 'ORBIT | 500888', 'ORBIT', ''],
+  ];
+  const PE2 = [
+    ['Company', 'Drive Link', 'Valuation', 'Valuation Date', 'ISIN', 'Listed From'],
+    ['Helix Biosciences Pvt Ltd', '', '', '', '', '2025-11-10'],
+    ['Orbit Logistics Pvt Ltd', '', '', '', 'INE555Q01014', '2024-06-01'],
+    // A cell the owner filled in that is not a date. It must NOT quietly reclassify the
+    // company, and it must NOT be swallowed either.
+    ['Vantage Metals Pvt Ltd', '', '', '', '', 'when they IPO'],
+    // The control: an ordinary unlisted company, unchanged by any of this.
+    ['Solace Ceramics Pvt Ltd', '', '', '', '', ''],
+  ];
+
+  invalidateScripCache();
+  const { invalidatePrivateEquityCache } = await import('./src/lib/privateEquities');
+  invalidatePrivateEquityCache();
+  g.__ranges = { [MAIN_RANGE]: MAIN2, [PE_RANGE]: PE2 };
+  const m2 = await loadScripMaster('SHEET2');
+
+  const at = (y: number, mo: number, d: number) => new Date(y, mo - 1, d).getTime();
+  const helix = lookupScrip(m2, '', 'Helix Biosciences Pvt Ltd').entry!;
+  const orbit = lookupScrip(m2, 'INE555Q01014', 'Orbit Logistics Ltd').entry!;
+  const vantage = lookupScrip(m2, '', 'Vantage Metals Pvt Ltd').entry!;
+  const solace = lookupScrip(m2, '', 'Solace Ceramics Pvt Ltd').entry!;
+
+  // ── NO TWIN. One company, one entry, one FIFO bucket, one holding period ──
+  eq('listing: the ticker collision does NOT mint a twin',
+    m2.entries.filter(e => /helix/i.test(e.canonicalName)).length, 1);
+  eq('listing: ...so both spellings are the SAME position',
+    lookupScrip(m2, '', 'Helix Biosciences Pvt Ltd').entry?.key,
+    lookupScrip(m2, '', 'Helix Biosciences Limited').entry?.key);
+  eq('listing: ...the entry keeps its exchange ticker', helix.nse, 'HELIX');
+  eq('listing: ...and is NOT reported as a dropped class',
+    m2.classSkippedByTicker.some(x => /helix/i.test(x.name)), false);
+
+  // The class is RECORDED, not cleared. Clearing it here is the delete-the-row bug again.
+  eq('listing: the unlisted class is kept on the entry', helix.assetClass, 'PE');
+  eq('listing: ...alongside the date it stopped being true', helix.listedFrom, '2025-11-10');
+
+  // ── The boundary. Unlisted BEFORE, listed ON and after ──
+  eq('listing: the day before, it is still unlisted', classOfEntryAsOf(helix, at(2025, 11, 9)), 'PE');
+  eq('listing: on the day itself, it is listed', classOfEntryAsOf(helix, at(2025, 11, 10)), undefined);
+  eq('listing: and after', classOfEntryAsOf(helix, at(2025, 11, 11)), undefined);
+
+  // LOCAL midnight, not UTC. `Date.parse("2025-11-10")` is UTC midnight = 05:30 IST on the
+  // 10th, i.e. 5.5 hours LATER than every trade timestamp for that day, so a sale stamped at
+  // local midnight on the listing day would compare as still-unlisted and the whole
+  // reclassification would land a day late - on the one boundary nobody looks at.
+  eq('listing: the date parses at LOCAL midnight', listedFromTs(helix), at(2025, 11, 10));
+  eq('listing: ...which is NOT the UTC instant', listedFromTs(helix) === Date.parse('2025-11-10'), false);
+
+  // ── The holding period follows the TRANSFER date ──
+  eq('listing: a sale before it listed is judged at 730 days',
+    ltDaysFor(m2, '', 'Helix Biosciences Pvt Ltd', at(2025, 6, 1)), 730);
+  eq('listing: a sale after it listed is judged at 365',
+    ltDaysFor(m2, '', 'Helix Biosciences Pvt Ltd', at(2026, 6, 1)), 365);
+  eq('listing: the control is 730 at every date',
+    [ltDaysFor(m2, '', 'Solace Ceramics Pvt Ltd', at(2020, 1, 1)),
+     ltDaysFor(m2, '', 'Solace Ceramics Pvt Ltd', at(2030, 1, 1))], [730, 730]);
+
+  // ── The ISIN arm of the guard, which used to print "remove it from that tab" ──
+  eq('listing: an ISIN-matched row carries its listing date too', orbit.listedFrom, '2024-06-01');
+  eq('listing: ...and keeps its ticker', orbit.nse, 'ORBIT');
+  eq('listing: ...unlisted before it listed', classOfEntryAsOf(orbit, at(2024, 5, 31)), 'PE');
+  eq('listing: ...listed after', classOfEntryAsOf(orbit, at(2024, 6, 2)), undefined);
+
+  // ── Undated questions answer for TODAY, which is what every screen wants ──
+  eq('listing: today, a listed company is not an unlisted one',
+    assetClassOf(m2, '', 'Helix Biosciences Pvt Ltd'), undefined);
+  eq('listing: ...while the control still is', assetClassOf(m2, '', 'Solace Ceramics Pvt Ltd'), 'PE');
+  eq('listing: isPeScrip follows suit', isPeScrip(m2, '', 'Helix Biosciences Pvt Ltd'), false);
+  eq('listing: ...but the past is still reachable',
+    classAsOf(m2, '', 'Helix Biosciences Pvt Ltd', at(2025, 1, 1)), 'PE');
+
+  // ── The price feed must fetch it once it trades ──
+  // Only ever SET, never cleared, so a real `Price Exception` flag on the master row survives.
+  eq('listing: a listed company is no longer held back from the price feed', !!helix.priceExcept, false);
+  eq('listing: ...the control still is', !!solace.priceExcept, true);
+  eq('listing: ...and is not parked in the Private Equity sector slice', helix.industry, undefined);
+
+  // ── A cell that is not a date must fail SAFE and fail LOUD ──
+  eq('listing: an unreadable date leaves the company unlisted, forever',
+    [vantage.listedFrom, assetClassOf(m2, '', 'Vantage Metals Pvt Ltd')], [undefined, 'PE']);
+  eq('listing: ...and is reported rather than swallowed',
+    m2.listingDateUnparsed, [{ name: 'Vantage Metals Pvt Ltd', raw: 'when they IPO' }]);
+  eq('listing: a blank cell is not an error - it is the normal state',
+    m2.listingDateUnparsed.some(x => /solace/i.test(x.name)), false);
+
+  // `listedFromTs` is EXPORTED and memoised per entry, so how it treats a malformed value is
+  // part of its contract, not an internal detail. Infinity = NEVER listed, which is the
+  // conservative side: a garbled value must leave the company on the schedule it was filed on.
+  //
+  // Asserted DIRECTLY because the loader cannot produce this shape - the reader yields "" or a
+  // valid ISO date, and `foldAssetClass` only assigns truthy values - so the branch was
+  // unreachable through a fixture and therefore untested. A probe flipping `Infinity` to `0`
+  // came back SILENT, which is the only reason it was found. Same lesson as the unreachable
+  // "discriminating name slot" in scripPrices.ts: a safeguard that cannot execute is worse
+  // than none, because it reads as cover.
+  eq('listing: a malformed date means NEVER listed, not already listed',
+    listedFromTs({ listedFrom: '10-11-2025' } as any), Infinity);
+  eq('listing: ...so such an entry keeps its class at every date',
+    classOfEntryAsOf({ assetClass: 'PE', listedFrom: '10-11-2025' } as any, at(2030, 1, 1)), 'PE');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

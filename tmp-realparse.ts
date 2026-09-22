@@ -40,7 +40,7 @@ const run = async (name: string, expect: any) => {
   eq('recon isFractionalQuantity', !!rec.isFractionalQuantity, false);
   eq('recon isObligationMismatch', !!rec.isObligationMismatch, false);
   eq('recon status', rec.statusText, expect.status);
-  console.log(`  -> ${trades.length} trade(s), status ${rec.statusText}, diff ${rec.difference}`);
+  console.log(`  -> ${trades.length} trade(s), status ${rec.statusText}, obligation ${rec.calculatedObligation} vs note ${rec.extractedObligation}`);
 };
 
 // CN 113911 - the buy that misparsed. 10,000 AEROFLEX at WAP Mkt Rate 292.6125.

@@ -20,7 +20,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 
 ## Test suites
 
-28 `tmp-*` files at the repo root are the de-facto test suite. No npm script runs them.
+30 `tmp-*` files at the repo root are the de-facto test suite (excluding the `-run.mjs` wrappers). No npm script runs them.
 
 | Command | Covers |
 |---|---|
@@ -35,12 +35,14 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-transfer-run.mjs` | Cross-portfolio transfer: FIFO, cost carryover, no gain realised (83) |
 | `node tmp-opening-import-run.mjs` | Per-stock opening-trades import: header detection (incl. the template's own Instructions tab NOT matching, and a bare `Amount` never adopted as turnover), Excel date serials, the foreign-security rejection, the duplicate guard (ONE existing row masks ONE incoming row, not all of them), the FIFO-order warning, the **additive merge**, and the **corp-action credit** — plus fixture H, which BUILDS the shipped .xlsx template and reads it straight back through the shipped reader, and fixture J, the owner's real NSE shape, whose right and wrong answers are DISJOINT (96,000 shares versus 0) and whose same-day variant separates the two COST bases (107) |
 | `node tmp-axis-run.mjs` | Axis Securities parser (68) |
+| `node tmp-recon-run.mjs` | The SHARED reconciler, driven directly — the first FAILING-case coverage it has ever had (40). Every check it still carries was disablable with the whole suite green, because all existing coverage was positive and the one assertion that looked like a negative case was a tautology on an `else` branch. Also source-checks that the removed net-settlement arithmetic stays removed, and that the multi-file merge sums every figure and OR-s every flag |
 | `npx tsx tmp-session-clock.ts` | Session clock: the urgency ramp (monotonic, clamped, boundaries), the countdown text, the gradient stops, and that the countdown uses the same 60s safety margin `hasValidGoogleToken` does (36) |
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
+| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT or the wrong DATE (26). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
 | `node tmp-xverify.mjs` | Cross-broker PDF extraction comparison |
@@ -754,6 +756,168 @@ whole identity.
 shared one entry went to the sheet under ONE name. The resolver fix is forward-looking; the
 ledger has to be corrected by hand.
 
+**AN UNLISTED COMPANY THAT LISTS KEEPS ITS ROW, and gains a `Listed From` date** (21-Sep-2026).
+The app's own advice — and this file's — used to be *"a company that has since listed should
+come OFF this tab"*. That advice **rewrites years already filed**, because `assetClass` was a
+property of the COMPANY and every engine read it as current state. Delete the row and
+regenerate FY2024-25 and the company drops off the `Unlisted Equity Shares` schedule that was
+filed with the return, its holding moves to the equity tab, its gains move to the listed
+capital-gains tab, and — the one that is money — `ltDaysFor` falls from 730 days to 365, so a
+filed SHORT-term gain regenerates as LONG term. Nothing on any tab says it happened.
+
+The row now stays on its asset-class tab permanently and carries the date its shares started
+trading. `assetClass` records what the company IS; `listedFrom` records when that stopped being
+true. **Ask `classAsOf(master, isin, name, ts)` or `classOfEntryAsOf(entry, ts)`, never
+`entry.assetClass` raw** — a raw read is the retroactive-reclassification bug, and it is
+indistinguishable from correct code at the call site.
+
+**THREE DATED QUESTIONS, and they are meant to disagree.** Each tab is asked the one its own
+heading implies, and in the transition year a company can answer differently to all three
+without anything being wrong:
+
+| Question | Governing date | Where |
+|---|---|---|
+| Short or long? | the **sale date** | `ltDaysFor(…, t.ts)` — s.2(42A) tests the asset at the time of TRANSFER |
+| Which capital-gains / transaction tab? Is it on the ITR schedule? | **1-April** (⇒ "unlisted at any time this year") | `classOfKeyInFy` |
+| Which FY-end holding tab? | **31-March** | `classOfKeyAtFyEnd` |
+
+- **The holding period runs UNBROKEN through the listing.** Listing is not a reacquisition, so
+  the lot keeps its original `buyTs`: sell after listing and the whole period counts, unlisted
+  years included, against the 365-day threshold. This is the owner's stated requirement —
+  *"same buy date with qnt"* — and it falls out of the design rather than being special-cased.
+- **`classOfKeyInFy` is just "the class at FY start"**, which is the same thing as "unlisted at
+  any time this year" only because the transition runs one way. If a delisting rule is ever
+  added, that equivalence breaks and this is the line that breaks.
+- **The ITR schedule carries the company in its listing year with its REAL closing balance**
+  (owner's decision, 21-Sep-2026). The schedule's own title is the test — *held at any time
+  during the previous year* — and a blank or zero closing would read as a disposal. The year
+  after, `listedFrom` is at or before FY start and it drops off by itself.
+- **The FY-end holding statement is a SNAPSHOT**, so a company that listed in November is
+  listed equity on the 31-March page while its gains for that same year sit on the unlisted
+  tab. That is not a contradiction; `listedDuringFy` on the register result exists so a reader
+  who does not know the company listed cannot mistake it for one and "fix" a tab.
+
+**THE BLOCK IS THE ATOM — a mid-year listing does NOT split one across two tabs.** Each block
+prints one self-contained, self-footing section (opening, splits, purchases, notes, sales,
+closing). Halve it at the listing date and neither half foots; duplicate the purchases so both
+do and their CHARGES are counted twice, at which point the conservation guard throws and **no
+register writes at all**. Probed: swapping either the `listedActive` filter or the `classActive`
+loop to the 31-March test aborts the whole suite with *"delivery + intra-day charges do not
+reconcile"*. So the whole block goes where the YEAR belongs and the boundary is disclosed IN
+the section, as a `LISTED FROM dd.mm.yyyy` note carried in on `corpNotes` — the existing
+full-width sentence row, which already prints between the purchases and the sales. The tax is
+unaffected either way: the short/long split is per sale, from that sale's own date.
+
+**`Listed From` had to switch the Kusumgar twin guard OFF, and that is the subtle part.** That
+guard exists to stop a PE row marking a LIVE listed company unlisted, and a company that has
+genuinely listed hits it for the opposite reason. Left running, the NAME arm mints a twin under
+the discriminating `pvt` key and cuts the company's own history in half at the listing date —
+pre-listing lots on the twin, post-listing trades on the ticker entry, two positions, two cost
+bases, the continuous holding period destroyed. The ISIN arm is no better: it prints *"remove
+it from that tab"*, the advice this column replaces. With no twin, an old ledger row spelled
+`… Pvt Ltd` still resolves correctly: `lookupScrip`'s discriminating key misses and falls
+through to the plain one, landing on the same entry — one bucket, original buy dates intact.
+
+Three more rules, each a silent way to get it wrong:
+
+- **The date parses at LOCAL midnight.** `Date.parse("2025-11-10")` is UTC midnight, which is
+  05:30 IST — 5½ hours LATER than every trade timestamp for that day, so a sale on the listing
+  day would compare as still-unlisted and the reclassification would land a day late, on the
+  one boundary nobody looks at. Unlisted BEFORE the date, listed ON it and after.
+- **An unreadable `Listed From` cell means NEVER LISTED, and says so.** `listedFromTs` returns
+  `Infinity`, which is the conservative side: a garbled cell must leave the company on the
+  schedule it was filed on. `ScripMaster.listingDateUnparsed` names the row and its raw text,
+  because a filled-in cell that does nothing is invisible from every screen in the app.
+- **`priceExcept` is only ever SET, never cleared.** A listed company must be fetched by the
+  feed, but an entry already flagged in the master's own `Price Exception` column (an ETF, a
+  liquid fund) keeps that flag whatever the class tab says.
+
+**Header detection: `Listed From` is tested FIRST, ahead of the valuation date.** Spelled
+*"Listed As On"* it contains `as on` and would be claimed as the valuation date — which fails
+in the worst way, because the column looks correctly filled while every listing date silently
+becomes a valuation date and no company ever reclassifies. Matching the bare words
+`listed` / `listing` covers every spelling and collides with nothing else on the tab.
+
+**One definition of the tab's read range, at last.** There were FOUR hand-kept copies of
+`A1:J5000` — `privateEquities.ts`, the batched read in `scripMaster.ts`, and both reads in
+`privateEquityWrite.ts`, one of which carried a comment promising it was *"the SAME range
+string loadAssetClass builds"*. Widening the tab for `Listed From` moved one and left three,
+and the failure is silent in the worst way: the batched fast path would return the new column
+while the per-class fallback did not, so a listing date would exist or not depending on which
+path a load happened to take. `CLASS_TAB_RANGE` in `privateEquities.ts` is now the only copy,
+and it is `A1:N5000` — ten recognised columns means J had zero headroom.
+
+Fixture N in `tmp-trx-run.mjs` is the one that proves the point, and it is built so the right
+and wrong answers are DISJOINT: NEXUS is held from 1-Jun-2024 and sold 1-Mar-2026 — **638 days,
+inside the gap between 365 and 730** — so as an unlisted company it is SHORT term and as a
+listed one it is LONG. N2 regenerates the same past year with a listing date set years later
+and asserts all five tabs come back **byte-identical**; N3 deletes the row instead and every
+one of those assertions flips. N4 is the transition year (8,000 short + 20,000 long from ONE
+company in ONE year — a figure no undated rule can produce, since both of those yield 28,000 on
+one side). Six register probes and seven fold probes fire. The seventh fold probe was SILENT at first:
+`listedFromTs`'s `Infinity` fallback is unreachable through the loader (the reader yields "" or a
+valid ISO date), so it is now asserted DIRECTLY as a contract of an exported function rather
+than left as defensive code that cannot execute.
+
+**What this does NOT do.** There is no delisting rule and no second date: the transition is
+one-way. And asset class is still a property of the company plus a date, not of each LOT — a
+company that was listed, delisted and relisted cannot be expressed.
+
+**Holdings on screen must belong to the account on screen** (22-Sep-2026, reported as
+*"when the API fetch runs out in OADR97 Account it shows old holding of T059"*). `sheetHoldings`
+is ONE un-keyed array, and every guard in `fetchSheetHoldings` — no gapi, **no token**, unknown
+portfolio — returned **before** the line that clears it. The portfolio-switch effect cleared
+`selectedStock`, `customCmp` and `transactions`, but not the holdings. So with an expired token
+the switch fell into a 15-second retry loop while the PREVIOUS account's rows stayed on screen
+under the new account's name — permanently, if the token never came back.
+
+One account's positions under another account's heading is the worst failure this screen has:
+every figure is plausible and nothing on the page contradicts it.
+
+- **The rows are STAMPED** with the portfolio they were read from (`sheetHoldingsFor`, mirrored
+  into a ref because `fetchSheetHoldings` closes over it and must test the CURRENT stamp).
+  `ownedHoldings` is the gated array and is what the UI consumes — the grid, the totals, and
+  **both Add Trade drawers**, which would otherwise offer one account's positions while saving
+  a trade into another's ledger.
+- **The cross-account clear runs before the guards**, on the silent path too. It is conditional
+  on the portfolio actually differing, because a failed refresh of the account you are ON must
+  not wipe the table you are reading.
+- **A failed refresh is now visible.** The 2-minute auto-refresh passes `silent = true`, and the
+  `catch` did nothing at all in that mode — a quota-exhausted account simply stopped updating
+  and still looked current. It now marks the rows *"Not live — as at HH:MM"* with the reason and
+  a Retry, and the rows stay (owner's decision: keep the figures, say they are old, rather than
+  blanking a table over a passing blip). The full-page error card only takes over when there is
+  genuinely nothing to show.
+
+**"Shares held" is the position on the ACTION's date, not today's** (22-Sep-2026, reported as
+*"look at goodluck india qnt as on 24/07/2026 it shows 210000 but when i am adding a bonus it
+shows auto qnt of 200000"*). `heldFor` read `activeHoldings` — the **Holding tab**, which states
+the position NOW — and the field is labelled for the action's date. Wrong by construction for
+every back-dated corporate action, which is most of them. On Goodluck the bonus was dated
+21-Aug-2026 and the 10,000 difference was a sell on **31-Aug**, after it; the hint offered
+*"2:1 adds +4,00,000 → 6,00,000"* instead of *"+4,20,000 → 6,30,000"*. The Holding tab is also
+only rewritten by an explicit Rebuild Holding, so it can lag True Entry on top of that.
+
+- **`computeHoldingsAsOf` is the source**, the same shared FIFO replay the as-of report uses, so
+  the drawer and that report cannot disagree. Memoised per **portfolio AND date** — it reads
+  True Entry + Opening Holdings + the master, so typing in the date field must not spend a read
+  per keystroke.
+- **The as-of instant is the END of the action's day**, so a trade stamped that same date is
+  INCLUDED: an allotment sits on top of whatever that day's trading left.
+- **Until the replay lands it returns `null`, and the box stays empty.** Falling back to today's
+  figure "for now" is the original bug with a delay in front of it — the user reads the wrong
+  number and it corrects itself afterwards. Changing the date on a free-share line clears `held`
+  for the same reason. The field says *"· as at dd/mm/yyyy"*, because the figure legitimately
+  differs from the holdings grid and without the date on screen that difference reads as a bug.
+- **`heldFor` has FIVE call sites** — the auto-fill effect, the identity change, the
+  carry-forward when a line is added, the render, and the Type dropdown switching to
+  Bonus/Split. The date parameter is optional (no `strict` here), so a missed one typechecks
+  perfectly; `tmp-holdings-scope.ts` caught two that had been missed.
+- **None of this moves a saved figure.** A stored RATIO is re-derived by every engine at the
+  action's own date, so a split/bonus already saved with a wrong `held` is still filed
+  correctly — what was wrong is the number on screen, the hint under it, and the `qty` written
+  to the sheet, which a human reading that sheet would believe.
+
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not
 expressible. Three rules:
@@ -854,6 +1018,9 @@ comparison compiles and coerces to `>= 0`, filing every such sale as LONG TERM u
 build** — every caller needs an explicit null branch. The capital-gains engines refuse those
 sales and report them in `unclassified`; the register's charge-conservation guard must exclude
 their charges too, or it fires and no register writes at all.
+
+When an unlisted holding LISTS, do not move it off its tab — give the row a `Listed From`
+date instead; see the listing section above.
 
 `offMarket` is **false** for MF and Bond: it only ever *offers* the charge boxes, and forcing it
 true would zero real exchange charges out of a cost basis with nothing downstream able to detect
@@ -991,6 +1158,65 @@ against the note's own printed totals. Its notes are **password-protected** — 
 **Parsers.** Fixtures must come from `tmp-extract.mjs`, never hand-typed — reconciliation cannot
 catch a self-consistent misparse. STT allocation goes through the shared `allocateStt`
 (`src/lib/brokers/stt.ts`); the note's printed total is the anchor.
+
+**The net-settlement audit is GONE** (22-Sep-2026, owner's instruction: *"remove it this
+reconciler it isnt accurate at all"*). `calculateReconciliation` no longer computes
+`calculatedNet`, `extractedNet` or `difference`, those three fields are off
+`ReconciliationStatus`, the `difference <= 0.10` term is out of `isValid`, and the A/B/C/D
+"audit trail" panel that displayed them is deleted from `App.tsx` (68 lines).
+
+It was not measuring what it claimed, for two independent reasons:
+
+- **It DEGENERATES when a note prints no net settlement.** `difference` is
+  `|calculatedNet − extractedNet|`, so with `extractedNet` at 0 it collapses to
+  `|calculatedNet|` — the note's own net settlement, compared against a number that was never
+  extracted. Not a disagreement between two independently derived figures, which is the only
+  thing that would make it evidence. Reported on a 16-note batch reading a "discrepancy" of
+  ₹78,24,133.96 while that same note's A and B obligation lines were **₹14,400 apart** —
+  brokerage-sized, i.e. fine.
+- **It RECOMPUTES FROM THE CELLS IT IS AUDITING**, so a self-consistent misparse passes. The
+  Nuvama V3 buy of 10,000 @ 292.6125 read as a sell of 292.9051 @ 1.00 agreed with itself to
+  the paise and PASSED. `isObligationMismatch` is what caught it, by reading a different part
+  of the page.
+
+**What survives is exactly the checks that compare against an INDEPENDENT source**:
+`isObligationMismatch` (the note's own printed Pay In / Pay Out against qty × rate),
+`isFractionalQuantity` (a fraction of a share is impossible, not merely odd), and the two STT
+tests. They still gate the import — the confirmation dialog stayed, and now names which one
+fired instead of quoting a rupee figure. `calculatedObligation` / `extractedObligation` stay on
+the type: they are that check's INPUTS, not a verdict.
+
+**The multi-file merge was showing two scopes on one card.** `parsers.ts` spread `...first` —
+one file's obligation figures — while summing Sells, Buys and Charges across all of them, so a
+row captioned *"(Sells − Buys)"* sat directly beneath a Sells and a Buys it was not the
+difference of (₹78,45,000.00 against a real ₹1,13,491.64). Every numeric field is now summed
+and every flag OR-ed; taking the flags from `first` also hid a fractional quantity in file 7
+behind an STT mismatch in file 1.
+
+**`summary.netSettlement` is now read by NOTHING but that merge.** The on-screen Net Settlement
+cards are recomputed from the TRADES (`App.tsx`), so the field survives only as the note's own
+statement of direction — and Nuvama's sign negation, which the removed audit used to verify by
+tying to the paise, **is no longer checked by anything**. A flipped sign would be silent. No
+capital gain moves either way: every gain here is computed on charge-free turnover.
+
+**The surviving checks had NO failing-case coverage, and that is how this was found.** Probes
+disabling `isObligationMismatch`, `isFractionalQuantity` and `isSttMismatch` outright all came
+back SILENT. Every assertion on them was positive — real notes that pass — and the one that
+looked like a negative case,
+
+```ts
+const wapOnV1 = await v3.parsePdfText(V1);
+if (wapOnV1 && wapOnV1.trades.length > 0) { /* ...does not falsely pass... */ }
+else { eq('V3 parser on a V1 note yields no trades', true, true); }
+```
+
+takes the `else` branch (`wapOnV1` is `null`), so `eq(true, true)` is a tautology and the
+misparse assertion **had never executed**. `tmp-recon-run.mjs` drives the function directly —
+it is pure, so a synthetic fixture is sharper than a PDF: each case isolates one defect and
+asserts the specific flag rather than `isValid`. All eight probes now fire, including
+compared-signed-instead-of-magnitude (which would flag every buy note) and
+tolerance-dropped-to-zero (which would flag every broker that prints the obligation net of
+brokerage).
 
 ## Conventions
 

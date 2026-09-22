@@ -30,7 +30,7 @@ const eq = (name: string, got: any, want: any) => {
 // scripMaster quotes its tab (`quoteTab`); privateEquities deliberately does not. Both
 // strings below are the ones the real code builds - a mismatch here would fake a passing test.
 const MASTER_RANGE = `'Scrips'!A1:Z50000`;
-const PE_RANGE = `${PRIVATE_EQUITIES_TAB}!A1:J5000`;
+const PE_RANGE = `${PRIVATE_EQUITIES_TAB}!A1:N5000`;
 const SID = SCRIP_MASTER_SPREADSHEET_ID;
 
 /** The master's first tab: ISIN | Security Name | BSE | NSE | Alias name. */
@@ -64,7 +64,7 @@ async function main() {
     const { hasHeader, ci } = detectPeColumns([PE_HEADER_ROW]);
     ok('created header is detected AS a header', hasHeader);
     eq('created header maps every column', ci,
-      { company: 0, driveLink: 1, isin: 2, valuation: 6, valuationDate: 7, pan: 3, faceValue: 4, companyType: 5, notes: 8 });
+      { company: 0, driveLink: 1, isin: 2, valuation: 6, valuationDate: 7, pan: 3, faceValue: 4, companyType: 5, listedFrom: 8, notes: 9 });
   }
 
   // ── 2. the happy path on a conventional tab ───────────────────────────────────────────────
@@ -193,7 +193,7 @@ async function main() {
       // One blank per header column, PAN's included — the row is padded to the sheet's own
       // width, so a column added to the header can never leave the data row short of it.
       eq('the company row follows it', req.resource.values[1],
-        ['Jeena Sikho Lifecare', '', '', '', '', '', '', '', '']);
+        ['Jeena Sikho Lifecare', '', '', '', '', '', '', '', '', '']);
       eq('...one cell per header column', req.resource.values[1].length, PE_HEADER_ROW.length);
       const after = parsePrivateEquityVals(req.resource.values);
       eq('and the created tab reads back as exactly one company', after.length, 1);
@@ -234,7 +234,7 @@ async function main() {
   // than the refusal it is supposed to get.
   {
     install([['Company', 'ISIN'], ['STRIDE VENTURES LLP', '']]);
-    g.__ranges[`${SID}::AIF!A1:J5000`] = [['Company', 'ISIN'], ['HELION FUND II', '']];
+    g.__ranges[`${SID}::AIF!A1:N5000`] = [['Company', 'ISIN'], ['HELION FUND II', '']];
     invalidateScripCache(); invalidatePrivateEquityCache();
     const master = await loadScripMaster(SID);
 
@@ -273,7 +273,7 @@ async function main() {
 
     // Fold the row back in and check the POLICY, not just the write. This is the assertion that
     // would catch a bond registered with PE's 730 days.
-    g.__ranges[`${SID}::Bonds!A1:J5000`] = [['Company', 'ISIN'], ['TATA CAPITAL 8.5% NCD 2029', '']];
+    g.__ranges[`${SID}::Bonds!A1:N5000`] = [['Company', 'ISIN'], ['TATA CAPITAL 8.5% NCD 2029', '']];
     invalidateScripCache(); invalidatePrivateEquityCache();
     const m2 = await loadScripMaster(SID);
     eq('a folded-in Bonds row resolves to class BOND',
@@ -311,7 +311,9 @@ async function main() {
     ok('the user layout is detected as a header', hasHeader);
     eq('ISIN in A, company in B, CMP read as the valuation column', ci,
       // No PAN column on the owner's own layout - -1, not a stray index onto another column.
-      { company: 1, driveLink: 2, isin: 0, valuation: 3, valuationDate: 4, pan: -1, faceValue: -1, companyType: -1, notes: 5 });
+      // No `Listed From` either - this tab predates it, and every company on it is still
+      // unlisted, which is what -1 has to mean here (never a stray index onto another column).
+      { company: 1, driveLink: 2, isin: 0, valuation: 3, valuationDate: 4, pan: -1, faceValue: -1, companyType: -1, listedFrom: -1, notes: 5 });
     const parsed = parsePrivateEquityVals(USER_TAB);
     eq('three companies read, by NAME not by ISIN', parsed.map(r => r.company),
       ['ACME VENTURES PRIVATE LIMITED', 'ZENITH CAPITAL LLP', 'ORBIT LABS PRIVATE LIMITED']);

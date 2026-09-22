@@ -589,6 +589,44 @@ export default function Holdings({
   const [sheetHoldings, setSheetHoldings] = useState<SheetHolding[]>([]);
   const [sheetTotal, setSheetTotal] = useState<number>(0);
 
+  /**
+   * WHICH PORTFOLIO `sheetHoldings` ACTUALLY BELONGS TO.
+   *
+   * Reported 22-Sep-2026: *"when the API fetch runs out in OADR97 Account it shows old holding
+   * of T059"*. `sheetHoldings` is one un-keyed array and every guard in `fetchSheetHoldings`
+   * returned BEFORE the line that clears it, so a token that had expired by the time you
+   * switched accounts left the previous account's rows on screen under the new account's name
+   * - indefinitely, if the token never came back. The portfolio-switch effect cleared
+   * `selectedStock`, `customCmp` and `transactions`, but not these.
+   *
+   * One account's positions displayed under another account's heading is the worst failure this
+   * screen has: every figure looks plausible and nothing on the page contradicts it. So the
+   * rows now carry the portfolio they were read from, and `ownedHoldings` below is what the UI
+   * consumes - a stale render is made structurally impossible rather than left depending on a
+   * clear happening in the right order.
+   *
+   * The ref mirrors the state because `fetchSheetHoldings` closes over it and must test the
+   * CURRENT stamp, not the one captured when the closure was made.
+   */
+  const [sheetHoldingsFor, setSheetHoldingsFor] = useState<string | null>(null);
+  const sheetHoldingsForRef = useRef<string | null>(null);
+  const stampHoldings = (pid: string | null) => { sheetHoldingsForRef.current = pid; setSheetHoldingsFor(pid); };
+  /** When the last SUCCESSFUL read landed, and why the most recent attempt did not. */
+  const [sheetLoadedAt, setSheetLoadedAt] = useState<number | null>(null);
+  const [sheetRefreshFailed, setSheetRefreshFailed] = useState<string | null>(null);
+
+  /**
+   * `sheetHoldings`, but ONLY when they belong to the portfolio currently on screen.
+   *
+   * Everything that renders or acts on holdings reads this, never `sheetHoldings` directly -
+   * the grid, the totals, and both Add Trade drawers, which would otherwise offer one account's
+   * positions while saving a trade into another's ledger. The clears above should already make
+   * this identical to `sheetHoldings`; it exists because "should" is what failed last time, and
+   * the cost of the belt is one `===`.
+   */
+  const NO_HOLDINGS: SheetHolding[] = [];
+  const ownedHoldings = sheetHoldingsFor === activePortfolio ? sheetHoldings : NO_HOLDINGS;
+
   // Keep the open stock-detail card in sync with the (re-)fetched Holding tab. `selectedStock`
   // is a SNAPSHOT taken when the row was clicked; after an edit/delete, saveEdit rebuilds the
   // Holding tab and refetches `sheetHoldings` but never re-points `selectedStock`, so the
@@ -783,24 +821,45 @@ export default function Holdings({
   // Live fetching trigger from Google Sheet.
   // silent=true → background refresh: no spinner, keep current rows visible, never blank the view on error.
   const fetchSheetHoldings = async (portfolio: string, silent = false) => {
+    // BEFORE the guards, unconditionally, and on the silent path too. Every `return` below
+    // used to jump over the clearing block further down, which is how another account's rows
+    // stayed on screen. This drops them the moment we know we are being asked about a
+    // DIFFERENT portfolio - whether or not the fetch that follows ever succeeds.
+    //
+    // Same-portfolio data is deliberately left alone: a refresh that fails must not wipe the
+    // figures you are reading (owner's decision, 22-Sep-2026). It is marked stale instead.
+    if (sheetHoldingsForRef.current !== null && sheetHoldingsForRef.current !== portfolio) {
+      stampHoldings(null);
+      setSheetHoldings([]);
+      setSheetTotal(0);
+      setSheetLoadedAt(null);
+      setSheetRefreshFailed(null);
+    }
+    // A refresh that cannot even start is still a refresh that failed. Silent or not: the
+    // 2-minute auto-refresh used to swallow this entirely, so figures quietly stopped updating
+    // with nothing on screen to say so.
+    const failRefresh = (why: string) => {
+      if (sheetHoldingsForRef.current === portfolio) setSheetRefreshFailed(why);
+    };
+
     if (!gapi || !gapi.client) {
+      failRefresh("Google API library is still loading.");
       if (!silent) setSheetError("Google API library is loading. Please try again in a few seconds.");
       return;
     }
     const token = (gapi.client as any).getToken();
     if (!token || !token.access_token) {
+      failRefresh("Google Sheets is not connected.");
       if (!silent) setSheetError("Google Sheets connection is required. Please authorize first with the secure log in client below.");
       return;
     }
 
     const spreadsheetId = sheetIdForId(portfolio);
-    if (!spreadsheetId) { if (!silent) setSheetError("Unknown portfolio."); return; }
+    if (!spreadsheetId) { failRefresh("Unknown portfolio."); if (!silent) setSheetError("Unknown portfolio."); return; }
 
     if (!silent) {
       setIsLoadingSheet(true);
       setSheetError(null);
-      setSheetHoldings([]);
-      setSheetTotal(0);
     }
 
     try {
@@ -862,6 +921,9 @@ export default function Holdings({
       }
 
       setSheetHoldings(parsed);
+      stampHoldings(portfolio);            // these rows are THIS portfolio's, and only its
+      setSheetLoadedAt(Date.now());
+      setSheetRefreshFailed(null);
       setSheetTotal(totalValue);
       setPortfolioTotals(prev => ({ ...prev, [portfolio]: totalValue }));
       // Keep this portfolio's card rows fresh too, so its summary stays priced after you
@@ -878,10 +940,11 @@ export default function Holdings({
       }));
     } catch (err: any) {
       console.error("Fetch holdings error:", err);
-      if (!silent) {
-        const errorMsg = err.result?.error?.message || err.message || "Failed to retrieve compiled sheet tab data.";
-        setSheetError(errorMsg + " Ensure you have permissions to the active sheet.");
-      }
+      const errorMsg = err.result?.error?.message || err.message || "Failed to retrieve compiled sheet tab data.";
+      // Marked on the SILENT path as well. The 2-minute auto-refresh reported nothing at all,
+      // so a quota-exhausted account simply stopped updating and looked current.
+      failRefresh(errorMsg);
+      if (!silent) setSheetError(errorMsg + " Ensure you have permissions to the active sheet.");
     } finally {
       if (!silent) setIsLoadingSheet(false);
     }
@@ -1153,6 +1216,16 @@ export default function Holdings({
     setSelectedStock(null);
     setCustomCmp(null);
     setTransactions([]);
+    // The holdings go too, and this is the line whose absence was the bug. Below, the effect
+    // may spend up to 15 seconds retrying while the token is restored; every one of those
+    // seconds used to render the PREVIOUS account's positions under this account's name.
+    if (sheetHoldingsForRef.current !== activePortfolio) {
+      stampHoldings(null);
+      setSheetHoldings([]);
+      setSheetTotal(0);
+      setSheetLoadedAt(null);
+      setSheetRefreshFailed(null);
+    }
     if (activePortfolio === 'local') return;
 
     if (hasAuthorizedGoogle()) {
@@ -2614,8 +2687,8 @@ export default function Holdings({
         };
       });
     } else {
-      const activeSheetHoldings = sheetHoldings.length > 0
-        ? sheetHoldings
+      const activeSheetHoldings = ownedHoldings.length > 0
+        ? ownedHoldings
         : getPreloadedHoldingsForSheet(activePortfolio);
 
       // Toggle on → append exited companies (qty 0) after the live positions; they
@@ -4198,7 +4271,7 @@ export default function Holdings({
           onClose={() => setShowAddTrade(false)}
           defaultPortfolio={activePortfolio === 'local' ? DEFAULT_PORTFOLIO_ID : activePortfolio}
           master={scrip}
-          holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
+          holdings={ownedHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
           prefill={{ company: name, isin: displayIsin || isin }}
           onSaved={(pid, rechecked) => {
             refreshScripAfterSave(rechecked);
@@ -4242,7 +4315,7 @@ export default function Holdings({
       // cards must sum THOSE, otherwise they read current = invested with 0 gain
       // even though every row shows a gain. (portfolioTotals[id] is built as the
       // sum of the same rows' investedValue, so Invested Capital is unchanged.)
-      if (id === activePortfolio && sheetHoldings.length > 0) {
+      if (id === activePortfolio && ownedHoldings.length > 0) {
         let currentValue = 0, investedValue = 0, todaysGain = 0;
         for (const h of displayHoldings) {
           if (h.sold || h.quantity <= 0) continue;
@@ -4388,7 +4461,7 @@ export default function Holdings({
         // Recording from the "Private Equity" segment means an unlisted trade. Only scopes the
         // drawer's form - the saved row is still classified from the scrip master.
         scope={assetClass === 'pe' ? 'pe' : undefined}
-        holdings={sheetHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
+        holdings={ownedHoldings.map(h => ({ name: h.companyName, isin: h.isin, qty: h.quantity }))}
         onSaved={(pid, rechecked) => { refreshScripAfterSave(rechecked); if (pid === activePortfolio) fetchSheetHoldings(pid, true); }}
       />
 
@@ -4635,6 +4708,17 @@ Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.resu
                         + ((trx.result.itrUnfooted || []).length
                           ? `
   rows will not foot (a split, a merger/demerger or a transfer moved shares with no row of its own): ${trx.result.itrUnfooted.join(', ')}`
+                          : '')
+                        // The transition year, where the three tabs deliberately DISAGREE: the
+                        // gains and transactions sit on the unlisted tab (it was unlisted for
+                        // part of the year), the 31-March holding sits on the equity tab, and
+                        // the ITR schedule carries it with its real closing balance. A reader
+                        // who does not know the company listed reads that as a contradiction
+                        // and "fixes" one of them. It is also the only year on which s.112A
+                        // has to be split from off-market by hand, and nothing else says which.
+                        + ((trx.result.listedDuringFy || []).length
+                          ? `
+LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and transactions stay on the unlisted tabs for this year (it was unlisted for part of it) while the 31-March holding is on the equity tab. Sales on or after the listing date are s.112A listed transfers; earlier ones are off-market. The tab itself carries the date.`
                           : '')}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
                         {/* Shown only when the master actually carries the flag, so the badge
@@ -4642,6 +4726,9 @@ Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.resu
                             loud case: the column WAS read and the scrip still did not match. */}
                         {(trx.result.itrMissingPan || []).length > 0 && (
                           <> · {trx.result.itrMissingPan.length} unlisted co. without PAN</>
+                        )}
+                        {(trx.result.listedDuringFy || []).length > 0 && (
+                          <> · {trx.result.listedDuringFy.length} listed this year</>
                         )}
                         {trx.result.sttFlaggedInMaster > 0 && (
                           <> · STT off: {trx.result.sttSuppressed.length}
@@ -5020,7 +5107,7 @@ Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.resu
                     <CubeLoader className="w-36 mx-auto" />
                     <p className="text-xs font-black text-slate-500 animate-pulse">Loading holdings ledger values...</p>
                   </div>
-                ) : sheetError ? (
+                ) : (sheetError && ownedHoldings.length === 0) ? (
                   <div className="p-8 bg-rose-50 border border-rose-100 rounded-2xl text-center space-y-4 max-w-md mx-auto my-4 animate-scaleIn">
                     <AlertTriangle className="w-10 h-10 text-rose-600 mx-auto" />
                     <div>
@@ -5045,6 +5132,31 @@ Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.resu
                     </div>
                   </div>
                 ) : (
+                  <>
+                  {/* A refresh that failed while these rows were already on screen. They are
+                      THIS account's - `ownedHoldings` guarantees that much - but they are not
+                      live, and the 2-minute auto-refresh used to fail in complete silence, so
+                      a quota-exhausted account simply stopped updating and still looked
+                      current. Owner's decision (22-Sep-2026): keep the figures, say they are
+                      old, rather than blanking a table being read over a passing blip. */}
+                  {sheetRefreshFailed && (
+                    <div className="mb-3 px-4 py-2.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                      <span className="text-xs font-bold text-amber-900">
+                        Not live{sheetLoadedAt ? ` — as at ${new Date(sheetLoadedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ''}
+                      </span>
+                      <span className="text-[11px] text-amber-800 opacity-90">{sheetRefreshFailed}</span>
+                      <span className="grow" />
+                      {!hasAuthorizedGoogle() && (
+                        <button onClick={() => login()} className="btn-press px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] rounded-lg cursor-pointer">
+                          Reconnect
+                        </button>
+                      )}
+                      <button onClick={() => fetchSheetHoldings(activePortfolio as string)} className="btn-press px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] rounded-lg cursor-pointer">
+                        Retry
+                      </button>
+                    </div>
+                  )}
                   <div className="overflow-x-auto border border-[color:var(--hg-edge)] rounded-2xl">
                     {(() => { const holdingColKeys = ['name','quantity','avgCost','currentPrice','currentValue','profit', ...(activePortfolio === 'local' ? ['settings'] : [])]; const holdingsWidth = holdingColKeys.reduce((s, k) => s + (colWidths[k] ?? HOLDINGS_COL_DEFAULTS[k] ?? 120), 0); return (
                     <table
@@ -5267,6 +5379,7 @@ Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.resu
                     </table>
                     ); })()}
                   </div>
+                  </>
                 )}
 
                 {/* Notes under the grid. Which one applies depends on the segment: the point is

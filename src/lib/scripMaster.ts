@@ -1,8 +1,7 @@
 import { gapi } from "gapi-script";
 import {
   invalidatePrivateEquityCache, loadAssetClass, primeAssetClass, PrivateEquityRow,
-  ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId,
-} from "./privateEquities";
+  ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId, CLASS_TAB_RANGE } from "./privateEquities";
 
 // The single shared scrip master lives in ONE Google Sheet that the user owns
 // and curates directly (NSE/BSE ISIN ↔ name, plus any additions). The app reads
@@ -110,6 +109,17 @@ export interface ScripEntry {
    *  hold the ITR vocabulary — **Domestic / Foreign** — because it feeds column C of the
    *  unlisted-equity-shares schedule, not a description of the company's legal form. */
   companyType?: string;
+  /**
+   * ISO `yyyy-mm-dd` from the `Listed From` column of this company's asset-class tab — the
+   * date its shares started trading. Undefined ⇒ still unlisted, the normal case.
+   *
+   * `assetClass` stays set alongside it, permanently. That pairing IS the feature: the class
+   * records what the company IS (an unlisted company that later listed), and this date records
+   * WHEN that stopped being true, so the app can answer "what was this on 31-Mar-2025?" instead
+   * of only "what is this?". Ask through `classAsOf` / `classOfEntryAsOf`, never by reading
+   * `assetClass` raw — a raw read is the retroactive-reclassification bug.
+   */
+  listedFrom?: string;
   peNotes?: string;
 }
 
@@ -141,6 +151,13 @@ export interface ScripMaster {
    * amount of Rechecking will ever change.
    */
   classSkippedByTicker: { name: string; normalised: string; collidedWith: string; ticker: string }[];
+  /**
+   * Rows whose `Listed From` cell held something that is not a date. Such a company stays
+   * UNLISTED forever as far as every engine is concerned, while the sheet plainly shows a
+   * listing date beside it — the cell looks filled in and does nothing. Recorded for the same
+   * reason `classSkippedByTicker` is: this cannot be diagnosed from any screen in the app.
+   */
+  listingDateUnparsed: { name: string; raw: string }[];
 }
 
 export type ResolveResult =
@@ -156,6 +173,7 @@ const emptyMaster = (): ScripMaster => ({
   genericTokens: new Set(),
   peFailed: false,
   classSkippedByTicker: [],
+  listingDateUnparsed: [],
 });
 
 // A token appearing in at least this many DISTINCT entries is "generic" (a common company
@@ -340,7 +358,7 @@ async function foldAllAssetClasses(
         // The SAME range string loadAssetClass builds — unquoted. Not quoteTab: the fallback
         // path must ask for byte-identical ranges, or the fast and slow paths could disagree
         // about which tab they read, and only one of them would be exercised in testing.
-        ranges: listed.map((id) => `${ASSET_CLASSES[id].tab}!A1:J5000`),
+        ranges: listed.map((id) => `${ASSET_CLASSES[id].tab}!${CLASS_TAB_RANGE}`),
         valueRenderOption: "UNFORMATTED_VALUE",   // the option loadAssetClass uses, so rows parse identically
       }));
       const vrs: any[] = res?.result?.valueRanges || [];   // returned in the order asked for
@@ -556,7 +574,29 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
     // unlisted, the master says it trades. The sheet is the user's explicit statement so it
     // wins, but it is worth saying out loud - a company that has since listed should come OFF
     // this tab, or its holding is taxed at 24 months and never priced.
-    if (byIsin && (entry.nse || entry.bse)) {
+    // ── A company that HAS listed: the ticker collision below is expected, not a conflict ──
+    //
+    // Everything from here to the end of the collision block exists to stop a PE row silently
+    // marking a LIVE LISTED company unlisted. When the row itself says the company listed, that
+    // is no longer the situation: the exchange ticker and the unlisted history belong to ONE
+    // company, and the whole point is to hold both facts on one entry.
+    //
+    // So neither arm may run. The ISIN arm would print "remove it from that tab" — the very
+    // advice that rewrites a filed year, and the reason this column exists. The name arm is
+    // worse: it would mint a Kusumgar-style TWIN under the discriminating `pvt` key, splitting
+    // the company's own history in half at the moment it listed — pre-listing lots on the twin,
+    // post-listing trades on the ticker entry, two positions, two cost bases, and the
+    // continuous holding period (s.2(42A) counts the unlisted years) destroyed. Or, with no
+    // discriminator in the name, it would `continue` and drop the class entirely.
+    //
+    // Folding onto the existing listed entry is also what keeps the OLD ledger rows working:
+    // True Entry has no ISIN column, so a pre-listing trade filed as "Zenmark Industries Pvt
+    // Ltd" is looked up by name. With no twin in `byAliasNorm`, `lookupScrip`'s discriminating
+    // key misses and falls through to the plain one (scripMaster.ts:786-788), landing on this
+    // same entry — one bucket, one FIFO queue, the original buy dates intact.
+    if (r.listedFrom) {
+      // nothing to guard against — fall through and enrich the entry in place
+    } else if (byIsin && (entry.nse || entry.bse)) {
       console.warn(
         `"${entry.canonicalName}" is on the Private Equities tab by ISIN ${isin} but the scrip `
         + `master gives it a ticker (${entry.nse || entry.bse}). Treating it as UNLISTED per the `
@@ -630,9 +670,24 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
     // The row's own tab decides the class. Where a company somehow appears on two tabs the
     // FIRST fold wins, matching the first-row-wins rule the tabs themselves follow.
     if (!entry.assetClass) entry.assetClass = r.assetClass;
+
+    // The listing date rides ALONGSIDE the class, never instead of it. `assetClass` is the
+    // durable fact (this company was unlisted and its history is filed that way); this date
+    // says when that stopped being true. Dropping the class here — "it's listed now, so clear
+    // the flag" — would be the delete-the-row bug reimplemented in code.
+    if (r.listedFrom) entry.listedFrom = r.listedFrom;
+    if (r.listedFromBad) master.listingDateUnparsed.push({ name, raw: r.listedFromBad });
+
+    const nowListed = classOfEntryAsOf(entry, Date.now()) === undefined;
+
     // Unlisted ⇒ there is no exchange price to fetch, ever. This is what keeps PE out of the
     // "prices we couldn't fetch" list and out of the "valued at cost" warning count.
-    entry.priceExcept = true;
+    //
+    // Conditional since 21-Sep-2026: once the company IS trading, the feed must fetch it, or a
+    // listed holding sits frozen at its last hand-entered valuation with nothing on screen to
+    // say why. Only ever SET here, never cleared — an entry already flagged in the master's own
+    // `Price Exception` column (an ETF, a liquid fund) keeps that flag whatever this row says.
+    if (!nowListed) entry.priceExcept = true;
     if (r.valuation > 0) entry.peValuation = r.valuation;
     if (r.valuationDate) entry.peValuationDate = r.valuationDate;
     if (r.pan) entry.pan = r.pan;
@@ -640,18 +695,73 @@ export function foldAssetClass(master: ScripMaster, rows: PrivateEquityRow[]): v
     if (r.companyType) entry.companyType = r.companyType;
     if (r.notes) entry.peNotes = r.notes;
     // So the allocation chart shows these as their own slice instead of "Unclassified".
-    // A real sector set on the row/entry still wins.
-    if (!entry.industry) entry.industry = "Private Equity";
+    // A real sector set on the row/entry still wins — and a company that has since listed is
+    // not a private-equity slice any more, so it is left to its real sector (or to
+    // "Unclassified", which is at least honest) rather than being parked under this one.
+    if (!entry.industry && !nowListed) entry.industry = "Private Equity";
   }
   // `dirty` is NOT set: nothing here needs writing back. Marking it would make callers
   // offer to "save" the scrip master after a plain read.
 }
 
-/** True when this security is an unlisted company from the Private Equities tab. */
-/** Which non-listed class this security belongs to, or undefined for ordinary listed equity. */
-export function assetClassOf(master: ScripMaster | null, isin: string, name: string): AssetClassId | undefined {
+/**
+ * `Listed From` as a LOCAL-midnight timestamp, memoised per entry.
+ *
+ * Local, not UTC, and that is not a detail. Every other timestamp in this app is built with
+ * `new Date(y, m - 1, d)` — local midnight. `Date.parse("2024-06-10")` is UTC midnight, which
+ * in IST is 05:30 on the 10th, i.e. 5½ hours LATER than every trade timestamp for that day. A
+ * sale stamped at local midnight on the listing day would then compare as still-unlisted, and
+ * the reclassification would land a day late — on exactly the boundary nobody tests.
+ *
+ * Unparseable ⇒ `Infinity` ⇒ never listed. The conservative side by design: a garbled cell must
+ * leave the company on the unlisted schedule it was filed on, never quietly off it.
+ * `master.listingDateUnparsed` is what stops that being invisible.
+ */
+const listedTsCache = new WeakMap<ScripEntry, number>();
+export function listedFromTs(e: ScripEntry): number {
+  const hit = listedTsCache.get(e);
+  if (hit !== undefined) return hit;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((e.listedFrom || "").trim());
+  const ts = m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : Infinity;
+  listedTsCache.set(e, ts);
+  return ts;
+}
+
+/**
+ * The asset class of an already-resolved entry AS AT a given instant — the one place the
+ * listing rule lives.
+ *
+ * Unlisted BEFORE `listedFrom`, listed ON it and after (the shares trade from that day, so the
+ * day itself is a listed day).
+ *
+ * Takes an ENTRY rather than (isin, name) on purpose. Resolving is the expensive half —
+ * `lookupScrip`'s token-subset fallback rescans every master entry — while the date test is two
+ * comparisons. A caller asking the same scrip about many dates (the register asks per sale row)
+ * resolves once and calls this for free; see `classOfKey` in trxRegister.ts.
+ */
+export function classOfEntryAsOf(e: ScripEntry | null | undefined, ts: number): AssetClassId | undefined {
+  if (!e || !e.assetClass) return undefined;
+  if (e.listedFrom && ts >= listedFromTs(e)) return undefined;
+  return e.assetClass;
+}
+
+/** Which non-listed class this security belonged to AS AT `ts`, or undefined for listed equity. */
+export function classAsOf(master: ScripMaster | null, isin: string, name: string, ts: number): AssetClassId | undefined {
   if (!master) return undefined;
-  return lookupScrip(master, isin, name).entry?.assetClass;
+  return classOfEntryAsOf(lookupScrip(master, isin, name).entry, ts);
+}
+
+/**
+ * Which non-listed class this security belongs to RIGHT NOW, or undefined for ordinary listed
+ * equity.
+ *
+ * This is `classAsOf(..., now)`, which is what every SCREEN wants: a company that has listed
+ * shows an exchange badge, gets a live price and offers exchange charges on a new trade. What
+ * no TAX ENGINE may use it for is a dated question — a past year's tab must ask `classAsOf`
+ * with that year's date, or regenerating it silently refiles history under today's answer.
+ */
+export function assetClassOf(master: ScripMaster | null, isin: string, name: string): AssetClassId | undefined {
+  return classAsOf(master, isin, name, Date.now());
 }
 
 /** On one of the non-listed tabs at all - Private Equity, AIF, Mutual Fund or Bond. */
@@ -701,8 +811,8 @@ export const LT_DAYS_UNLISTED = 730;
  * document. The null forces every caller to decide what to do about it, and there are only
  * four - tsc lists them.
  */
-export function ltDaysFor(master: ScripMaster | null, isin: string, name: string): number | null {
-  const id = assetClassOf(master, isin, name);
+export function ltDaysFor(master: ScripMaster | null, isin: string, name: string, ts?: number): number | null {
+  const id = classAsOf(master, isin, name, ts === undefined ? Date.now() : ts);
   if (!id) return LT_DAYS_LISTED;
   return ASSET_CLASSES[id].ltDays;
 }

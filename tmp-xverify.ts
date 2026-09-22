@@ -31,7 +31,7 @@ for (const [name, pair] of Object.entries(__PAIRS__)) {
   const tag = same ? 'IDENTICAL' : 'CHANGED  ';
   console.log(`${tag} [${strat.id}] ${name}${err}`);
   console.log(`          trades old=${oldRes ? oldRes.trades.length : 'null'} new=${newRes ? newRes.trades.length : 'null'}` +
-              (rec ? `  audit=${rec.statusText} valid=${rec.isValid} diff=${rec.difference}` : ''));
+              (rec ? `  audit=${rec.statusText} valid=${rec.isValid} oblig=${rec.calculatedObligation}/${rec.extractedObligation}` : ''));
   if (!same) {
     regressions++;
     const al = a.split('\n'), bl = b.split('\n');

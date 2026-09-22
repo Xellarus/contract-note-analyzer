@@ -1,12 +1,13 @@
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { X, Plus, Trash2, Loader2, ChevronDown, AlertCircle, CheckCircle, Sliders, Lock, RefreshCw } from 'lucide-react';
 import { ModalShell, toast, confirmDialog } from './ui/overlay';
 import { ManualAction, ManualTradeLine, appendManualTrades, appendCorporateAction, AppendManualResult } from '../lib/manualTrades';
 import { solveQtyPriceAmount } from '../lib/tradeRowSchema';
-import { dateInputValue, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
+import { dateInputValue, isDateInputSane, formatDMY, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
 import { CorpActionType } from '../lib/corporateActions';
-import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, normName, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { ScripMaster, loadScripMaster, lookupScrip, isNonListedScrip, isOffMarketScrip, assetClassOf, classOfEntryAsOf, normName, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { appendPrivateEquity } from '../lib/privateEquityWrite';
+import { computeHoldingsAsOf } from '../lib/holdingsCalc';
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { gapi } from 'gapi-script';
 import ScripCombobox from './ScripCombobox';
@@ -232,6 +233,66 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   }, [open, portfolio, usePropHoldings]);
   const activeHoldings = usePropHoldings ? holdings! : heldRows;
 
+  /**
+   * THE POSITION ON THE LINE'S OWN DATE — not today's.
+   *
+   * Reported 22-Sep-2026 against Goodluck India: a bonus dated 21-Aug-2026 auto-filled
+   * 2,00,000 when the holding on that date was 2,10,000. The 10,000 difference is a sell on
+   * 31-Aug-2026 — AFTER the bonus — and `activeHoldings` is the Holding tab, which states the
+   * position NOW. The hint then offered "2:1 adds +4,00,000 → 6,00,000" instead of
+   * "+4,20,000 → 6,30,000".
+   *
+   * The field is labelled for the action's date and was filled from the present, so it is
+   * wrong by construction for every backdated corporate action — which is most of them, since
+   * these are entered after the fact. The Holding tab is also only rewritten by an explicit
+   * Rebuild Holding, so it can lag True Entry on top of that.
+   *
+   * `computeHoldingsAsOf` is the shared FIFO replay the as-of report already uses, so the
+   * drawer and that report cannot disagree. Keyed by portfolio AND date and memoised, because
+   * it reads True Entry + Opening Holdings + the scrip master: typing in the date field must
+   * not spend a read per keystroke. It is one of the read-only paths that must NOT force a
+   * fresh master (see the quota rule) — and it does not.
+   */
+  const [asOfPos, setAsOfPos] = useState<Record<string, { name: string; isin: string; qty: number }[]>>({});
+  const asOfPending = useRef<Set<string>>(new Set());
+  useEffect(() => { if (!open) { setAsOfPos({}); asOfPending.current = new Set(); } }, [open]);
+
+  /** The dates this drawer currently needs a position for — one per free-share line. */
+  const neededAsOf = useMemo(() => {
+    const out = new Set<string>();
+    for (const l of lines) {
+      if (!isFreeShares(l.action)) continue;
+      const d = (l.date || tradeDate || '').trim();
+      if (isDateInputSane(d) && /^\d{4}-\d{2}-\d{2}$/.test(d)) out.add(d);
+    }
+    return [...out];
+  }, [lines, tradeDate]);
+
+  useEffect(() => {
+    if (!open || portfolio === 'local') return;
+    const sid = sheetIdForId(portfolio);
+    if (!sid || !hasValidGoogleToken()) return;
+    let cancelled = false;
+    for (const d of neededAsOf) {
+      const key = `${portfolio}|${d}`;
+      if (asOfPos[key] || asOfPending.current.has(key)) continue;
+      asOfPending.current.add(key);
+      // End of the action's own day: a trade stamped that date must be INCLUDED, because a
+      // corporate action is allotted on top of whatever the day's trading left.
+      const ts = new Date(`${d}T23:59:59`).getTime();
+      computeHoldingsAsOf(sid, ts)
+        .then((r) => {
+          if (cancelled) return;
+          setAsOfPos((prev) => ({
+            ...prev,
+            [key]: r.positions.map((p) => ({ name: p.securityName, isin: p.isin, qty: p.quantity })),
+          }));
+        })
+        .catch(() => { asOfPending.current.delete(key); });   // retry on the next edit
+    }
+    return () => { cancelled = true; };
+  }, [open, portfolio, neededAsOf, asOfPos]);
+
   // Opened from a stock's detail page → the whole drawer is about THAT security. Show it once
   // at the top and drop the per-line company picker: re-choosing it on every added line was
   // just a chance to book a trade against the wrong stock.
@@ -258,7 +319,11 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
 
   /** Unlisted companies the master knows about — 0 means nothing is registered yet. */
   const peRegistered = useMemo(
-    () => (activeMaster ? activeMaster.entries.filter((e) => e.assetClass).length : 0),
+    // Dated, so a company that has since listed stops being counted as an unlisted one. This
+    // number is the owner's only evidence that a row on a class tab actually reached the app
+    // ("add a company, press Recheck, watch it go up"), so counting a listed company here
+    // would make it go up for a row that the dropdown below correctly refuses to show.
+    () => (activeMaster ? activeMaster.entries.filter((e) => classOfEntryAsOf(e, Date.now())).length : 0),
     [activeMaster],
   );
 
@@ -335,14 +400,14 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       let changed = false;
       const next = prev.map((l) => {
         if (!isFreeShares(l.action) || !l.company.trim()) return l;
-        const h = heldFor(l.company, l.isin);
+        const h = heldFor(l.company, l.isin, l.date || tradeDate);
         if (h == null || String(h) === l.held) return l;
         changed = true;
         return applyRatio({ ...l, held: String(h) });
       });
       return changed ? next : prev;
     });
-  }, [open, portfolio, heldRows, holdingsLen]);
+  }, [open, portfolio, heldRows, holdingsLen, asOfPos, tradeDate]);
 
   // Company autocomplete is handled by <ScripCombobox> (a filtered typeahead), not a
   // native <datalist> — the latter silently stops rendering suggestions once the master
@@ -363,10 +428,19 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   // Apply a patch and, for Bonus/Split, recompute the free-share qty from the ratio.
   const setLineRatio = (id: number, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.id === id ? applyRatio({ ...l, ...patch }) : l)));
-  // Current holding of a company (in the portfolio SELECTED IN THIS DRAWER) — auto-fills
-  // "shares held" for Bonus/Split.
-  const heldFor = (company: string, isin: string): number | null => {
-    const rows = activeHoldings;
+  // Holding of a company (in the portfolio SELECTED IN THIS DRAWER) AS AT `onDate` —
+  // auto-fills "shares held" for Bonus/Split.
+  //
+  // Returns null until the as-of replay for that date has landed. Deliberately: filling
+  // today's figure "for now" is exactly the bug, and a number that silently corrects itself a
+  // second later is worse than a box that is briefly empty — the user may already have read it.
+  const heldFor = (company: string, isin: string, onDate?: string): number | null => {
+    const key = `${portfolio}|${(onDate || '').trim()}`;
+    const dated = asOfPos[key];
+    // No as-of set yet: for a LOCAL portfolio there is no ledger to replay, so the Holding tab
+    // is all there is and is also all there ever was. Everywhere else, wait.
+    if (!dated && portfolio !== 'local') return null;
+    const rows = dated || activeHoldings;
     if (!rows.length) return null;
     const c = company.trim().toLowerCase(), i = isin.trim().toUpperCase();
     let h = rows.find((x) => (i && (x.isin || '').toUpperCase() === i) || (c && x.name.trim().toLowerCase() === c));
@@ -386,7 +460,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
   const setLineIdentity = (l: LineDraft, patch: Partial<LineDraft>) => {
     if (isFreeShares(l.action)) {
       const next = { ...l, ...patch };
-      const h = heldFor(next.company, next.isin);
+      const h = heldFor(next.company, next.isin, next.date || tradeDate);
       patch = { ...patch, held: h != null ? String(h) : '' };
     }
     setLineRatio(l.id, patch);
@@ -404,7 +478,7 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
       next.tradeClass = isDeliveryLocked(last.action) ? 'Delivery' : last.tradeClass;
       // Carried a Bonus/Split forward → re-derive shares held for the (known) security.
       if (isFreeShares(next.action) && next.company) {
-        const h = heldFor(next.company, next.isin);
+        const h = heldFor(next.company, next.isin, next.date || tradeDate);
         if (h != null) next.held = String(h);
       }
     }
@@ -859,6 +933,17 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                           {' '}<b className="font-bold">Private</b> is enough, and the app then keeps them apart
                           automatically. Do not add the company a second time.</>
                         )}
+                        {/* A `Listed From` cell holding something that is not a date. The
+                            company then stays unlisted forever while the sheet plainly shows a
+                            listing date beside it — the cell looks filled in and does nothing,
+                            and there is no other screen in the app on which that is visible. */}
+                        {(activeMaster?.listingDateUnparsed || []).length > 0 && (
+                          <> {' '}<b className="font-bold text-amber-700">
+                            {activeMaster!.listingDateUnparsed.length} “Listed From” cell(s) could not be read as a date
+                          </b>{' '}so those companies stay UNLISTED:{' '}
+                          {activeMaster!.listingDateUnparsed.map(x => `${x.name} (“${x.raw}”)`).join('; ')}.
+                          Enter a real date, or clear the cell.</>
+                        )}
                       </p>
                     )}
                   </div>
@@ -887,10 +972,17 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                   const err = lineError(l);
                   const warn = lineWarning(l);
                   const actionHint = ACTIONS.find((a) => a.value === l.action)?.hint;
-                  // Bonus/Split: shares held come straight from the current holding (auto); the
-                  // manual box only appears when we can't determine it (holdings not loaded / not held).
-                  const autoHeld = free ? heldFor(l.company, l.isin) : null;
+                  // Bonus/Split: shares held is the position AS AT THIS LINE'S DATE, replayed
+                  // from the ledger — not the Holding tab, which states it as of NOW. A bonus
+                  // dated 21-Aug filled 2,00,000 when 2,10,000 was held on that date, the
+                  // difference being a sell on 31-Aug (reported 22-Sep-2026, Goodluck India).
+                  const heldOn = (l.date || tradeDate || '').trim();
+                  const autoHeld = free ? heldFor(l.company, l.isin, heldOn) : null;
                   const heldKnown = autoHeld != null;
+                  // The replay for this date has not come back yet. Distinguished from "not
+                  // held" so the box does not read as a company we could not find.
+                  const heldPending = free && !heldKnown && portfolio !== 'local'
+                    && !!l.company.trim() && !asOfPos[`${portfolio}|${heldOn}`];
                   const heldNum = num(l.held);   // the (auto-filled but editable) field is the source of truth
                   const freeNum = num(l.qty);                 // computed by applyRatio from held + ratio
                   const totalNum = heldNum + freeNum;
@@ -933,7 +1025,18 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                               hands an emptied field back to the drawer's date. See dates.ts. */}
                           <input
                             type="date" value={dateInputValue(l.date, tradeDate, l.dateSet)} min={DATE_INPUT_MIN} max={DATE_INPUT_MAX}
-                            onChange={(e) => { if (isDateInputSane(e.target.value)) setLine(l.id, { date: e.target.value, dateSet: true }); }}
+                            onChange={(e) => {
+                              if (!isDateInputSane(e.target.value)) return;
+                              // For a Bonus/Split the held figure is AS AT this date, so moving
+                              // the date invalidates it. Cleared rather than left standing until
+                              // the new as-of replay lands: a stale number that silently corrects
+                              // itself a second later is worse than a briefly empty box, because
+                              // the figure may already have been read.
+                              const invalidates = isFreeShares(l.action) && e.target.value !== (l.date || tradeDate);
+                              setLine(l.id, invalidates
+                                ? { date: e.target.value, dateSet: true, held: '', qty: '' }
+                                : { date: e.target.value, dateSet: true });
+                            }}
                             onBlur={() => { if (!l.date) setLine(l.id, { dateSet: false }); }}
                             title="This line's trade date — defaults to the date at the top of the drawer."
                             className={`w-full px-3 py-2 text-xs rounded-lg border outline-none focus:ring-1 focus:ring-indigo-500 ${l.date ? 'border-indigo-200 bg-white text-slate-800' : 'border-slate-200 bg-white text-slate-500'}`}
@@ -950,9 +1053,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                             onChange={(e) => {
                               const action = e.target.value as ManualAction;
                               const patch: Partial<LineDraft> = { action, tradeClass: isDeliveryLocked(action) ? 'Delivery' : l.tradeClass };
-                              // Switching to Bonus/Split: pull shares-held from the current holding so the
+                              // Switching to Bonus/Split: pull shares-held as at THIS LINE'S date so the
                               // conversion computes automatically (keep any prior manual value if unknown).
-                              if (isFreeShares(action)) { const h = heldFor(l.company, l.isin); patch.held = h != null ? String(h) : l.held; }
+                              if (isFreeShares(action)) { const h = heldFor(l.company, l.isin, l.date || tradeDate); patch.held = h != null ? String(h) : l.held; }
                               setLineRatio(l.id, patch);
                             }}
                             className="w-full px-2.5 py-2 text-xs font-semibold text-slate-800 rounded-lg border border-slate-200 outline-none focus:ring-1 focus:ring-indigo-500 bg-white cursor-pointer"
@@ -981,14 +1084,24 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                             </div>
                             <div className="space-y-1 col-span-2">
                               <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                                Shares held {heldKnown && <span className="font-normal normal-case text-emerald-600">· auto</span>}
+                                Shares held{' '}
+                                {heldKnown
+                                  ? <span className="font-normal normal-case text-emerald-600">· as at {formatDMY(heldOn)}</span>
+                                  : heldPending
+                                    ? <span className="font-normal normal-case text-slate-400">· reading the ledger…</span>
+                                    : null}
                               </label>
-                              {/* Auto-filled from the current holding, but still editable: a BACK-DATED bonus/split
-                                  acted on the position as it was THEN, which can differ from today's. */}
+                              {/* Replayed to THIS LINE'S date and still editable. The label names the
+                                  date on purpose: the figure differs from the one on the holdings
+                                  grid whenever the action is back-dated, and without the date on
+                                  screen that difference reads as a bug. */}
                               <input
-                                type="number" min="0" step="any" placeholder="shares held before this action"
+                                type="number" min="0" step="any"
+                                placeholder={heldPending ? 'reading the ledger…' : 'shares held before this action'}
                                 value={l.held} onChange={(e) => setLineRatio(l.id, { held: e.target.value })}
-                                title={heldKnown ? 'Auto-filled from your current holding — edit it for a back-dated action.' : undefined}
+                                title={heldKnown
+                                  ? `Your holding on ${formatDMY(heldOn)}, replayed from the ledger. Trades AFTER that date are excluded. Editable.`
+                                  : undefined}
                                 className={`w-full px-3 py-2 text-xs rounded-lg border outline-none focus:ring-1 focus:ring-indigo-500 font-mono text-slate-800 ${heldKnown ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}
                               />
                             </div>
@@ -1049,7 +1162,9 @@ export default function AddTradeModal({ open, onClose, defaultPortfolio, master,
                             <span className="text-slate-400">
                               {heldKnown
                                 ? 'Enter the ratio — the free-share count and new total fill in automatically.'
-                                : 'Pick the company (must be a held stock) and enter the ratio; shares held and the new total then compute automatically.'}
+                                : heldPending
+                                  ? `Working out what you held on ${formatDMY(heldOn)}…`
+                                  : 'Pick the company (must be a held stock) and enter the ratio; shares held and the new total then compute automatically.'}
                             </span>
                           )}
                         </div>

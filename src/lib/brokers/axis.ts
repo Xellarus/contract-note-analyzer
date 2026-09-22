@@ -260,8 +260,11 @@ const parseLevies = (blk: string[]): Summary => {
   // gst is either IGST or CGST+SGST — never all three summed. calculateReconciliation
   // counts only `gst`; the components ride along for the export columns.
   s.gst = r2(s.igst > 0 ? s.igst : s.cgst + s.sgst);
-  // netSettlement keeps its SIGN: calculatedNet = (sells − buys) − charges is signed,
-  // and the audit compares the two directly.
+  // netSettlement keeps its SIGN - it is the note's own statement of which way the money
+  // moved. BUT (22-Sep-2026) the audit that used to compare it against
+  // (sells − buys) − charges has been removed, and the on-screen Net Settlement cards are
+  // recomputed from the TRADES, so this field is now read by nothing except the multi-file
+  // merge. A sign error here would be silent. See `calculateReconciliation`.
   s.netSettlement = rowValue(/Net Amount Receivable by Client/i);
   return s;
 };

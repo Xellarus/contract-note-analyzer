@@ -489,7 +489,7 @@ async function main() {
     eq('V1 tradeDate', r1.tradeDate, '26/05/2021');
     eq('V1 ucc', r1.ucc, '60072941');
     eq('V1 brokerName', r1.brokerName, 'nuvama');
-    eq('V1 recon difference', r1.reconciliation!.difference, 0, 0.10);
+    eq('V1 obligation ties to the note (printed NET of brokerage)', r1.reconciliation!.isObligationMismatch, false);
     eq('V1 recon PASSED', r1.reconciliation!.statusText, 'PASSED');
     eq('V1 recon isValid', r1.reconciliation!.isValid, true);
   }
@@ -517,7 +517,7 @@ async function main() {
     eq('V2 summary.netSettlement negated', r2.summary.netSettlement, -95053.78, 0.005);
     eq('V2 tradeDate', r2.tradeDate, '31/03/2023');
     eq('V2 ucc', r2.ucc, '60072941');
-    eq('V2 recon difference', r2.reconciliation!.difference, 0, 0.10);
+    eq('V2 obligation ties to the note (printed NET of brokerage)', r2.reconciliation!.isObligationMismatch, false);
     eq('V2 recon PASSED', r2.reconciliation!.statusText, 'PASSED');
     eq('V2 recon isValid', r2.reconciliation!.isValid, true);
   }
@@ -544,7 +544,7 @@ async function main() {
     eq(`${tag} summary.netSettlement negated`, r3.summary.netSettlement, 806439.83, 0.005);
     eq(`${tag} tradeDate (alpha month 29/Jul/2026)`, r3.tradeDate, '29/07/2026');
     eq(`${tag} ucc`, r3.ucc, '60072941');
-    eq(`${tag} recon difference ties to the paise`, r3.reconciliation!.difference, 0, 0.10);
+    eq(`${tag} obligation ties to the note`, r3.reconciliation!.isObligationMismatch, false);
     // Accepted behaviour: an STT-exempt note trips the shared suspicion flag.
     eq(`${tag} isSuspiciousStt (known, accepted)`, r3.reconciliation!.isSuspiciousStt, true);
     eq(`${tag} isSttMismatch false (0 == 0)`, r3.reconciliation!.isSttMismatch, false);
@@ -604,7 +604,7 @@ async function main() {
     eq('V3B summary.netSettlement negated', r4.summary.netSettlement, 9918303.49, 0.005);
     eq('V3B tradeDate', r4.tradeDate, '07/07/2026');
     eq('V3B ucc', r4.ucc, '60072941');
-    eq('V3B recon difference ties to the paise', r4.reconciliation!.difference, 0, 0.10);
+    eq('V3B obligation ties to the note', r4.reconciliation!.isObligationMismatch, false);
     eq('V3B recon PASSED (STT present, so no suspicion flag)', r4.reconciliation!.statusText, 'PASSED');
     eq('V3B recon isValid', r4.reconciliation!.isValid, true);
     eq('V3B isSuspiciousStt false', r4.reconciliation!.isSuspiciousStt, false);
@@ -652,7 +652,7 @@ async function main() {
     eq('V3C payinObligation is GROSS on V3', r5.summary.payinObligation, 2926125.00, 0.005);
     eq('V3C tradeDate', r5.tradeDate, '16/04/2026');
     eq('V3C ucc', r5.ucc, '60072941');
-    eq('V3C recon difference ties to the paise', r5.reconciliation!.difference, 0, 0.10);
+    eq('V3C obligation ties to the note', r5.reconciliation!.isObligationMismatch, false);
     eq('V3C recon PASSED', r5.reconciliation!.statusText, 'PASSED');
     eq('V3C recon isValid', r5.reconciliation!.isValid, true);
     eq('V3C calculatedObligation = -gross for a buy', r5.reconciliation!.calculatedObligation, -2926125.00, 0.02);

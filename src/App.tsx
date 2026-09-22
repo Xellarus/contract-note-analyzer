@@ -2869,90 +2869,22 @@ export default function App() {
                             ? `Mathematical safety alert: Extracted STT is critically low (₹${data.summary.stt}) given your high turnover of ₹${(data.reconciliation.totalBuys + data.reconciliation.totalSells).toLocaleString('en-IN')}. This usually implies the extraction isolated a spurious list item or footnote integer.`
                             : data.reconciliation.isSttMismatch
                               ? `STT validation failure: The trade-level STT calculation sums to ₹${data.trades.reduce((sum, t) => sum + t.stt, 0).toLocaleString('en-IN')} (Delivery: 0.1%, Intraday Sell: 0.025%), but the note's summary STT is ₹${data.summary.stt.toLocaleString('en-IN')}. This mismatch exceeds our tolerance.`
-                              : (data.reconciliation.isValid 
-                                  ? `Mathematical verification perfect: Sells (₹${data.reconciliation.totalSells.toLocaleString('en-IN')}) minus Buys (₹${data.reconciliation.totalBuys.toLocaleString('en-IN')}) minus Charges (₹${data.reconciliation.totalCharges.toLocaleString('en-IN')}) aligns perfectly with the extracted net receivable of ₹${data.reconciliation.extractedNet.toLocaleString('en-IN')}.`
-                                  : `Accounting check failure: Sells minus Buys minus Charges does not equal the Net Settlement value. Our mismatch calculation shows a difference of ₹${data.reconciliation.difference.toLocaleString('en-IN')} (Tolerance is 10 paise).`
-                                )
+                              : data.reconciliation.isFractionalQuantity
+                                ? `A quantity on this note is not a whole number. Exchange equity trades in whole shares, so this is a parse error by definition — a rate or an amount has been read into the quantity column. Check the trade rows before importing.`
+                                : data.reconciliation.isObligationMismatch
+                                  ? `The note's own printed Pay In / Pay Out obligation (₹${data.reconciliation.extractedObligation.toLocaleString('en-IN')}) disagrees with quantity × rate summed over the trades (₹${data.reconciliation.calculatedObligation.toLocaleString('en-IN')}). Those two come from different parts of the page, so a gap beyond the note's own charges means a column was misread.`
+                                  : (data.reconciliation.notes || 'This note did not pass its own audit.')
                           }
                         </p>
                       </div>
                     </div>
                     
-                    <div className="text-left md:text-right shrink-0">
-                      <span className="text-[10px] font-semibold uppercase tracking-wider block opacity-75">Verification Variance</span>
-                      <span className={`text-md font-black font-mono block mt-0.5 ${data.reconciliation.isValid ? 'text-emerald-800' : 'text-rose-900'}`}>
-                        {data.reconciliation.isValid ? '₹0.00' : `₹${data.reconciliation.difference.toLocaleString('en-IN')}`}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* DETAILED TEACHER CALCULATION PANEL IF MISMATCH ON ANALYSE */}
-                {data.reconciliation && !data.reconciliation.isValid && (
-                  <div className="bg-rose-50/50 p-6 rounded-2xl border border-rose-200 shadow-inner grid grid-cols-1 md:grid-cols-2 gap-6 text-xs text-rose-950">
-                    <div className="space-y-4">
-                      <div>
-                        <h4 className="font-extrabold text-sm text-rose-900 flex items-center gap-1.5 font-sans uppercase">
-                          <AlertTriangle className="w-4 h-4 text-red-600" /> Reconciliation Arithmetic Discrepancy details
-                        </h4>
-                        <p className="text-rose-800/80 mt-1 leading-relaxed">
-                          This reconciliation teacher calculates exactly where the parser is failing constraints. Here is the strict validation audit trail run against this note:
-                        </p>
-                      </div>
-
-                      <div className="bg-white/80 p-4 rounded-xl border border-rose-100 space-y-2.5 font-mono shadow-sm">
-                        <div className="flex justify-between border-b border-rose-100 pb-1.5">
-                          <span className="text-slate-500">Sells Gross</span>
-                          <span className="font-bold text-slate-800">₹{data.reconciliation.totalSells.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                        </div>
-                        <div className="flex justify-between border-b border-rose-100 pb-1.5">
-                          <span className="text-slate-500">Buys Gross</span>
-                          <span className="font-bold text-slate-800">₹{data.reconciliation.totalBuys.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                        </div>
-                        <div className="flex justify-between border-b border-rose-100/50 pb-1.5">
-                          <span className="text-slate-500 font-bold">A) Buy/Sell Obligation (Sells - Buys)</span>
-                          <span className={`font-bold ${data.reconciliation.calculatedObligation >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            ₹{data.reconciliation.calculatedObligation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                          </span>
-                        </div>
-                        <div className="flex justify-between border-b border-rose-100 pb-1.5">
-                          <span className="text-slate-500 font-bold">B) Extracted Obligation of CN</span>
-                          <span className="font-bold text-slate-800">₹{data.reconciliation.extractedObligation.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col justify-between">
-                      <div className="bg-white/80 p-4 rounded-xl border border-rose-100 space-y-2.5 font-mono shadow-sm">
-                        <div className="flex justify-between border-b border-rose-100 pb-1.5">
-                          <span className="text-slate-500 font-bold">C) Sum of Charges + Brokerage (Levies)</span>
-                          <span className="font-bold text-amber-700">₹{data.reconciliation.totalCharges.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                        </div>
-                        <div className="flex justify-between border-b border-rose-100 pb-1.5">
-                          <span className="text-slate-500 font-bold">Calculated Net Settlement (A - C)</span>
-                          <span className={`font-bold ${data.reconciliation.calculatedNet >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            ₹{data.reconciliation.calculatedNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                          </span>
-                        </div>
-                        <div className="flex justify-between border-b border-rose-100 pb-1.5 text-indigo-800 font-bold">
-                          <span>Extracted Net Settlement of CN</span>
-                          <span>₹{data.reconciliation.extractedNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                        </div>
-                        <div className="flex justify-between text-red-700 font-black">
-                          <span>D) Arithmetic Mismatch Variance</span>
-                          <span>₹{data.reconciliation.difference.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
-                        </div>
-                      </div>
-
-                      <div className="p-3 bg-red-100 border border-red-200 rounded-xl text-[11px] text-red-800 font-bold mt-4 leading-relaxed">
-                        {data.reconciliation.isSuspiciousStt
-                          ? `⚠️ ALERT: Securities Transaction Tax (STT) extracted is ₹${data.summary.stt} which is statistically impossible on a turnover of ₹${(data.reconciliation.totalBuys + data.reconciliation.totalSells).toLocaleString('en-IN')}. This suggests spurious footnotes or list tags were incorrectly parsed as the STT fee.`
-                          : data.reconciliation.isSttMismatch
-                            ? `⚠️ ALERT: There is an STT mismatch of ₹${Math.abs(data.trades.reduce((sum, t) => sum + t.stt, 0) - data.summary.stt).toLocaleString('en-IN')}. Delivery STT is strictly 0.1% of turnover and Intraday STT is 0.025% on Sell trades. Ensure the extracted securities and categories are complete.`
-                            : "⚠️ ALERT: Sells minus Buys minus Charges fails to equal the Net Settlement value. Do not trust these extracted values for regulatory tax filings directly without verification."
-                        }
-                      </div>
-                    </div>
+                    {/* The "Verification Variance" figure that stood here was
+                        `reconciliation.difference`, removed 22-Sep-2026 with the rest of the
+                        net-settlement audit. Nothing replaces it on purpose: a single rupee
+                        figure is what made a scoping artefact look like a finding, and the
+                        surviving checks are not one-number checks. What fired is now said in
+                        words, to the left. */}
                   </div>
                 )}
 
@@ -3146,10 +3078,22 @@ export default function App() {
                       {showExportConfirmation && (
                         <div className="absolute right-0 top-12 mt-2 p-4 bg-white border border-rose-200 rounded-2xl shadow-xl z-50 min-w-[340px] text-xs space-y-3 animate-fadeIn">
                           <p className="font-bold text-rose-900 flex items-center gap-1">
-                            <AlertTriangle className="w-4 h-4 text-red-500" /> Import Warning: Parser Uncertain
+                            <AlertTriangle className="w-4 h-4 text-red-500" /> Import Warning: {data.reconciliation?.statusText || 'Parser uncertain'}
                           </p>
+                          {/* Names the check that actually failed. This used to quote
+                              `difference`, a figure that degenerated to the note's own net
+                              settlement whenever the net settlement was not extracted - and it
+                              rendered as "₹$78..." because the `$` of a template literal was
+                              pasted into JSX, where it is literal text. Nobody had read this
+                              banner's own output. */}
                           <p className="text-slate-600 leading-relaxed font-sans">
-                            The parser is mathematically uncertain on this note (Discrepancy: ₹${data.reconciliation?.difference}). Do you still wish to proceed with the import?
+                            {data.reconciliation?.notes
+                              || (data.reconciliation?.isFractionalQuantity
+                                ? 'A quantity on this note is not a whole number, which is a parse error by definition.'
+                                : data.reconciliation?.isObligationMismatch
+                                  ? "The note's own printed obligation disagrees with quantity × rate over the trades."
+                                  : 'This note did not pass its own audit.')}
+                            {' '}Do you still wish to proceed with the import?
                           </p>
                           <div className="flex justify-end gap-2 pt-1">
                             <button onClick={() => setShowExportConfirmation(false)} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg">Cancel</button>

@@ -31,6 +31,10 @@ import { parseDMY } from "./dates";
  *                    here — Domestic / Foreign — because it IS column C of the unlisted-
  *                    equity-shares schedule. The reader does not police it: an unexpected
  *                    value prints as typed rather than being blanked.
+ *   Listed From    — optional. The date this company's shares STARTED TRADING on an exchange.
+ *                    Blank ⇒ still unlisted, which is the normal state for every row here.
+ *                    THE ROW STAYS ON THIS TAB FOREVER once set: it is what lets the app
+ *                    reproduce a past year exactly. See `classAsOf` in scripMaster.ts.
  *   Notes          — optional free text.
  *
  * These rows are folded into the in-memory `ScripMaster` at load (see `loadScripMaster`),
@@ -110,6 +114,22 @@ export const ASSET_CLASSES: Record<AssetClassId, AssetClassPolicy> = {
 
 export const ASSET_CLASS_IDS: AssetClassId[] = ["PE", "AIF", "MF", "BOND"];
 
+/**
+ * The A1 range every reader of an asset-class tab asks for. ONE definition, because until
+ * 21-Sep-2026 there were FOUR hand-kept copies of the string `A1:J5000` — here, the batched
+ * read in `scripMaster.ts`, and both reads in `privateEquityWrite.ts` — one of which even
+ * carried a comment promising it was "the SAME range string loadAssetClass builds". Widening
+ * the tab by one column for `Listed From` moved one copy and left three behind, and the
+ * failure is silent in the worst way: the batched fast path would return ten columns while the
+ * per-class fallback returned nine, so a listing date would exist or not depending on which
+ * path a given load happened to take.
+ *
+ * N, not J: there are ten recognised columns now and J is the tenth, so J left exactly zero
+ * headroom. Trailing empty columns cost nothing — the reader is header-aware and the request
+ * count is unchanged.
+ */
+export const CLASS_TAB_RANGE = "A1:N5000";
+
 export interface PrivateEquityRow {
   /** Which tab this row came from, so the fold-in knows which policy to apply. */
   assetClass: AssetClassId;
@@ -130,6 +150,24 @@ export interface PrivateEquityRow {
    *  PAN, which is written that way): this is prose and the sheet's capitalisation is the
    *  owner's. */
   companyType: string;
+  /**
+   * ISO `yyyy-mm-dd` — the date the shares started trading on an exchange. "" ⇒ still
+   * unlisted (the normal case).
+   *
+   * This company is UNLISTED BEFORE this date and LISTED ON OR AFTER IT, and both halves are
+   * load-bearing. Until 21-Sep-2026 the remedy for a company that listed was to delete its row
+   * from this tab, which silently REWROTE history: `assetClass` is read as current state by
+   * every engine, so regenerating FY2024-25 after the move dropped the company off the
+   * `Unlisted Equity Shares` schedule that had already been FILED, moved its holding to the
+   * equity tab and flipped its long-term threshold from 730 days to 365 — changing a filed
+   * short-term gain into a long-term one, with nothing on any tab to show it had happened.
+   */
+  listedFrom: string;
+  /** The raw cell text when a `Listed From` cell was NON-EMPTY but could not be read as a
+   *  date, else "". A blank cell and an unreadable one both leave `listedFrom` empty, and
+   *  they mean opposite things: blank is "still unlisted" (correct), unreadable is "the owner
+   *  entered a listing date and the app is silently ignoring it". Surfaced, never swallowed. */
+  listedFromBad: string;
   notes: string;
 }
 
@@ -196,6 +234,7 @@ export interface PeColumns {
   pan: number;
   faceValue: number;
   companyType: number;
+  listedFrom: number;
   notes: number;
 }
 
@@ -220,12 +259,20 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
   const hasKeyword = header.some((h) => /company|name|drive|link|folder|url|isin|valuation|value|cmp|price|note|remark|sector|\bpan\b|face|type/.test(h));
   const hasValueCell = row0.some((c: any) => typeof c === "number" || /^https?:\/\//i.test((c ?? "").toString().trim()));
   const hasHeader = hasKeyword && !hasValueCell;
-  const ci: PeColumns = { company: 0, driveLink: 1, isin: -1, valuation: -1, valuationDate: -1, pan: -1, faceValue: -1, companyType: -1, notes: -1 };
+  const ci: PeColumns = { company: 0, driveLink: 1, isin: -1, valuation: -1, valuationDate: -1, pan: -1, faceValue: -1, companyType: -1, listedFrom: -1, notes: -1 };
   if (hasHeader) {
     let companySet = false, driveSet = false;
     header.forEach((h, idx) => {
       if (!h) return;
-      if (/valuation date|value date|val date|as on|as at|as of/.test(h)) ci.valuationDate = idx;
+      // FIRST in this chain, and specifically ahead of the valuation-date test: a header
+      // spelled "Listed As On" contains "as on" and would otherwise be read as the valuation
+      // date — which fails in the worst possible way, because the column would look correctly
+      // filled while every listing date silently became a valuation date and no company ever
+      // reclassified. Matching on the bare words `listed` / `listing` covers every spelling the
+      // owner might use (Listed From / Listing Date / Listed On / Listed w.e.f.) and collides
+      // with none of the other headers below.
+      if (/\blisted\b|\blisting\b/.test(h)) ci.listedFrom = idx;
+      else if (/valuation date|value date|val date|as on|as at|as of/.test(h)) ci.valuationDate = idx;
       else if (/drive|folder|link|url|docs/.test(h)) { if (!driveSet) { ci.driveLink = idx; driveSet = true; } }
       else if (/isin/.test(h)) ci.isin = idx;
       // Ahead of the company test on purpose: a header of "Company PAN" contains "company"
@@ -258,7 +305,7 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
     // identified: the tab now leads with ISIN, and reading an ISIN as the company name gives
     // every row a garbage identity while the real names go unread.
     if (!companySet) {
-      const taken = new Set([ci.driveLink, ci.isin, ci.valuation, ci.valuationDate, ci.pan, ci.faceValue, ci.companyType, ci.notes].filter(i => i >= 0));
+      const taken = new Set([ci.driveLink, ci.isin, ci.valuation, ci.valuationDate, ci.pan, ci.faceValue, ci.companyType, ci.listedFrom, ci.notes].filter(i => i >= 0));
       ci.company = taken.has(0) ? header.findIndex((_, i) => !taken.has(i)) : 0;
       if (ci.company < 0) ci.company = 0;   // nothing else to choose - A is all there is
     }
@@ -291,6 +338,14 @@ export function parsePrivateEquityVals(vals: any[][], assetClass: AssetClassId =
       pan: ci.pan >= 0 ? (r[ci.pan] ?? "").toString().trim().toUpperCase() : "",
       faceValue: ci.faceValue >= 0 ? Math.max(0, toNum(r[ci.faceValue])) : 0,
       companyType: ci.companyType >= 0 ? (r[ci.companyType] ?? "").toString().trim() : "",
+      // Through the same `isoDate` every other date here goes through, so a Sheets SERIAL and
+      // every string shape `parseDMY` knows both land as ISO. An unparseable cell yields "",
+      // i.e. STILL UNLISTED — the conservative side: a garbled date must never silently
+      // reclassify a company out of the unlisted schedule. `listedFromUnparsed` below is what
+      // stops that being invisible.
+      listedFrom: ci.listedFrom >= 0 ? isoDate(r[ci.listedFrom]) : "",
+      listedFromBad: ci.listedFrom >= 0 && (r[ci.listedFrom] ?? "").toString().trim() !== ""
+        && !isoDate(r[ci.listedFrom]) ? (r[ci.listedFrom] ?? "").toString().trim() : "",
       notes: ci.notes >= 0 ? (r[ci.notes] ?? "").toString().trim() : "",
     });
   }
@@ -325,7 +380,7 @@ export async function loadAssetClass(
   try {
     res = await peBackoff(() => (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${tab}!A1:J5000`,
+      range: `${tab}!${CLASS_TAB_RANGE}`,
       valueRenderOption: "UNFORMATTED_VALUE",
     }));
   } catch (e: any) {

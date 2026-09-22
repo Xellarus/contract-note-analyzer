@@ -169,16 +169,19 @@ const lineValue = (line: string): number | null => {
  * Nuvama's settlement sign is the INVERSE of this app's.
  *
  * The note footer states "(-) Credit Amount / (+) Debit Amount" — negative means
- * money moving TO the client. calculateReconciliation computes
- * `calculatedNet = sells − buys − charges`, which is POSITIVE when money comes to
- * the client. So the printed figure is negated on the way in, and all three notes
- * then tie to the paise.
+ * money moving TO the client, whereas this app's convention is POSITIVE when money comes
+ * to the client. So the printed figure is negated on the way in.
+ *
+ * **No longer verified** (22-Sep-2026). The negation used to be checked by
+ * `calculateReconciliation`, which tied `sells − buys − charges` to this field to the
+ * paise; that test has been removed. The field is now read by nothing but the multi-file
+ * merge - the Net Settlement cards on screen are recomputed from the TRADES - so a flipped
+ * sign would go unnoticed rather than failing by twice the settlement.
  *
  * Do not "fix" this by reading the label instead: V2 says "Net amount payable BY
  * Client" (client pays, a debit) while V3 says "Net Amount Payable TO Client"
  * (broker pays, a credit). The two wordings mean opposite things, so the printed
- * sign is the only trustworthy source. If it is ever wrong the reconciliation
- * fails by twice the settlement — loudly, not silently.
+ * sign is the only trustworthy source.
  */
 const toAppSettlementSign = (printed: number) => -printed;
 

@@ -17,8 +17,7 @@
 import { gapi } from "gapi-script";
 import {
   detectPeColumns, parsePrivateEquityVals, PRIVATE_EQUITIES_TAB,
-  ASSET_CLASSES, AssetClassId,
-} from "./privateEquities";
+  ASSET_CLASSES, AssetClassId, CLASS_TAB_RANGE } from "./privateEquities";
 import { normName, invalidateScripCache, lookupScrip, ScripMaster } from "./scripMaster";
 
 /**
@@ -31,7 +30,7 @@ import { normName, invalidateScripCache, lookupScrip, ScripMaster } from "./scri
 // what a person creating
 // this tab by hand would expect. The suite round-trips this row through `detectPeColumns`,
 // so a header the reader cannot map fails there rather than on a live sheet.
-const PE_HEADER = ["Company", "Drive Link", "ISIN", "PAN", "Face Value", "Type Of Company", "Valuation", "Valuation Date", "Notes"];
+const PE_HEADER = ["Company", "Drive Link", "ISIN", "PAN", "Face Value", "Type Of Company", "Valuation", "Valuation Date", "Listed From", "Notes"];
 
 export type PeAppendRefusal =
   | "blank"              // no company name given
@@ -114,7 +113,7 @@ export async function appendPrivateEquity(
   try {
     const res: any = await (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${TAB}!A1:J5000`,
+      range: `${TAB}!${CLASS_TAB_RANGE}`,
       valueRenderOption: "UNFORMATTED_VALUE",
     });
     vals = res?.result?.values || [];
@@ -144,7 +143,7 @@ export async function appendPrivateEquity(
   // the next reader detects them instead of falling back to "company is column A".
   const needsHeader = tabMissing || vals.length === 0;
   const { ci, width } = needsHeader
-    ? { ci: { company: 0, driveLink: 1, isin: 2, pan: 3, faceValue: 4, companyType: 5, valuation: 6, valuationDate: 7, notes: 8 }, width: PE_HEADER.length }
+    ? { ci: { company: 0, driveLink: 1, isin: 2, pan: 3, faceValue: 4, companyType: 5, valuation: 6, valuationDate: 7, listedFrom: 8, notes: 9 }, width: PE_HEADER.length }
     : detectPeColumns(vals);
 
   // Place the name in the column THIS SHEET uses for it, padding to the sheet's own width so a
@@ -243,7 +242,7 @@ export async function updatePrivateEquityCmp(
 
   const res: any = await (gapi.client as any).sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${PRIVATE_EQUITIES_TAB}!A1:J5000`,
+    range: `${PRIVATE_EQUITIES_TAB}!${CLASS_TAB_RANGE}`,
     valueRenderOption: "UNFORMATTED_VALUE",   // a date must arrive as a serial, never as text
   });
   const vals: any[][] = res?.result?.values || [];

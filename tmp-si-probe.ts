@@ -57,8 +57,8 @@ for (const f of files) {
   const rec: any = res.reconciliation;
   if (rec) {
     console.log(`\n  RECONCILIATION (this is what drives the Mismatch Warning):`);
-    console.log(`    totalCharges ${money(rec.totalCharges)} -> calculatedNet ${money(rec.calculatedNet)}`
-      + `   note's own net ${money(rec.extractedNet)}   diff ${money(rec.difference)}`);
+    console.log(`    totalCharges ${money(rec.totalCharges)}`
+      + `   obligation: trades ${money(rec.calculatedObligation)}  note ${money(rec.extractedObligation)}`);
     console.log(`    status: ${rec.statusText}   isValid=${rec.isValid}`);
   }
 

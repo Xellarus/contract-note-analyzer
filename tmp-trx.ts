@@ -85,14 +85,14 @@ function install(trueEntry: any[][], opening: any[][] = [], corp: any[][] = [],
     // An EMPTY Private Equities tab still counts as a successful read. If this range is
     // missing the master sets peFailed and the register refuses to write at all — which is
     // itself correct behaviour and is asserted separately below.
-    [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`]: pe.length ? pe : [['Name', 'ISIN']],
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:N5000`]: pe.length ? pe : [['Name', 'ISIN']],
     // The AIF and Mutual Fund tabs are read on every master load too. Left ABSENT by default
     // (the stub throws "Unable to parse range", which the loader treats as a legitimate empty
     // answer) so every existing fixture behaves exactly as before; the asset-class fixture
     // below installs them explicitly.
-    [`${SCRIP_MASTER_SPREADSHEET_ID}::AIF!A1:J5000`]: aif.length ? aif : undefined,
-    [`${SCRIP_MASTER_SPREADSHEET_ID}::Mutual Fund!A1:J5000`]: mf.length ? mf : undefined,
-    [`${SCRIP_MASTER_SPREADSHEET_ID}::Bonds!A1:J5000`]: bond.length ? bond : undefined,
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::AIF!A1:N5000`]: aif.length ? aif : undefined,
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Mutual Fund!A1:N5000`]: mf.length ? mf : undefined,
+    [`${SCRIP_MASTER_SPREADSHEET_ID}::Bonds!A1:N5000`]: bond.length ? bond : undefined,
   };
   g.__firstTab = { [PORTFOLIO]: 'True Entry', [SCRIP_MASTER_SPREADSHEET_ID]: MASTER_TAB };
   g.__sheetTabs = { [PORTFOLIO]: ['True Entry', 'Opening Holdings', 'Corporate Actions'] };
@@ -133,6 +133,9 @@ const holdHas = (tab: any[][] | undefined, name: string): boolean =>
 
 const tabsWritten = (): string[] =>
   [...new Set((g.__updated || []).map((u: any) => (u.range || '').split('!')[0]))] as string[];
+
+/** "FY26-27" from 2026. The register's own `fyLabelOf` is module-private. */
+const fyLabelOfTest = (y: number) => `FY${String(y % 100).padStart(2, '0')}-${String((y + 1) % 100).padStart(2, '0')}`;
 
 const FY = 2025;                       // FY25-26: 1-Apr-2025 → 31-Mar-2026
 const FY_LABEL = 'FY25-26';
@@ -286,7 +289,7 @@ export async function run() {
   install(FIXTURE_A, OPENING_A);
   // A 500, not a missing tab. An absent Private Equities tab is a legitimate cacheable
   // answer (peFailed stays false); only a genuine read failure must block the write.
-  g.__failRange = { [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`]: true };
+  g.__failRange = { [`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:N5000`]: true };
   let refused = '';
   try { await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio'); }
   catch (e: any) { refused = e?.message || ''; }
@@ -671,7 +674,7 @@ export async function run() {
     install(FIXTURE_F);
     // The PE tab is stubbed empty by `install`; this fixture needs the company ON it, which is
     // what makes the name resolve to class PE rather than to an unknown listed scrip.
-    g.__ranges[`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:J5000`] =
+    g.__ranges[`${SCRIP_MASTER_SPREADSHEET_ID}::Private Equities!A1:N5000`] =
       [['Company', 'ISIN'], ['STRIDE VENTURES PRIVATE LIMITED', '']];
     invalidateScripCache(); invalidatePrivateEquityCache();
 
@@ -1417,6 +1420,172 @@ export async function run() {
     eq('M: both banner rows are merged', reqs.filter((r: any) => r.mergeCells).length, 2);
     eq('M: ...each unmerged first, so a re-run cannot reject the whole batch',
       reqs.filter((r: any) => r.unmergeCells).length, 2);
+  }
+
+  // ── Fixture N: AN UNLISTED COMPANY THAT LATER LISTS ───────────────────────────────────
+  //
+  // Reported 21-Sep-2026. Until then the remedy for a company that listed was to DELETE its
+  // row from the Private Equities tab and add it to the listed master. `assetClass` is read as
+  // current state by every engine, so that quietly rewrote every year already filed: the
+  // company vanished off the `Unlisted Equity Shares` schedule, its holding moved to the equity
+  // tab, its gains moved to the listed capital-gains tab, and — the one that costs money — its
+  // long-term threshold dropped from 730 days to 365, turning a filed SHORT-term gain into a
+  // LONG-term one with nothing on any tab to show it had happened.
+  //
+  // The row now STAYS on the tab and carries a `Listed From` date instead.
+  //
+  // One company, deliberately arranged so the right and wrong answers are DISJOINT: NEXUS is
+  // held from 1-Jun-2024 and sold 1-Mar-2026, which is 638 days — comfortably inside the gap
+  // between the listed threshold (365) and the unlisted one (730). Filed as an unlisted company
+  // that is SHORT term; read as a listed one it is LONG term. No overlap, so neither reading
+  // can pass for the other.
+  {
+    const PE_HDR_N = ['Company', 'ISIN', 'PAN', 'Face Value', 'Type Of Company', 'Listed From'];
+    const peRowsN = (listedFrom: any) => [
+      PE_HDR_N,
+      ['NEXUS UNLISTED PVT LTD', 'INE710A01010', 'AAECN1234F', 10, 'Domestic', listedFrom],
+    ];
+    const OPENING_N: any[][] = [
+      ['Security', 'ISIN', 'Acquisition Date', 'Quantity', 'Cost Per Share', 'Total Cost', '', ''],
+      ['NEXUS UNLISTED PVT LTD', 'INE710A01010', serial(2024, 6, 1), 1000, 100, 100000, '', ''],
+    ];
+    // One sale, well after the FY opens, 638 days after the lot was acquired.
+    const LEDGER_N: any[][] = [
+      TE_HEADER,
+      te([2026, 3, 1], 'NEXUS UNLISTED PVT LTD', 'INE710A01010', 'Sell', 400, 150),
+    ];
+
+    const PE_CG = `Private Equity Capital Gains for ${FY_LABEL}`;
+    const ITR_N = `Unlisted Equity Shares for ${FY_LABEL}`;
+    const EQ_HOLD = `Holding Equity+Intraday as on 31st March ${FY + 1}`;
+    const PE_HOLD = `Holding Private Equity Only as on 31st March ${FY + 1}`;
+
+    const snap = () => ({
+      cgPe: JSON.stringify(written(PE_CG) || null),
+      cgListed: JSON.stringify(written(CG_TAB) || null),
+      itr: JSON.stringify(written(ITR_N) || null),
+      holdPe: JSON.stringify(written(PE_HOLD) || null),
+      holdEq: JSON.stringify(written(EQ_HOLD) || null),
+    });
+    // Grand-total P/L off whichever capital-gains tab the block landed on.
+    const pl = (tab: any[][] | undefined) => {
+      const col = (h: string) => { for (const r of tab || []) { const i = r.indexOf(h); if (i >= 0) return i; } return -1; };
+      const g2 = (tab || []).find(r => String(r[1] ?? '') === 'GRAND TOTAL');
+      const n = (v: any) => (typeof v === 'number' ? v : 0);
+      return { st: n(g2?.[col('Short term')]), lt: n(g2?.[col('Long term')]) };
+    };
+
+    // ── N1. STILL UNLISTED — the baseline every later run is compared against ────────────
+    install(LEDGER_N, OPENING_N, [], [], [], [], peRowsN(''));
+    const resA = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const A = snap();
+    eq('N1: an unlisted sale at 638 days is SHORT term', pl(written(PE_CG)), { st: 20000, lt: 0 });
+    ok('N1: ...on the PRIVATE EQUITY gains tab', !!written(PE_CG));
+    ok('N1: ...and on the unlisted-shares schedule', (written(ITR_N) || []).some(r => /NEXUS/.test(String(r))));
+    ok('N1: ...and on the PE holding tab', holdHas(written(PE_HOLD), 'NEXUS UNLISTED PVT LTD'));
+    eq('N1: nothing to report — it has not listed', resA.listedDuringFy, []);
+
+    // ── N2. THE WHOLE POINT: a listing in a LATER year cannot touch this one ─────────────
+    // `Listed From` is 1-Sep-2030, years after this FY closes. Deliberately far future rather
+    // than merely "after the FY": it keeps the run independent of the wall clock, so the
+    // company is unlisted TODAY in both runs and the two are comparable byte for byte.
+    install(LEDGER_N, OPENING_N, [], [], [], [], peRowsN(serial(2030, 9, 1)));
+    const resB = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const B = snap();
+    eq('N2: the PE capital-gains tab is IDENTICAL', B.cgPe, A.cgPe);
+    eq('N2: the ITR unlisted schedule is IDENTICAL', B.itr, A.itr);
+    eq('N2: the PE holding statement is IDENTICAL', B.holdPe, A.holdPe);
+    eq('N2: the equity holding statement is IDENTICAL', B.holdEq, A.holdEq);
+    eq('N2: the listed capital-gains tab is IDENTICAL', B.cgListed, A.cgListed);
+    eq('N2: ...and this FY reports no listing', resB.listedDuringFy, []);
+
+    // ── N3. THE OLD REMEDY, for contrast — the row deleted off the tab ──────────────────
+    // This is what the app used to advise, and it is the reason the column exists. The
+    // assertions below are the SAME year, the SAME ledger, and every one of them differs.
+    install(LEDGER_N, OPENING_N, [], [], [], [], []);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    eq('N3: deleting the row refiles the gain as LONG term', pl(written(CG_TAB)), { st: 0, lt: 20000 });
+    ok('N3: ...off the private-equity gains tab entirely', !written(PE_CG));
+    ok('N3: ...off the unlisted-shares schedule', !(written(ITR_N) || []).some(r => /NEXUS/.test(String(r))));
+    ok('N3: ...and onto the equity holding tab', holdHas(written(EQ_HOLD), 'NEXUS UNLISTED PVT LTD'));
+
+    // ── N4. THE TRANSITION YEAR — two sales, one threshold each ─────────────────────────
+    // Listed 1-Nov-2025, inside this FY. The pre-listing sale is an off-market transfer of an
+    // unlisted share (730 days); the post-listing one is a transfer of a listed share (365),
+    // and the holding period runs unbroken through the listing — the lot is still the one
+    // acquired on 1-Jun-2024, because listing is not a reacquisition.
+    //
+    //   1-Oct-2025  200 @ 140   487 days   unlisted -> 730 -> SHORT   gain  8,000
+    //   1-Mar-2026  400 @ 150   638 days   listed   -> 365 -> LONG    gain 20,000
+    //
+    // A single undated answer cannot produce this pair: it yields either 28,000 short or
+    // 28,000 long. Both figures appear nowhere below.
+    const LEDGER_N4: any[][] = [
+      TE_HEADER,
+      te([2025, 10, 1], 'NEXUS UNLISTED PVT LTD', 'INE710A01010', 'Sell', 200, 140),
+      te([2026, 3, 1], 'NEXUS UNLISTED PVT LTD', 'INE710A01010', 'Sell', 400, 150),
+    ];
+    install(LEDGER_N4, OPENING_N, [], [], [], [], peRowsN(serial(2025, 11, 1)));
+    const resD = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+
+    eq('N4: the two sales are split 8,000 SHORT / 20,000 LONG by their OWN dates',
+      pl(written(PE_CG)), { st: 8000, lt: 20000 });
+    ok('N4: the block is NOT halved across two tabs', !written(CG_TAB)
+      || !(written(CG_TAB) || []).some(r => /NEXUS/.test(String(r))));
+
+    // The block is the atom, so the whole year sits on the tab the YEAR belongs to.
+    ok('N4: the year sits on the unlisted gains tab (unlisted at some point in it)', !!written(PE_CG));
+    // ...and the mid-year boundary is disclosed IN the section, because the tab heading is
+    // annual and this fact is not. A preparer splitting s.112A from off-market needs the date.
+    // dd.mm.yyyy - the register's own `fmtDate`, which uses DOTS. Not `formatDMY`'s slashes:
+    // that one is the on-screen convention and these tabs are written, not rendered.
+    ok('N4: ...with a LISTED FROM note beside the trades it separates',
+      (written(PE_CG) || []).some(r => /LISTED FROM 01\.11\.2025/.test(String(r))));
+
+    // A holding statement states ONE date, so at 31-March this is listed equity - even though
+    // its gains for the same year are on the unlisted tab. The two answer different questions.
+    ok('N4: at 31-March it is on the EQUITY holding tab', holdHas(written(EQ_HOLD), 'NEXUS UNLISTED PVT LTD'));
+    ok('N4: ...and not on the PE holding tab', !holdHas(written(PE_HOLD), 'NEXUS UNLISTED PVT LTD'));
+
+    // "held at any time during the previous year" is the schedule's own test, and it was
+    // unlisted for seven months of this one. Owner's decision 21-Sep-2026: the REAL closing
+    // balance, not a blank - a zero closing would read as a disposal.
+    const itrN = written(ITR_N);
+    const hiN = (itrN || []).findIndex(r => (r[1] || '').toString().trim() === 'Name of company');
+    const cN = (h: string) => ((itrN || [])[hiN] || []).findIndex((c: any) => (c || '').toString().trim() === h);
+    const rowN = (itrN || []).slice(hiN + 1).find(r => /NEXUS/.test(String(r[cN('Name of company')])));
+    ok('N4: it is STILL on the unlisted-shares schedule in its listing year', !!rowN);
+    eq('N4: ...carrying its real closing balance, not a blank',
+      rowN?.[cN('Closing balance - No. of shares')], 400);
+
+    ok('N4: the register NAMES the company that listed this year',
+      (resD.listedDuringFy || []).some(n => /NEXUS/.test(n)), JSON.stringify(resD.listedDuringFy));
+
+    // ── N5. The year AFTER listing is an ordinary listed year, with nothing hand-excluded ─
+    // Same company, same opening lot, run for the FY that opens after the listing. `Listed
+    // From` is now at or before FY start, so every dated question answers "listed" by itself.
+    //
+    // The FY26-27 sale is placed to keep the two readings DISJOINT here too: 1-Jun-2024 to
+    // 1-May-2026 is 699 days, which is past the listed threshold (365) and short of the
+    // unlisted one (730). Filed correctly it is LONG term on the listed tab; read as still
+    // unlisted it would be SHORT term on a private-equity tab that should no longer exist.
+    const LEDGER_N5: any[][] = [
+      ...LEDGER_N4,
+      te([2026, 5, 1], 'NEXUS UNLISTED PVT LTD', 'INE710A01010', 'Sell', 100, 200),
+    ];
+    install(LEDGER_N5, OPENING_N, [], [], [], [], peRowsN(serial(2025, 11, 1)));
+    const resE = await generateTrxRegister(PORTFOLIO, FY + 1, 'Test Portfolio');
+    const NEXT = fyLabelOfTest(FY + 1);
+
+    eq('N5: the post-listing sale is LONG term at 699 days, on the LISTED gains tab',
+      pl(written(`Capital Gains for ${NEXT}`)), { st: 0, lt: 10000 });
+    ok('N5: ...and no private-equity gains tab is written that year at all',
+      !written(`Private Equity Capital Gains for ${NEXT}`));
+    ok('N5: gone from the unlisted schedule the following year',
+      !(written(`Unlisted Equity Shares for ${NEXT}`) || []).some(r => /NEXUS/.test(String(r))));
+    ok('N5: ...and off the PE holding tab',
+      !holdHas(written(`Holding Private Equity Only as on 31st March ${FY + 2}`), 'NEXUS UNLISTED PVT LTD'));
+    eq('N5: ...and that year reports no listing of its own', resE.listedDuringFy, []);
   }
 
   // ── report ────────────────────────────────────────────────────────────────

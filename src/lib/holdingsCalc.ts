@@ -1529,7 +1529,10 @@ export async function syncCapitalGains(spreadsheetId: string): Promise<CapitalGa
         // rather than pick one. `>= null` would compile and coerce to `>= 0`, filing every one
         // of them as LONG TERM with a green build - there is no strictNullChecks here to catch
         // it, which is exactly why this is an explicit guard and not a type error.
-        const ltDays = ltDaysFor(master, sell.isin, sell.stockName);
+        // The TRANSFER date, for the reason spelled out at the register's own call site: a
+        // company that has since listed must not retroactively turn every past unlisted sale
+        // into a 365-day one. Same figure, two engines — they have to agree.
+        const ltDays = ltDaysFor(master, sell.isin, sell.stockName, sell.dateObj.getTime());
         if (ltDays === null) {
           unclassified.push({ name: sell.stockName, isin: sell.isin, qty: matchQty, date: fmtDate(sell.dateObj) });
           lot.remaining -= matchQty; sellLeft -= matchQty;   // the FIFO still consumes the lot

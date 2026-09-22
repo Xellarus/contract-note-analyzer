@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ScripMaster } from '../lib/scripMaster';
+import { ScripMaster, classOfEntryAsOf } from '../lib/scripMaster';
 import { ASSET_CLASSES } from '../lib/privateEquities';
 
 interface Props {
@@ -39,13 +39,18 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
     const out: { name: string; tag: string }[] = [];
     const seen = new Set<string>();
     for (const e of master.entries) {
-      if (peOnly && !e.assetClass) continue;
+      // The class AS IT IS NOW, not as it ever was. A company that has listed keeps its
+      // unlisted history on the master (that is what reproduces a filed year), but it must
+      // not still be offered in the unlisted-only picker or badged "PE" beside its own
+      // exchange ticker — on this screen the question really is "what is it today".
+      const cls = classOfEntryAsOf(e, Date.now());
+      if (peOnly && !cls) continue;
       const name = (e.canonicalName || '').trim();
       if (!name || seen.has(name)) continue;
       // An UNLISTED company has no ticker to be searched by; matching it on one would only ever
       // be a contradictory leftover on its master entry. It gets its ISIN instead, which is what
       // the Private Equities tab now keys on and the only identifier it really has.
-      const hay = (e.assetClass
+      const hay = (cls
         ? `${name} ${e.isin || ''}`
         : `${name} ${e.nse || ''} ${e.bse || ''}`).toLowerCase();
       // An unlisted company has no ticker to show, so it is tagged as what it is.
@@ -54,7 +59,7 @@ export default function ScripCombobox({ value, onChange, master, placeholder, cl
       // from is the thing the user needs to see.
       if (hay.includes(term)) {
         seen.add(name);
-        out.push({ name, tag: e.assetClass ? ASSET_CLASSES[e.assetClass].badge : (e.nse || e.bse || '') });
+        out.push({ name, tag: cls ? ASSET_CLASSES[cls].badge : (e.nse || e.bse || '') });
       }
       // The scan cap exists for the LISTED universe — 5,000 entries, where stopping early is
       // the difference between a typeahead and a stall. It must NOT apply to the non-listed

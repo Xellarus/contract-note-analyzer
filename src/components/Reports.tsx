@@ -3,7 +3,7 @@ import { FileBarChart2, ArrowLeft, ArrowRight, Loader2, AlertCircle, Briefcase, 
 import { gapi } from 'gapi-script';
 import { computeHoldingsAsOf, HistoricalHolding } from '../lib/holdingsCalc';
 import { PORTFOLIOS, Portfolio } from '../lib/portfolios';
-import { normName, loadScripMaster, lookupScrip, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { normName, loadScripMaster, lookupScrip, classOfEntryAsOf, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { formatDMY, formatDMMMY, isDateHeader, isDateInputSane, DATE_INPUT_MIN } from '../lib/dates';
 import { loadOpeningHoldings } from '../lib/openingHoldings';
@@ -95,11 +95,20 @@ const SCOPE_NOTE: Record<ReportScope, string> = {
  * master still matches the rows written under its old name at import time.
  */
 interface PeMembership { names: Set<string>; isins: Set<string>; }
-const buildPeMembership = (master: ScripMaster, cls: AssetClassId): PeMembership => {
+/**
+ * `ts` is the date the SCOPE is asked about, and it is not decoration: a company that has
+ * since listed carries its unlisted class on the master forever (with a `Listed From` date),
+ * so asking undated would drop it out of a Private Equity holding report run as of a date
+ * when it genuinely was unlisted — which is the whole reason that report exists.
+ *
+ * Holding reports pass their own As-on; period reports pass the START of the period, matching
+ * the register's "unlisted at any time in the year" rule so the two never disagree.
+ */
+const buildPeMembership = (master: ScripMaster, cls: AssetClassId, ts: number): PeMembership => {
   const names = new Set<string>();
   const isins = new Set<string>();
   for (const e of master.entries) {
-    if (e.assetClass !== cls) continue;
+    if (classOfEntryAsOf(e, ts) !== cls) continue;
     for (const a of e.aliasNorms) names.add(a);
     if (e.isin) isins.add(e.isin.trim().toUpperCase());
   }
@@ -383,9 +392,16 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
         // every class; a class scope uses just its own. Without the union an Equity report would
         // exclude only private equity and quietly keep the AIF and mutual-fund rows.
         const scopeCls = SCOPE_CLASS[scope];
+        // A holding report is a SNAPSHOT, so it is scoped as at its own As-on date. Everything
+        // else covers a PERIOD, and is scoped as at the period's start — "was this unlisted at
+        // any point in what I am reporting on?". An empty From means inception, i.e. 0, under
+        // which every company that ever listed still counts as unlisted for part of the span.
+        const scopeTs = reportType === 'holding'
+          ? new Date(`${asOf}T23:59:59`).getTime()
+          : (fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : 0);
         const mem = scopeCls
-          ? buildPeMembership(master, scopeCls)
-          : ASSET_CLASS_IDS.map(id => buildPeMembership(master, id)).reduce((a, b) => ({
+          ? buildPeMembership(master, scopeCls, scopeTs)
+          : ASSET_CLASS_IDS.map(id => buildPeMembership(master, id, scopeTs)).reduce((a, b) => ({
               names: new Set([...a.names, ...b.names]),
               isins: new Set([...a.isins, ...b.isins]),
             }));
@@ -418,7 +434,10 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             if (!pe && nk && !known.has(nk)) {
               const e = lookupScrip(master!, isin, name).entry;
               // Match the set that was built: one class for a class scope, any class for 'eq'.
-              if (e) pe = scopeCls ? e.assetClass === scopeCls : !!e.assetClass;
+              // Through the same dated test the membership sets were built with, or a name
+              // that only `lookupScrip` can resolve would be classified on today's answer
+              // while every name the sets already hold was classified on the report's date.
+              if (e) { const c = classOfEntryAsOf(e, scopeTs); pe = scopeCls ? c === scopeCls : !!c; }
               else unknownNames.add(nk);   // in no master entry at all → treated as listed
             }
             memo.set(key, pe);

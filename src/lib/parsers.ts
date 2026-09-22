@@ -127,12 +127,29 @@ export const mergeResults = (results: ContractNoteResult[]): ContractNoteResult 
   } else if (recs.length > 1) {
     const bad = recs.filter((r) => !r.isValid);
     const first = bad[0] || recs[0];
+    // EVERY numeric field is summed and every flag is OR-ed across the batch (22-Sep-2026).
+    // `...first` used to carry the obligation figures from ONE file while Sells, Buys and
+    // Charges were summed across all of them, so the card showed two scopes side by side
+    // under labels asserting a relationship between them: a row captioned
+    // "(Sells - Buys)" sat directly beneath a Sells and a Buys it was not the difference of.
+    // Reported on a 16-file batch reading Rs 78,45,000.00 against a real Sells - Buys of
+    // Rs 1,13,491.64.
+    //
+    // OR-ing the flags matters just as much: taking them from `first` hid a fractional
+    // quantity in file 7 behind an STT mismatch in file 1, and the flags are what drive the
+    // message the owner actually reads.
     reconciliation = {
       ...first,
       isValid: bad.length === 0,
       totalBuys: recs.reduce((a, r) => a + r.totalBuys, 0),
       totalSells: recs.reduce((a, r) => a + r.totalSells, 0),
       totalCharges: recs.reduce((a, r) => a + r.totalCharges, 0),
+      calculatedObligation: recs.reduce((a, r) => a + r.calculatedObligation, 0),
+      extractedObligation: recs.reduce((a, r) => a + r.extractedObligation, 0),
+      isSuspiciousStt: recs.some((r) => r.isSuspiciousStt),
+      isSttMismatch: recs.some((r) => r.isSttMismatch),
+      isFractionalQuantity: recs.some((r) => r.isFractionalQuantity),
+      isObligationMismatch: recs.some((r) => r.isObligationMismatch),
       statusText: bad.length === 0 ? 'PASSED' : first.statusText,
       notes: bad.length === 0
         ? `${recs.length} file(s) each passed their own audit.`

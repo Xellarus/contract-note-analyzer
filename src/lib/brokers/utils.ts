@@ -283,9 +283,6 @@ export const calculateReconciliation = (summary: Summary, trades: Trade[]): Reco
     summary.ipf + 
     summary.gst;
 
-  const calculatedNet = calculatedObligation - totalCharges;
-  const extractedNet = summary.netSettlement;
-  const difference = Math.abs(calculatedNet - extractedNet);
   const totalTurnover = totalBuys + totalSells;
   const isSuspiciousStt = summary.stt < 10 && totalTurnover > 100000;
   
@@ -325,8 +322,32 @@ export const calculateReconciliation = (summary: Summary, trades: Trade[]): Reco
   );
   const isObligationMismatch = hasPrintedObligation && obligationGap > totalCharges + 1.0;
 
+  // REMOVED 22-Sep-2026, on the owner's instruction: the net-settlement test
+  // (`|calculatedObligation - totalCharges - summary.netSettlement| <= 0.10`) and every
+  // figure it produced - `calculatedNet`, `extractedNet`, `difference` - together with the
+  // A/B/C/D "audit trail" panel that displayed them.
+  //
+  // It was not measuring what it claimed. Two independent defects:
+  //
+  //  1. It DEGENERATES when the note prints no net settlement. `difference` is
+  //     `|calculatedNet - extractedNet|`, so with `extractedNet` at 0 it collapses to
+  //     `|calculatedNet|` - the note's own net settlement, compared against a number that
+  //     was never extracted. Not a disagreement between two independently derived figures,
+  //     which is the only thing that would make it evidence of anything. Reported on a
+  //     16-note batch where it read a "discrepancy" of Rs 78,24,133.96 while the same note's
+  //     obligation lines (A vs B) were Rs 14,400 apart - brokerage-sized, i.e. fine.
+  //
+  //  2. It RECOMPUTES FROM THE SAME CELLS it is auditing, so a misparse that is internally
+  //     self-consistent sails through. That is not a hypothetical: a Nuvama V3 buy of
+  //     10,000 at 292.6125 read as a sell of 292.9051 at 1.00 agreed with itself to the
+  //     paise (292.91 - 6,488.14 = -6,195.23) and PASSED while every figure on screen was
+  //     wrong. `isObligationMismatch` below is what caught it, by comparing against a
+  //     different part of the page.
+  //
+  // What survives is exactly the checks that compare against an INDEPENDENT source: the
+  // note's own printed obligation, the impossibility of a fractional share, and the two STT
+  // tests. Those still gate the import.
   const isValid =
-    difference <= 0.10 &&
     !isSuspiciousStt &&
     !isSttMismatch &&
     !isFractionalQuantity &&
@@ -339,9 +360,6 @@ export const calculateReconciliation = (summary: Summary, trades: Trade[]): Reco
     calculatedObligation: Math.round(calculatedObligation * 100) / 100,
     extractedObligation: summary.payinObligation,
     totalCharges: Math.round(totalCharges * 100) / 100,
-    calculatedNet: Math.round(calculatedNet * 100) / 100,
-    extractedNet,
-    difference: Math.round(difference * 100) / 100,
     // Most specific cause first - "Parser uncertain" tells you nothing actionable.
     statusText: isFractionalQuantity
       ? 'Fractional quantity'
@@ -349,6 +367,9 @@ export const calculateReconciliation = (summary: Summary, trades: Trade[]): Reco
         ? 'Obligation mismatch'
         : isSuspiciousStt
           ? 'Suspicious STT'
+          // Reached only for an STT MISMATCH now that the net-settlement test is gone -
+          // it is the one surviving failure with no name of its own in this union. The
+          // banner reads `isSttMismatch` directly and says so properly.
           : (isValid ? 'PASSED' : 'Parser uncertain'),
     isSuspiciousStt,
     isSttMismatch,
