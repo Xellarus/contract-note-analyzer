@@ -13,7 +13,7 @@ import { gapi } from "gapi-script";
 import { persistGoogleToken, hasValidGoogleToken } from '../lib/googleAuth';
 import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedScrip } from '../lib/holdingsCalc';
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
-import { loadScripMaster, lookupScrip, normName, isPeScrip, assetClassOf, peEntry, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { loadScripMaster, lookupScrip, normName, normNamePrivate, listedFromTs, isPeScrip, assetClassOf, peEntry, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { PRIVATE_EQUITIES_TAB, ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { setPrivateEquityCmp } from '../lib/privateEquityWrite';
 import { loadScripPrices, invalidatePriceCache, ScripPrice, PriceSource } from '../lib/scripPrices';
@@ -352,6 +352,8 @@ export default function Holdings({
   };
   // Current-price snapshot (from the screener.in import) — values holdings live-ish.
   const [priceRows, setPriceRows] = useState<ScripPrice[]>([]);
+  /** When the master was last read, so the visibility refresh below cannot spend a read per flick. */
+  const scripReadAt = useRef(0);
   // Both reads need a LIVE Google token, and the saved token is restored ASYNCHRONOUSLY after
   // mount. Firing once on mount therefore raced the auth and usually lost: loadScripPrices
   // swallows its error and returns [], so priceRows stayed EMPTY for the whole session — every
@@ -362,6 +364,7 @@ export default function Holdings({
     const run = () => {
       if (loaded || !hasAuthorizedGoogle()) return false;
       loaded = true;
+      scripReadAt.current = Date.now();
       loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID).then(setScrip).catch(() => {});
       loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).then(setPriceRows).catch(() => {});
       return true;
@@ -373,6 +376,38 @@ export default function Holdings({
       if (run() || tries >= 30) window.clearInterval(id);
     }, 1000);
     return () => window.clearInterval(id);
+  }, []);
+
+  /**
+   * Pick the sheet back up when the tab is brought to the front.
+   *
+   * The owner's workflow is literally "edit the scrip master, then look at the app", and the
+   * effect above reads that master ONCE, unforced, and keeps it for the life of the page. So a
+   * `Listed From` date typed onto the Private Equities tab changed NOTHING on screen until a
+   * full browser reload: the company kept its PE badge, its 730-day holding period and its
+   * hand-entered valuation, and nothing said the sheet had moved on. Reported 22-Sep-2026 for
+   * Kusumgar and ESDS, both of which had genuinely IPO'd and were still badged PE afterwards.
+   *
+   * `refreshScripAfterSave` covers the save path and `rebuildHolding` / the CMP write force
+   * their own reads, but an edit made in ANOTHER TAB has no event in this app at all. Coming
+   * back to the front is that event, and it is exactly the moment the edit finished.
+   *
+   * RATE-LIMITED to once a minute, and that is the whole reason this is safe: it is ONE batched
+   * read of ONE spreadsheet, not the 13-portfolio fan-out the read-quota rule is about, but
+   * flicking between tabs must not spend a read per flick. The prices tab rides along because
+   * it goes stale the same way — a company that has just listed has no fetched price until the
+   * feed catches up, and until then it shows at its old unlisted valuation.
+   */
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden || !hasAuthorizedGoogle()) return;
+      if (Date.now() - scripReadAt.current < 60_000) return;
+      scripReadAt.current = Date.now();
+      loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID, { force: true }).then(setScrip).catch(() => {});
+      loadScripPrices(SCRIP_MASTER_SPREADSHEET_ID).then(setPriceRows).catch(() => {});
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   // On-demand market-price refresh (Yahoo, via the Apps Script web app), then re-value.
@@ -2778,6 +2813,40 @@ export default function Holdings({
   // trade is NOT at cost, and counting it as such would make the "enter a valuation" prompt
   // nag about companies that already have a defensible price.
   const peAtCost = peHoldings.filter(h => !((h.peValuation ?? 0) > 0) && !((h.lastTradePrice ?? 0) > 0)).length;
+
+  /**
+   * Holdings whose company has SINCE LISTED, still sitting under their pre-listing name.
+   *
+   * The grid reads the `Holding` tab, which is rewritten ONLY by an explicit Rebuild, while the
+   * class badge beside each row is computed LIVE from the scrip master. So the moment a
+   * `Listed From` date is entered the two legitimately disagree: the row still carries the
+   * pre-listing name and the position as at that rebuild, and it moves from the Private Equity
+   * segment to Equity showing a figure that looks stale — because it is. Reported 22-Sep-2026
+   * as a wrong quantity on Kusumgar and ESDS, both of which had in fact IPO'd.
+   *
+   * The test is `normNamePrivate`: the ledger row keeps the "pvt" token that the listed
+   * company's canonical name does not, which is exactly the pair `normName` collapses and the
+   * whole reason these two spellings share ONE entry. A row already spelled like the listed
+   * company does not look stale and needs no note.
+   */
+  const listedSinceRebuild = useMemo(() => {
+    const out: { name: string; canonical: string; listedOn: string }[] = [];
+    if (!scrip) return out;
+    const now = Date.now();
+    const seen = new Set<string>();
+    for (const h of displayHoldings) {
+      const e = lookupScrip(scrip, h.isin, h.name).entry;
+      if (!e || !e.listedFrom) continue;
+      // Infinity (an unreadable date) fails this, which is the conservative side: a garbled
+      // cell must not claim a company has listed.
+      if (!(listedFromTs(e) <= now)) continue;
+      if (normNamePrivate(h.name) === normNamePrivate(e.canonicalName)) continue;
+      if (seen.has(e.key)) continue;
+      seen.add(e.key);
+      out.push({ name: h.name, canonical: e.canonicalName, listedOn: e.listedFrom });
+    }
+    return out;
+  }, [scrip, displayHoldings]);
 
   /** Every non-listed class id, for the "is this listed" test. */
   const NON_LISTED = new Set<string>(ASSET_CLASS_IDS);
@@ -5380,6 +5449,31 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                     ); })()}
                   </div>
                   </>
+                )}
+
+                {/* A row that predates its company's LISTING. NOT a wrong quantity: the Holding
+                    tab is rewritten only by Rebuild, so it still carries the pre-listing name and
+                    the position as at that rebuild, while the badge beside it is computed live
+                    from the master. Saying so is the difference between "the app is wrong" and
+                    "press Rebuild" — reported 22-Sep-2026 on Kusumgar and ESDS, both of which
+                    had IPO'd. */}
+                {activePortfolio !== 'local' && listedSinceRebuild.length > 0 && (
+                  <div className="px-4 py-2.5 border-t border-slate-200 text-[11px] text-slate-500">
+                    <p>
+                      <strong className="text-slate-700">{listedSinceRebuild.length}</strong>{' '}
+                      {listedSinceRebuild.length === 1 ? 'holding predates' : 'holdings predate'} a listing:{' '}
+                      {listedSinceRebuild.map((r, i) => (
+                        <span key={r.canonical}>
+                          {i > 0 && ', '}
+                          <strong className="text-slate-700">{r.name}</strong> → {r.canonical}{' '}
+                          (listed {formatDMY(r.listedOn)})
+                        </span>
+                      ))}
+                      . The name and quantity shown are as at the last Rebuild — press{' '}
+                      <strong className="text-slate-700">Rebuild</strong> to fold them into the listed
+                      company. Years already filed are unaffected: they are still reported unlisted.
+                    </p>
+                  </div>
                 )}
 
                 {/* Notes under the grid. Which one applies depends on the segment: the point is

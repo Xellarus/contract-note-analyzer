@@ -574,5 +574,100 @@ eq('isin-row: ...at 730 days', ltDaysFor(master, '', 'Goodluck India Pvt Ltd'), 
     classOfEntryAsOf({ assetClass: 'PE', listedFrom: '10-11-2025' } as any, at(2030, 1, 1)), 'PE');
 }
 
+// ── THE OWNER'S REAL IPO PAIR, AND WHY THE TWIN MUST NOT COME BACK ────────────────────────
+//
+// These are the actual rows off the owner's sheet on 22-Sep-2026, and they exist because the
+// twin mechanism above was built on 16-Sep-2026 from a WRONG PREMISE. It was reported then as
+// *"kusumgar ltd and pvt ltd showing transaction in same PE"* and read as two companies sharing
+// one normalised name; it is now confirmed to be ONE company that IPO'd — BSE 544821, a
+// 2025-26 listing-series scrip code, with the unlisted row dated 15-Jul-2026. ESDS is the same
+// shape, listed 04-Sep-2026 on 544898.
+//
+// So the twin is exactly the WRONG answer for these two: it would cut each company's history in
+// half at its own IPO — pre-listing lots under "… Pvt Ltd", post-listing trades under the
+// ticker entry, two positions, two cost bases, and the continuous holding period that s.2(42A)
+// grants destroyed. `Listed From` is what supersedes it, and this fixture is here so that a
+// future reading of the Kusumgar rule cannot quietly re-split them.
+//
+// The twin logic itself stays: `Cranex` (no discriminating token) and `Acme Foods` above are
+// still real, and a genuine two-company collision is still possible. What is asserted here is
+// only that a LISTING DATE wins over it.
+{
+  const MAIN3 = [
+    ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name'],
+    ['INE0ISX01025', 'Kusumgar Limited', '544821', 'KUSUMGAR', ''],
+    ['INE0DRI01029', 'ESDS Software Solution Ltd.', '544898', 'ESDS', ''],
+  ];
+  // The owner's own column ORDER, which is not the one the app writes - the reader is
+  // header-aware precisely so a hand-maintained tab can differ. "Company PAN" and
+  // "Face Value" both sit ahead of the company/valuation tests for the reasons in
+  // detectPeColumns; a regression in either would make every row's identity a PAN or price
+  // every holding at its face value, so reading this exact header back is the point.
+  const PE3 = [
+    ['Company', 'Drive Link', 'ISIN', 'Valuation', 'Company PAN', 'Face Value', 'Type Of Company', 'Listed From'],
+    ['Kusumgar Pvt Ltd', '', '', 383.25, 'AAACK2030M', 1, 'Domestic', '2026-07-15'],
+    ['ESDS SOFTWARE SOLUTION PVT LTD', 'https://drive.google.com/x', '', 225, 'AABCE4981A', 10, 'Domestic', '2026-09-04'],
+  ];
+
+  invalidateScripCache();
+  const { invalidatePrivateEquityCache: inv3 } = await import('./src/lib/privateEquities');
+  inv3();
+  g.__ranges = { [MAIN_RANGE]: MAIN3, [PE_RANGE]: PE3 };
+  const m3 = await loadScripMaster('SHEET3');
+  const at = (y: number, mo: number, d: number) => new Date(y, mo - 1, d).getTime();
+
+  for (const [pvt, ltd, isin, on] of [
+    ['Kusumgar Pvt Ltd', 'Kusumgar Limited', 'INE0ISX01025', at(2026, 7, 15)],
+    ['ESDS SOFTWARE SOLUTION PVT LTD', 'ESDS Software Solution Ltd.', 'INE0DRI01029', at(2026, 9, 4)],
+  ] as [string, string, string, number][]) {
+    const tag = ltd.split(' ')[0].toLowerCase();
+    const e = lookupScrip(m3, '', pvt).entry!;
+
+    // ONE company. Two entries here is the bug this fixture exists to prevent.
+    eq(`ipo(${tag}): no twin is minted`,
+      m3.entries.filter(x => new RegExp(tag, 'i').test(x.canonicalName)).length, 1);
+    // The KEY is what every engine buckets holdings, FIFO lots and gains by. Two keys is two
+    // positions on screen and on every filed tab, whatever the entries say.
+    eq(`ipo(${tag}): both spellings are ONE bucket`,
+      lookupScrip(m3, '', pvt).entry?.key, lookupScrip(m3, '', ltd).entry?.key);
+    eq(`ipo(${tag}): ...keyed by the LISTED isin`, e.key, isin);
+    eq(`ipo(${tag}): ...and not reported as a dropped class`,
+      m3.classSkippedByTicker.some(x => new RegExp(tag, 'i').test(x.name)), false);
+
+    // The unlisted years are RECORDED, not erased - that is the whole point of the column.
+    eq(`ipo(${tag}): the unlisted class survives the listing`, e.assetClass, 'PE');
+    eq(`ipo(${tag}): the ticker survives too`, !!(e.nse && e.bse), true);
+    // Once it trades the feed must fetch it, or a listed holding sits frozen at the last
+    // hand-entered valuation with nothing on screen to say why.
+    eq(`ipo(${tag}): ...and it is no longer held back from the price feed`, !!e.priceExcept, false);
+
+    // s.2(42A) tests the asset at the time of TRANSFER, so this turns on the sale date alone.
+    eq(`ipo(${tag}): a sale the day before the IPO is judged at 730 days`,
+      ltDaysFor(m3, '', pvt, on - 864e5), 730);
+    eq(`ipo(${tag}): a sale the day after at 365`,
+      ltDaysFor(m3, '', pvt, on + 864e5), 365);
+    eq(`ipo(${tag}): unlisted the day before, listed ON the day`,
+      [classAsOf(m3, '', pvt, on - 864e5), classAsOf(m3, '', pvt, on)], ['PE', undefined]);
+
+    // THE OWNER'S STATED FEAR, pinned directly: regenerating a filed year must not move the
+    // company off the schedule it was filed on. FY26 closed 31-Mar-2026, months before either
+    // IPO, so both are still unlisted there - while FY27's own year-end sees them listed.
+    eq(`ipo(${tag}): FY26 still files it UNLISTED`, classAsOf(m3, '', pvt, at(2026, 3, 31)), 'PE');
+    eq(`ipo(${tag}): FY27 gains still sit on the unlisted tab`, classAsOf(m3, '', pvt, at(2026, 4, 1)), 'PE');
+    eq(`ipo(${tag}): ...while the FY27 year-end holding is listed equity`,
+      classAsOf(m3, '', pvt, at(2027, 3, 31)), undefined);
+  }
+
+  // The owner's real header, read back. A drift in detectPeColumns here is silent on the tab.
+  eq('ipo: the owner\'s own column order still reads',
+    [peEntry(m3, '', 'Kusumgar Pvt Ltd')?.peValuation,
+     peEntry(m3, '', 'ESDS SOFTWARE SOLUTION PVT LTD')?.peValuation], [383.25, 225]);
+  eq('ipo: ...PAN off "Company PAN", not claimed as the name column',
+    lookupScrip(m3, '', 'Kusumgar Pvt Ltd').entry?.pan, 'AAACK2030M');
+  eq('ipo: ...face value not claimed as the valuation',
+    lookupScrip(m3, '', 'ESDS SOFTWARE SOLUTION PVT LTD').entry?.faceValue, 10);
+  eq('ipo: no listing date was left unread', m3.listingDateUnparsed, []);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

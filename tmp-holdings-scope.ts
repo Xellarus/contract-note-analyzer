@@ -222,5 +222,65 @@ ok('both Add Trade drawers are fed the gated array',
 ok('the grid builds from the gated array',
   /const activeSheetHoldings = ownedHoldings\.length > 0/.test(HOLD));
 
+// ══ 5. THE SHEET MOVED ON AND THE PAGE DID NOT ═════════════════════════════════════════
+//
+// Reported 22-Sep-2026: Kusumgar and ESDS both IPO'd, both got a `Listed From` date on the
+// Private Equities tab, and both kept their PE badge, their 730-day holding period and their
+// hand-entered valuation afterwards. Nothing was wrong with the classification engine - a
+// probe over the owner's real rows returns ONE entry keyed by the listed ISIN, 730 days
+// before the listing and 365 after. The page had simply never re-read the master.
+console.log('\n=== the page picks the sheet back up ===');
+
+// The mount read is UNFORCED and happens once, which is right for a read-only view and wrong
+// the moment the owner edits the sheet in another tab - which is the actual workflow.
+ok('the master is re-read when the tab comes back to the front',
+  /document\.addEventListener\('visibilitychange', onVisible\)/.test(HOLD)
+  && /loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID, \{ force: true \}\)/.test(HOLD.slice(HOLD.indexOf('const onVisible'))),
+  'an edit made in another tab has no other event in this app');
+
+// FORCED, or the 90s cache returns the master as it was before the edit - the same trap the
+// sheet-WRITING engines pass `{ force: true }` for.
+{
+  const fn = HOLD.slice(HOLD.indexOf('const onVisible = () => {'));
+  const body = fn.slice(0, fn.indexOf('};'));
+  ok('...forced, so the 90s cache cannot serve the pre-edit master',
+    /force: true/.test(body));
+  ok('...and rate-limited, so flicking between tabs costs no reads',
+    /Date\.now\(\) - scripReadAt\.current < 60_000/.test(body));
+  ok('...and does nothing while hidden or signed out',
+    /if \(document\.hidden \|\| !hasAuthorizedGoogle\(\)\) return;/.test(body));
+}
+// The mount read must stamp the clock too, or the first visibility change spends a read
+// immediately after one was just made.
+ok('the mount read stamps the same clock',
+  /scripReadAt\.current = Date\.now\(\);\s*\n\s*loadScripMaster\(SCRIP_MASTER_SPREADSHEET_ID\)\.then\(setScrip\)/.test(HOLD));
+
+// ── A row that PREDATES its company's listing ──
+//
+// The grid reads the `Holding` tab (rewritten only by Rebuild) while the badge beside it is
+// computed live from the master, so the two legitimately disagree after a listing: the row
+// still says "Kusumgar Pvt Ltd" and carries the position as at that rebuild. Reported as a
+// wrong quantity. Unexplained, it reads as a bug; named, it reads as "press Rebuild".
+{
+  const memo = HOLD.slice(HOLD.indexOf('const listedSinceRebuild = useMemo('));
+  const body = memo.slice(0, memo.indexOf('}, [scrip, displayHoldings]);'));
+  ok('a holding that predates its listing is named on screen',
+    /const listedSinceRebuild = useMemo\(/.test(HOLD) && /listedSinceRebuild\.length > 0 &&/.test(HOLD));
+  // normNamePrivate is the whole test: the ledger row keeps the "pvt" token the listed
+  // canonical name does not, which is exactly the pair normName collapses into one entry.
+  ok('...detected by the token normName throws away',
+    /normNamePrivate\(h\.name\) === normNamePrivate\(e\.canonicalName\)/.test(body));
+  // Infinity means NEVER listed. `<= now` fails for it, which is the conservative side: a
+  // garbled cell must not claim a company has listed.
+  ok('...only once the listing date has actually PASSED',
+    /!\(listedFromTs\(e\) <= now\)/.test(body));
+  ok('...and each company is named once, not once per holding row',
+    /seen\.has\(e\.key\)/.test(body) && /seen\.add\(e\.key\)/.test(body));
+  // The owner's stated fear when this feature was designed: that a listing would rewrite a
+  // year already filed. It does not, and the note must say so where the doubt arises.
+  ok('...and the note says filed years are unaffected',
+    /Years already filed are unaffected/.test(HOLD));
+}
+
 console.log(`\n${'='.repeat(60)}\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

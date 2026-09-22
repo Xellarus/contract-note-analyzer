@@ -25,7 +25,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
-| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules — including that the twin gets its OWN `key`, which is what stops two companies sharing one holding bucket (105) |
+| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules — including that the twin gets its OWN `key`, which is what stops two companies sharing one holding bucket, and the `ipo(...)` block built from the owner's REAL Kusumgar / ESDS rows, which pins that a LISTING DATE supersedes the twin (165) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
 | `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write (270; 271 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence, plus the listed/unlisted TWIN crossover in BOTH price maps and in both directions, and the first coverage `makeExceptionResolver` has ever had (37) |
@@ -42,7 +42,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
-| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT or the wrong DATE (35). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Caught two undated call sites the author had missed, on its first run |
+| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, or a sheet the page never re-read (45). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
 | `node tmp-xverify.mjs` | Cross-broker PDF extraction comparison |
@@ -683,8 +683,28 @@ flag and the other winning the name lookup) produce the identical symptom. The r
 was probed in four shapes and is sound, so `tmp-pe-fold-run.mjs` now pins the invariant — every
 entry the dropdown lists as PE must also RESOLVE as PE by name — to tell the two apart next time.
 
+**CORRECTION (22-Sep-2026): KUSUMGAR WAS AN IPO, NOT A COLLISION — and so is ESDS.** Read the
+rule below knowing that. It was written from the 16-Sep report *"kusumgar ltd and pvt ltd
+showing transaction in same PE"*, which was taken to mean two companies sharing one normalised
+name. It is now confirmed by the owner to be ONE company that listed: `Kusumgar Limited`,
+BSE **544821** / `INE0ISX01025`, with the Private Equities row dated **15-Jul-2026**.
+`ESDS Software Solution Ltd.` is the same shape — BSE **544898** / `INE0DRI01029`, listed
+**04-Sep-2026**. Both BSE codes are in the 2025-26 listing series, which is the tell.
+
+For both of them the twin is the **wrong** answer: it cuts the company's own history in half at
+its IPO — pre-listing lots under "… Pvt Ltd", post-listing trades under the ticker entry, two
+positions, two cost bases, and the continuous holding period destroyed. `Listed From` is what
+supersedes it, and `tmp-pe-fold-run.mjs`'s `ipo(...)` block pins it **with the owner's real
+rows** so a future reading of this rule cannot quietly re-split them. Probed: re-enabling the
+twin for a listed company puts the key back to `kusumgar pvt` instead of `INE0ISX01025`, which
+is two buckets — the reported symptom, exactly.
+
+The twin mechanism itself STAYS. `Cranex` and `Acme Foods` are still real shapes and a genuine
+two-company collision is still possible; the owner simply does not currently have one. What was
+wrong was the example, not the machinery.
+
 **A LISTED "X Limited" and an UNLISTED "X Pvt Ltd" are two companies, and the book holds both**
-(16-Sep-2026 — the owner has exactly this for Kusumgar). `normName` strips
+(16-Sep-2026). `normName` strips
 `limited|ltd|private|pvt|the|co`, so the two collapse to ONE key, there is ONE name slot in
 `byAliasNorm`, and `claimAlias` hands it to whichever folded last. The listed company is then
 taxed on private-equity rules at 730 days, or the private one at 365. Nothing downstream can see
@@ -939,6 +959,54 @@ reply**; the key stayed in the issued set, so it was never asked for again. Stuc
 - **FOUR states, not one**: loaded · in flight · failed · nothing held on that date. The first
   version showed "reading the ledger…" for all of them, including *never started* (no token),
   which is why a read that had given up looked like one still working.
+
+**A LISTING DATE CHANGED NOTHING ON SCREEN, because the page never re-read the master**
+(22-Sep-2026, reported as *"same glitch happening in kusumgar pvt ltd ... when i add trade in
+kusumgar ltd it is assuming it for kusumgar pvt ltd"* and *"i added the esds equity trades and
+now automatically it vanished from the app"*). Both companies had IPO'd, both rows had a
+correct `Listed From` date, and **the engine was right the whole time** — a probe over the
+owner's real rows returns ONE entry keyed by the listed ISIN, both spellings in one bucket,
+730 days before the listing and 365 after, FY26 still filed unlisted. Nothing needed fixing
+downstream of the read. The page had simply never done the read.
+
+`Holdings.tsx` loads its master **once on mount, unforced**, and keeps it for the life of the
+page; the only forced reloads were after a trade save, a CMP write or an import. So an edit made
+in ANOTHER TAB — which is the owner's actual workflow, *edit the sheet, then look at the app* —
+has no event in this app at all, and the company keeps its PE badge, its 730-day period and its
+hand-entered valuation until a full browser reload. This is the same staleness already written
+up for the Add Trade dropdown, reaching a different screen; the first fix gave the DRAWER a
+forced read and left the page on its mount copy.
+
+- **The trigger is `visibilitychange`**, because coming back to the front is the moment the edit
+  finished. **Rate-limited to once a minute**, which is what makes it safe: one batched read of
+  ONE spreadsheet, not the 13-portfolio fan-out the read-quota rule is about — but flicking
+  between tabs must not spend a read per flick. The mount read stamps the same clock, or the
+  first switch back spends a read on a master seconds old.
+- **Forced**, or the 90s cache serves the master as it was before the edit — the same reason the
+  sheet-writing engines pass `{ force: true }`.
+- **The prices tab rides along**: a company that has just listed has no fetched price until the
+  feed catches up, and until then it shows at its old unlisted valuation.
+
+**And a Holding-tab row that predates a listing must SAY so.** The grid reads the `Holding` tab,
+rewritten only by an explicit Rebuild, while the class badge beside each row is computed live
+from the master. After a listing the two legitimately disagree: the row still carries the
+pre-listing NAME and the position as at that rebuild, and it moves from the Private Equity
+segment to Equity showing a figure that looks stale — because it is. Reported as a wrong
+quantity ("Kusumgar Pvt Ltd · 1,04,371" on a position since sold). The note names the companies,
+the old name, the canonical one and the listing date, and says filed years are unaffected —
+which is the owner's stated fear about this whole feature and the doubt the row provokes.
+
+- **The test is `normNamePrivate`**, not `normName`: the ledger row keeps the "pvt" token the
+  listed canonical name does not, which is exactly the pair `normName` collapses into one entry
+  and therefore exactly the rows that look wrong. A row already spelled like the listed company
+  does not look stale and gets no note.
+- **Only once the date has PASSED.** `listedFromTs` returns `Infinity` for an unreadable cell,
+  which fails the `<= now` test — the conservative side, since a garbled cell must not claim a
+  company has listed.
+- Keyed by `entry.key`, so a company holding several rows is named once.
+
+All nine source probes fire (`tmp-holdings-scope.ts`, 45), including dropping the listener,
+un-forcing the read, dropping the rate limit, and swapping `normNamePrivate` for `normName`.
 
 **Keyboard shortcuts.** `SHORTCUTS` in `src/lib/shortcuts.ts` is the single registry: it drives
 the key handler **and** the `?` help overlay, so a working-but-undocumented key is not
