@@ -25,7 +25,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | Command | Covers |
 |---|---|
 | `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
-| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules — including that the twin gets its OWN `key`, which is what stops two companies sharing one holding bucket, and the `ipo(...)` block built from the owner's REAL Kusumgar / ESDS rows, which pins that a LISTING DATE supersedes the twin (165) |
+| `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules — including that the twin gets its OWN `key`, which is what stops two companies sharing one holding bucket, the `ipo(...)` block built from the owner's REAL Kusumgar / ESDS rows, which pins that a LISTING DATE supersedes the twin, and the `unread:` block — a data-carrying column the reader maps to NOTHING, on both the batched and the per-tab path (179) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
 | `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write (270; 271 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence, plus the listed/unlisted TWIN crossover in BOTH price maps and in both directions, and the first coverage `makeExceptionResolver` has ever had (37) |
@@ -851,6 +851,37 @@ Three more rules, each a silent way to get it wrong:
 - **`priceExcept` is only ever SET, never cleared.** A listed company must be fetched by the
   feed, but an entry already flagged in the master's own `Price Exception` column (an ETF, a
   liquid fund) keeps that flag whatever the class tab says.
+
+**A COLUMN THAT IS THERE, IS FILLED IN, AND IS READ BY NOTHING** (22-Sep-2026 — the SIXTH
+header mis-fire on this tab, and the most expensive). The owner entered a listing date for both
+`Kusumgar Pvt Ltd` and `ESDS SOFTWARE SOLUTION PVT LTD`, the heading did not match
+`listed|listing`, and every date was read by **nothing at all**. The column was visibly there
+and visibly filled; `peFailed` was false; the company count was right; nothing anywhere said the
+column existed. The twin was minted for two companies that had in fact IPO'd.
+
+- **The signature is worth knowing, because it identified the cause from one toast.**
+  `findNameCollisions` reported **both** companies at once —
+  `"Kusumgar Limited" → Kusumgar Limited / Kusumgar Pvt Ltd` and the same for ESDS. ONE company
+  points at a duplicate master row; BOTH point at a single systemic cause, which is the reader.
+  A minted twin always trips that check, so its presence is direct evidence the listing date
+  never reached `foldAssetClass`.
+- **`ipo` is now in the match**, because the owner's sheet used it. No other header on this
+  tab contains it as a word — `` keeps it off `Type Of Company` — so it costs nothing and
+  covers "IPO Date", "Date of IPO" and "IPO'd On".
+- **`unmappedClassHeaders` reports any data-carrying column the reader mapped to nothing**, onto
+  `ScripMaster.classColumnsUnread`, surfaced on the PE panel. A column with data and NO heading
+  is named by its LETTER, which is the one case with no text to quote back and also the easiest
+  mistake to make — including a column sitting past the end of the header row.
+- **Only a column that CARRIES something.** An empty spare column is not a misconfiguration, and
+  listing it trains the owner to ignore the list, which is how every crying-wolf diagnostic dies.
+- **Phrased as a QUESTION, not an error.** An extra column kept for the owner's own reference is
+  legitimate; what must never recur is being unable to tell that apart from a column meant to
+  drive the app.
+- **Noted on BOTH read paths.** A probe removing it from the batch came back **SILENT**: every
+  other fixture in `tmp-pe-fold-run.mjs` leaves the PE tab off `__sheetTabs`, so they all take
+  the per-tab fallback while **production takes the batch** (the real sheet does list the tab).
+  The fixture now loads once each way and asserts the batch really was used. Same class of fault
+  as the two paths asking for different ranges.
 
 **Header detection: `Listed From` is tested FIRST, ahead of the valuation date.** Spelled
 *"Listed As On"* it contains `as on` and would be claimed as the valuation date — which fails

@@ -5071,6 +5071,32 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                   </div>
                 )}
 
+                {/* A column that carries data and that the reader mapped to NOTHING. Header
+                    detection on these tabs has mis-fired six times and every failure is silent
+                    ON the tab: the column is there, it is filled in, and nothing happens. It
+                    cost Kusumgar and ESDS their listing dates on 22-Sep-2026. Phrased as a
+                    QUESTION, because an extra column kept for the owner's own reference is
+                    perfectly legitimate — what must not recur is being unable to tell the two
+                    apart. */}
+                {(scrip?.classColumnsUnread?.length ?? 0) > 0 && (
+                  <div className="flex items-start gap-2 p-3 rounded-xl border border-amber-200 bg-amber-50 text-[12px] text-amber-800">
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>
+                      {scrip!.classColumnsUnread.map((c, i) => (
+                        <span key={c.tab}>
+                          {i > 0 && ' '}
+                          This app reads no meaning from {c.headers.join(', ')} on the{' '}
+                          <strong>{c.tab}</strong> tab.
+                        </span>
+                      ))}
+                      {' '}If one of those is meant to drive something here, its heading is the
+                      problem — a listing date must be headed with the word{' '}
+                      <strong>Listed</strong>, <strong>Listing</strong> or <strong>IPO</strong> to
+                      be read at all. If they are just your own notes, ignore this.
+                    </span>
+                  </div>
+                )}
+
                 {/* Inline manual addition form */}
                 {activePortfolio === 'local' && showAddForm && (
                   <form onSubmit={handleAddManualHolding} className="p-5 border border-slate-200 bg-slate-50 rounded-2xl grid grid-cols-1 md:grid-cols-4 gap-4 animate-fadeIn">

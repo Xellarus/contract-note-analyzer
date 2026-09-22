@@ -669,5 +669,96 @@ eq('isin-row: ...at 730 days', ltDaysFor(master, '', 'Goodluck India Pvt Ltd'), 
   eq('ipo: no listing date was left unread', m3.listingDateUnparsed, []);
 }
 
+// ── A COLUMN THAT IS THERE, IS FILLED IN, AND IS READ BY NOTHING ──────────────────────────
+//
+// The sixth time header detection on this tab mis-fired (22-Sep-2026), and the most expensive:
+// the owner entered a listing date for BOTH Kusumgar and ESDS, the heading did not match
+// `listed|listing`, and every date was read by nothing at all. The column was visibly present
+// and visibly filled; the app's own diagnostics said the tab had loaded perfectly; and the
+// twin was minted for two companies that had in fact IPO'd.
+//
+// The signature it produced is the interesting part and is asserted below: `findNameCollisions`
+// reported BOTH companies at once. One company would point at a duplicate master row; both
+// point at a single systemic cause, which is the reader.
+{
+  const { unmappedClassHeaders } = await import('./src/lib/privateEquities');
+  const { findNameCollisions } = await import('./src/lib/scripMaster');
+
+  const MAIN4 = [
+    ['ISIN', 'Security Name', 'BSE', 'NSE', 'Alias name'],
+    ['INE0ISX01025', 'Kusumgar Limited', '544821', 'KUSUMGAR', ''],
+  ];
+  const HEAD = ['Company', 'Drive Link', 'ISIN', 'Valuation', 'Company PAN', 'Face Value', 'Type Of Company'];
+  const row = ['Kusumgar Pvt Ltd', '', '', 383.25, 'AAACK2030M', 1, 'Domestic', '2026-07-15'];
+
+  // `tabs` decides which PATH the load takes, and that turned out to matter: every other
+  // fixture here leaves the PE tab off `__sheetTabs`, so they ALL take the per-tab fallback and
+  // the BATCHED path - the one production actually uses, since the real sheet does list the tab
+  // - went unexercised. A probe that removed `noteUnread` from the batch came back SILENT,
+  // which is the only reason this was found.
+  const load = async (pe: any[][], tag: string, tabs: string[] = ['Scrip Master']) => {
+    invalidateScripCache();
+    const { invalidatePrivateEquityCache: inv } = await import('./src/lib/privateEquities');
+    inv();
+    g.__sheetTabs = tabs;
+    g.__ranges = { [MAIN_RANGE]: MAIN4, [PE_RANGE]: pe };
+    const m = await loadScripMaster('SHEET-' + tag);
+    g.__sheetTabs = ['Scrip Master'];
+    return m;
+  };
+
+  // `ipo` was added to the match because the owner's own sheet used it. \b keeps it off
+  // "Type Of Company", which is the only other header here containing those letters.
+  const mIpo = await load([[...HEAD, 'IPO Date'], row], 'ipo');
+  eq('unread: a column headed "IPO Date" IS read as the listing date',
+    lookupScrip(mIpo, '', 'Kusumgar Pvt Ltd').entry?.listedFrom, '2026-07-15');
+  eq('unread: ...and nothing is reported as unread', mIpo.classColumnsUnread, []);
+  eq('unread: ...so no twin, and no collision', findNameCollisions(mIpo), []);
+
+  // THE REPORTED FAILURE. A data-carrying column with no heading at all.
+  const mBlank = await load([[...HEAD, ''], row], 'blank');
+  eq('unread: an UNHEADED column carrying data is named by its letter',
+    mBlank.classColumnsUnread, [{ tab: 'Private Equities', headers: ['column H (no header)'] }]);
+  // Same failure one step further on: the header row simply stops short of the data.
+  const mShort = await load([HEAD, row], 'short');
+  eq('unread: ...and so is one PAST the end of the header row',
+    mShort.classColumnsUnread, [{ tab: 'Private Equities', headers: ['column H (no header)'] }]);
+
+  // The signature that identified the cause from a single toast. BOTH companies at once.
+  eq('unread: the unread listing date mints a twin, which collides',
+    findNameCollisions(mBlank).map(c => c.entries.join(' / ')),
+    ['Kusumgar Limited / Kusumgar Pvt Ltd']);
+  eq('unread: ...and the company stays unlisted forever',
+    assetClassOf(mBlank, '', 'Kusumgar Pvt Ltd'), 'PE');
+
+  // A QUESTION, not an error - an extra column kept for the owner's own reference is
+  // legitimate, and it is named so the two can be told apart. Reporting it as a fault, or
+  // not reporting it at all, are both how a diagnostic stops being read.
+  const mNote = await load([[...HEAD, 'Listed From', 'My ref'], [...row, 'x']], 'note');
+  eq('unread: an extra column of the owner\'s own is named, not silently dropped',
+    mNote.classColumnsUnread, [{ tab: 'Private Equities', headers: ['"My ref"'] }]);
+  eq('unread: ...while the listing date beside it still reads',
+    lookupScrip(mNote, '', 'Kusumgar Pvt Ltd').entry?.listedFrom, '2026-07-15');
+
+  // An EMPTY spare column is not a misconfiguration. Listing it would train the owner to
+  // ignore this list, which is the failure mode of every diagnostic that cries wolf.
+  const mEmpty = await load([[...HEAD, 'Listed From', 'Spare'], [...row, '']], 'empty');
+  eq('unread: an empty spare column is NOT reported', mEmpty.classColumnsUnread, []);
+
+  // THE PATH PRODUCTION TAKES. The real scrip master DOES list its Private Equities tab, so a
+  // live load goes through `batchGet`, not the per-tab fallback. Reporting on one path and not
+  // the other is the same class of fault as the two paths asking for different ranges.
+  const mBatch = await load([[...HEAD, ''], row], 'batch', ['Scrip Master', 'Private Equities']);
+  eq('unread: the BATCHED path reports it too',
+    mBatch.classColumnsUnread, [{ tab: 'Private Equities', headers: ['column H (no header)'] }]);
+  eq('unread: ...and it really did go through the batch',
+    (g.__reads?.batched || []).some((r: string[]) => r.some(x => /Private Equities/.test(x))), true);
+
+  // Driven directly too: the helper is exported, and the loader is not the only caller.
+  eq('unread: the helper says nothing about a headerless tab',
+    unmappedClassHeaders([['Acme Pvt Ltd', '', 100]]), []);
+  eq('unread: ...and nothing about an empty one', unmappedClassHeaders([]), []);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

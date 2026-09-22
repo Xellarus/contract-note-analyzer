@@ -173,7 +173,7 @@ export interface PrivateEquityRow {
 
 // Keyed by `${spreadsheetId}::${assetClass}` - three tabs are read per master load and a
 // single-slot cache would have each one evict the last, turning a 60s cache into none.
-let _cache = new Map<string, { rows: PrivateEquityRow[]; ts: number }>();
+let _cache = new Map<string, { rows: PrivateEquityRow[]; ts: number; unread: string[] }>();
 const TTL_MS = 60_000;
 
 /**
@@ -200,6 +200,12 @@ async function peBackoff<T>(fn: () => Promise<T>, tries = 4): Promise<T> {
 }
 
 export function invalidatePrivateEquityCache(): void { _cache = new Map(); }
+
+/** Unrecognised, data-carrying columns on a class tab AS THIS LOAD READ IT. Read off the
+ *  same cache entry the rows came from, so it cannot describe a different fetch. */
+export function classHeadersUnread(spreadsheetId: string, assetClass: AssetClassId): string[] {
+  return _cache.get(`${spreadsheetId}::${assetClass}`)?.unread || [];
+}
 
 const toNum = (v: any): number => {
   if (typeof v === "number") return isFinite(v) ? v : 0;
@@ -271,7 +277,11 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
       // reclassified. Matching on the bare words `listed` / `listing` covers every spelling the
       // owner might use (Listed From / Listing Date / Listed On / Listed w.e.f.) and collides
       // with none of the other headers below.
-      if (/\blisted\b|\blisting\b/.test(h)) ci.listedFrom = idx;
+      // `ipo` is here because the owner's own sheet used it and the column went unread in
+      // total silence (22-Sep-2026). No other header on this tab contains it as a word -
+      // \b keeps it off "Type Of Company" - so it costs nothing and covers "IPO Date",
+      // "Date of IPO" and "IPO'd On".
+      if (/\blisted\b|\blisting\b|\bipo\b/.test(h)) ci.listedFrom = idx;
       else if (/valuation date|value date|val date|as on|as at|as of/.test(h)) ci.valuationDate = idx;
       else if (/drive|folder|link|url|docs/.test(h)) { if (!driveSet) { ci.driveLink = idx; driveSet = true; } }
       else if (/isin/.test(h)) ci.isin = idx;
@@ -311,6 +321,56 @@ export function detectPeColumns(vals: any[][]): { hasHeader: boolean; ci: PeColu
     }
   }
   return { hasHeader, ci, width: row0.length };
+}
+
+/** A0 → "A", 26 → "AA". For naming a column that carries data under no header at all. */
+const colLetter = (i: number): string => {
+  let s = "", n = i;
+  do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+  return s;
+};
+
+/**
+ * Headers on this tab that the reader mapped to NOTHING, and whose column still carries data.
+ *
+ * This exists because of the worst property of this tab: **every way it can be wrong is silent
+ * ON the tab**. Header detection here has now mis-fired six times, and the last one cost two
+ * companies. The owner added a listing-date column, filled it in for `Kusumgar Pvt Ltd` and
+ * `ESDS SOFTWARE SOLUTION PVT LTD`, and the header did not match `listed|listing`, so every
+ * date was read by nothing at all. On screen that is indistinguishable from the feature being
+ * broken: the column is there, it is filled, and no company ever reclassifies.
+ *
+ * Only a column that CARRIES something is reported. An empty spare column is not a
+ * misconfiguration, and listing it would train the owner to ignore this list — which is the
+ * failure mode of every diagnostic that cries wolf.
+ *
+ * A column with data and NO header is named by its letter, because that is the one case where
+ * there is no text to quote back and also the easiest mistake to make.
+ */
+export function unmappedClassHeaders(vals: any[][]): string[] {
+  if (!vals || vals.length === 0) return [];
+  const { hasHeader, ci } = detectPeColumns(vals);
+  if (!hasHeader) return [];
+  const taken = new Set([
+    ci.company, ci.driveLink, ci.isin, ci.valuation, ci.valuationDate,
+    ci.pan, ci.faceValue, ci.companyType, ci.listedFrom, ci.notes,
+  ].filter(i => i >= 0));
+  const header = (vals[0] || []).map((h: any) => (h ?? "").toString().trim());
+  const out: string[] = [];
+  header.forEach((h, idx) => {
+    if (taken.has(idx)) return;
+    if (!vals.slice(1).some(r => (r?.[idx] ?? "").toString().trim() !== "")) return;
+    out.push(h ? `"${h}"` : `column ${colLetter(idx)} (no header)`);
+  });
+  // A column with data past the end of the header row is the same failure, one step further on.
+  const widest = vals.reduce((w, r) => Math.max(w, (r || []).length), 0);
+  for (let idx = header.length; idx < widest; idx++) {
+    if (taken.has(idx)) continue;
+    if (vals.slice(1).some(r => (r?.[idx] ?? "").toString().trim() !== "")) {
+      out.push(`column ${colLetter(idx)} (no header)`);
+    }
+  }
+  return out;
 }
 
 export function parsePrivateEquityVals(vals: any[][], assetClass: AssetClassId = "PE"): PrivateEquityRow[] {
@@ -388,14 +448,15 @@ export async function loadAssetClass(
     if (/unable to parse range/i.test(msg)) {
       // Tab absent - a real, cacheable answer. An AIF or Mutual Fund tab that does not exist
       // yet simply means the book holds none, which is the normal state for most portfolios.
-      _cache.set(key, { rows: [], ts: now });
+      _cache.set(key, { rows: [], ts: now, unread: [] });
       return [];
     }
     throw e;
   }
 
-  const rows = parsePrivateEquityVals(res?.result?.values || [], assetClass);
-  _cache.set(key, { rows, ts: now });
+  const vals = res?.result?.values || [];
+  const rows = parsePrivateEquityVals(vals, assetClass);
+  _cache.set(key, { rows, ts: now, unread: unmappedClassHeaders(vals) });
   return rows;
 }
 
@@ -414,7 +475,7 @@ export function primeAssetClass(
   values: any[][],
 ): PrivateEquityRow[] {
   const rows = parsePrivateEquityVals(values || [], assetClass);
-  _cache.set(`${spreadsheetId}::${assetClass}`, { rows, ts: Date.now() });
+  _cache.set(`${spreadsheetId}::${assetClass}`, { rows, ts: Date.now(), unread: unmappedClassHeaders(values || []) });
   return rows;
 }
 

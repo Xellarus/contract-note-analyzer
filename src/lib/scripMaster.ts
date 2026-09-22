@@ -1,6 +1,6 @@
 import { gapi } from "gapi-script";
 import {
-  invalidatePrivateEquityCache, loadAssetClass, primeAssetClass, PrivateEquityRow,
+  invalidatePrivateEquityCache, loadAssetClass, primeAssetClass, classHeadersUnread, PrivateEquityRow,
   ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId, CLASS_TAB_RANGE } from "./privateEquities";
 
 // The single shared scrip master lives in ONE Google Sheet that the user owns
@@ -158,6 +158,21 @@ export interface ScripMaster {
    * reason `classSkippedByTicker` is: this cannot be diagnosed from any screen in the app.
    */
   listingDateUnparsed: { name: string; raw: string }[];
+  /**
+   * Columns on a class tab that carry data and that the reader mapped to NOTHING.
+   *
+   * The reason this is on the master rather than left to review: header detection on these tabs
+   * has now mis-fired SIX times, and every single failure is silent ON THE TAB. The last one
+   * (22-Sep-2026) cost two companies — the owner filled in a listing date for `Kusumgar Pvt Ltd`
+   * and `ESDS SOFTWARE SOLUTION PVT LTD`, the header did not match `listed|listing|ipo`, and
+   * every date was read by nothing at all. The column was there, it was filled, no company ever
+   * reclassified, and the app's own diagnostics said the tab had loaded perfectly.
+   *
+   * It is reported as a QUESTION, not an error: an extra column the owner keeps for their own
+   * reference is perfectly legitimate. What must never happen again is a column that was MEANT
+   * to drive the app sitting there doing nothing, with no way to tell the two apart.
+   */
+  classColumnsUnread: { tab: string; headers: string[] }[];
 }
 
 export type ResolveResult =
@@ -174,6 +189,7 @@ const emptyMaster = (): ScripMaster => ({
   peFailed: false,
   classSkippedByTicker: [],
   listingDateUnparsed: [],
+  classColumnsUnread: [],
 });
 
 // A token appearing in at least this many DISTINCT entries is "generic" (a common company
@@ -320,12 +336,20 @@ async function foldAllAssetClasses(
   info: SheetInfo,
   opts?: { force?: boolean },
 ): Promise<void> {
+  // Read off the CACHE ENTRY the rows themselves came from, and called from both paths for the
+  // same reason they ask for byte-identical ranges: a diagnostic that describes a different
+  // fetch from the data is worse than none, because it sends the reader down the wrong branch.
+  const noteUnread = (id: AssetClassId) => {
+    const headers = classHeadersUnread(spreadsheetId, id);
+    if (headers.length > 0) master.classColumnsUnread.push({ tab: ASSET_CLASSES[id].tab, headers });
+  };
   // Read class tabs one at a time, exactly as this always did. Each failure is independent, and
   // an absent tab answers itself: loadAssetClass turns "unable to parse range" into a cached [].
   const foldOneByOne = async (ids: AssetClassId[]) => {
     for (const id of ids) {
       try {
         foldAssetClass(master, await loadAssetClass(spreadsheetId, id, opts));
+        noteUnread(id);
       } catch (e) {
         master.peFailed = true;
         console.warn(
@@ -362,7 +386,10 @@ async function foldAllAssetClasses(
         valueRenderOption: "UNFORMATTED_VALUE",   // the option loadAssetClass uses, so rows parse identically
       }));
       const vrs: any[] = res?.result?.valueRanges || [];   // returned in the order asked for
-      listed.forEach((id, i) => foldAssetClass(master, primeAssetClass(spreadsheetId, id, vrs[i]?.values || [])));
+      listed.forEach((id, i) => {
+        foldAssetClass(master, primeAssetClass(spreadsheetId, id, vrs[i]?.values || []));
+        noteUnread(id);
+      });
     } catch (e) {
       // One batch means one failure loses every class in it, and the rule here is explicit: an
       // AIF tab that 500s must NOT stop Private Equities being folded in. The batch is only the
