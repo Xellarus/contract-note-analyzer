@@ -2,7 +2,7 @@ import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import { loadScripMaster, lookupScrip, SCRIP_MASTER_SPREADSHEET_ID, ScripMaster } from "./scripMaster";
 import { rebuildHoldingTab, syncCapitalGains } from "./holdingsCalc";
-import { mapRecordsToHeader, toIsoDate, headerKey } from "./tradeRowSchema";
+import { mapRecordsToHeader, toIsoDate, headerKey, colA1 } from "./tradeRowSchema";
 import { appendCorporateActionRow, updateCorporateActionRow, CorpAction } from "./corporateActions";
 
 /**
@@ -169,14 +169,6 @@ export async function appendRecordsToTab(spreadsheetId: string, tab: string, rec
     valueInputOption: "USER_ENTERED",
     resource: { values: payload },
   });
-}
-
-// 0-based column index → A1 column letter (0→A, 25→Z, 26→AA). Used to place a newly
-// auto-appended header cell (e.g. "Notes") at the next free column of row 1.
-function colA1(i: number): string {
-  let n = i + 1, s = "";
-  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
-  return s;
 }
 
 /**

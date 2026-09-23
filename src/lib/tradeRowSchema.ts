@@ -207,6 +207,20 @@ export function solveQtyPriceAmount(
 }
 
 /** Lay each record out as a row in the given header's column order. */
+/**
+ * 0-based column index → A1 column letter (0→A, 25→Z, 26→AA). Used to place a newly
+ * auto-appended header cell at the next free column of row 1.
+ *
+ * Shared because TWO writers now append a column: the trade writer (Ratio / Notes / Transfer
+ * Date) and `rebuildHoldingTab` (Transfer Date, for a ledger that predates it). A second copy
+ * that disagreed would put a header one column off and silently orphan the data under it.
+ */
+export function colA1(i: number): string {
+  let n = i + 1, s = "";
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
 export function mapRecordsToHeader(header: string[], records: Record<string, any>[]): any[][] {
   return records.map((rec) => header.map((h) => { const k = headerKey(h); return k ? (rec[k] ?? "") : ""; }));
 }

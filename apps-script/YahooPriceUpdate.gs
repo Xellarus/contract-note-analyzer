@@ -423,7 +423,7 @@ function loadMasterSymbols_() {
 // this script has no user to ask. So: exactly one distinct row, or nothing.
 // Bumped whenever the RESOLVER changes. Echoed by /exec?sym= so "the fix is not working" and
 // "the fix is not deployed" stop being the same observation.
-var RESOLVER_VERSION_ = '2026-09-08 ticker-as-key + truncated-prefix';
+var RESOLVER_VERSION_ = '2026-09-23 gap-fill backfill + noSymbolNames';
 
 var PREFIX_MIN_ = 6;
 function masterPrefixHit_(master, nk) {

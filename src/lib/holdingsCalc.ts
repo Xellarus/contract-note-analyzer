@@ -13,7 +13,7 @@ import { loadOpeningHoldings } from "./openingHoldings";
 import { loadOpeningTxns } from "./openingTxns";
 import { loadOpeningCorpActions } from "./openingCorpActions";
 import { replayOpeningTxnsAsOf, classifyTxn, TxnStatementRow, ActionResolution } from "./openingBasis";
-import { ledgerSide, isSplitType, isTransferType, parseRatio, freeSharesFor, FreeShareRatio } from "./tradeRowSchema";
+import { ledgerSide, isSplitType, isTransferType, isTransferLeg, parseRatio, freeSharesFor, headerKey, colA1, FreeShareRatio } from "./tradeRowSchema";
 
 export interface UnresolvedScrip {
   name: string;
@@ -35,6 +35,19 @@ export interface RebuildHoldingResult {
   /** Set when the CMP refresh itself failed. The rebuild still succeeded - the Holding tab is
    *  written before this runs - so it is reported, not thrown. */
   peCmpError?: string;
+  /** True when this rebuild CREATED the `Transfer Date` column on True Entry. */
+  transferDateColumnAdded?: boolean;
+  /** Set when creating that column failed. The rebuild still succeeded. */
+  transferColumnError?: string;
+  /**
+   * Cross-portfolio transfer rows still carrying no `Transfer Date`.
+   *
+   * Only the owner knows when the shares actually reached the demat, so this cannot be filled in
+   * automatically — but a column that exists, is empty, and is read by the Historical Holding
+   * Report is precisely the shape of the mistake that cost a week in September. Named here so it
+   * is a task, not a discovery.
+   */
+  transfersNeedingDate: { name: string; date: string }[];
 }
 
 interface HoldingAcc {
@@ -553,7 +566,12 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     const dateIdx = col("Trade Date", 0), isinIdx = col("ISIN", -1), nameIdx = col("Stock Name", 2);
     const typeIdx = col("Transaction Type", 3), qtyIdx = col("Number of Shares", 4), priceIdx = col("Avg Price", 5);
     const ratioIdx = col("Ratio", -1);   // absent on every sheet written before 14-Sep-2026
-    const xferDateIdx = col("Transfer Date", -1);   // absent before 23-Sep-2026
+    // Resolved through headerKey, NOT the exact-match `col()` the other columns use. This is the
+    // ONE column the owner types in by hand on an existing sheet — the transfer tool writes it
+    // going forward, but a back-dated transfer already on the ledger has to be corrected there.
+    // An exact `indexOf` would ignore "Transfer date" or "Received On" in silence, and silence
+    // here reads as "the feature did nothing". Absent on every sheet written before 23-Sep-2026.
+    const xferDateIdx = hdrs.findIndex((h: string) => headerKey(h) === "transferDate");
     const turnoverIdx = col("Total Amount (Turnover)", 6);
     const inclIdx = col("Total Amount with Expense (Incl STT)", 15);
 
@@ -720,7 +738,9 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   try {
     teRes = await (gapi.client as any).sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "True Entry!A:T",
+      // A:Z, not A:T — the ledger is 22 columns wide once Ratio, Notes and Transfer Date are
+      // appended, and Notes is what identifies a transfer leg written as a plain Buy.
+      range: "True Entry!A:Z",
       // Dates as serials, not display strings — see parseDateTs for why.
       valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "SERIAL_NUMBER",
     });
@@ -743,7 +763,13 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   const isinIdx = col("ISIN", -1);
   const nameIdx = col("Stock Name", 2);
   const typeIdx = col("Transaction Type", 3);
+  // Rows the cross-portfolio transfer tool wrote, and which of them still have no Transfer Date.
+  // Collected here because the ledger is already in memory; nothing about the rebuild depends on
+  // it. See the `transfersNeedingDate` doc on RebuildHoldingResult.
+  const transferRows: { name: string; date: string; dated: boolean }[] = [];
   const ratioIdx = col("Ratio", -1);   // absent on every sheet written before 14-Sep-2026
+  const notesIdx = hdrs.findIndex((h: string) => headerKey(h) === "notes");
+  const xferDateIdx = hdrs.findIndex((h: string) => headerKey(h) === "transferDate");
   const qtyIdx = col("Number of Shares", 4);
   const priceIdx = col("Avg Price", 5);
   const turnoverIdx = col("Total Amount (Turnover)", 6);
@@ -759,6 +785,14 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
   for (let i = 1; i < teRows.length; i++) {
     const r = teRows[i];
     if (!r || r.length === 0) continue;
+    if (isTransferLeg(r[typeIdx], notesIdx >= 0 ? r[notesIdx] : "")) {
+      const ts = parseDateTs(r[dateIdx]);
+      transferRows.push({
+        name: (r[nameIdx] || "").toString().trim(),
+        date: ts ? new Date(ts).toISOString().slice(0, 10) : "",
+        dated: xferDateIdx >= 0 && parseDateTs(r[xferDateIdx]) > 0,
+      });
+    }
     // Classify the stored action. A SPLIT rescales held lots (distinct type → excluded from
     // the intraday square-off, not a ₹0 add); Bonus/IPO/Rights are buy-side.
     const type = isSplitType(r[typeIdx]) ? "SPLIT" : ledgerSide(r[typeIdx]);
@@ -998,6 +1032,38 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
    * Wrapped so it can never fail the rebuild. The Holding tab is already written by this point,
    * and losing a correct rebuild because a shared sheet was busy would be the worse trade.
    */
+  /**
+   * Create the `Transfer Date` column when this ledger HAS transfer legs and does not have it.
+   *
+   * The owner asked for this (23-Sep-2026: *"can't you do it when i rebuild holding you can add
+   * columns"*) and it is the fiddly half of the job: finding the first free column and typing the
+   * header exactly. The DATE itself cannot be inferred — only the owner knows when the shares
+   * actually reached the demat, and the transfer tool cannot retro-fit a leg already on the
+   * ledger — so the cells are left blank and the rows that need one are NAMED on the result.
+   *
+   * Only when there is a transfer leg to justify it. A column on every portfolio that never
+   * transfers anything is clutter, and clutter is how a real one stops being noticed.
+   *
+   * Wrapped so it can never fail the rebuild, exactly like the CMP write below: the Holding tab
+   * is already on the sheet by this point.
+   */
+  let transferDateColumnAdded = false;
+  let transferColumnError: string | undefined;
+  if (transferRows.length > 0 && xferDateIdx < 0) {
+    try {
+      await (gapi.client as any).sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `True Entry!${colA1(hdrs.length)}1`,
+        valueInputOption: "USER_ENTERED",
+        resource: { values: [["Transfer Date"]] },
+      });
+      transferDateColumnAdded = true;
+    } catch (e: any) {
+      transferColumnError = e?.result?.error?.message || e?.message || "Could not add the Transfer Date column.";
+      console.warn("Transfer Date column could not be added (the Holding tab was still rebuilt):", e);
+    }
+  }
+
   let peCmpWritten: { company: string; price: number }[] = [];
   let peCmpError: string | undefined;
   try {
@@ -1030,6 +1096,9 @@ export async function rebuildHoldingTab(spreadsheetId: string): Promise<RebuildH
     nameCollisions,
     peCmpWritten,
     peCmpError,
+    transferDateColumnAdded,
+    transferColumnError,
+    transfersNeedingDate: transferRows.filter(t => !t.dated).map(({ name, date }) => ({ name, date })),
   };
 }
 

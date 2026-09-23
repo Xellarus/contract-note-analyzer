@@ -43,7 +43,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-price-asof.ts` | **Pricing a PAST position** — `priceAsOf` driven directly over a hand-built grid whose 31-March is deliberately a holiday: the session lookup, the bounded carry at exactly its boundary, a date before the grid (unpriced, never the grid's first close) and one after it (clamps, correctly), and `null`-never-0. Plus a source sweep over comment-stripped source for the wiring `tsc` cannot see — that the report prices at its OWN date and never `Date.now()`, that unlisted is tested with `classOfEntryAsOf` rather than a raw `assetClass` read, that no cell takes a zero fallback, that `computeHoldingsAsOf` still does NOT read the price grid, and that every reason a cell is blank is disclosed, that the SCREEN renders the same disclosure the file carries, that the gap-filling backfill MERGES rather than rebuilding, and that the display-only transfer marker reaches no engine (82). All 44 probes fire |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
-| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, the wrong DEMAT, or a sheet the page never re-read (63). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
+| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, the wrong DEMAT, or a sheet the page never re-read (72). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
 | `node tmp-xverify.mjs` | Cross-broker PDF extraction comparison |
@@ -1204,7 +1204,28 @@ and will disagree with it for a transferred holding until that is revisited.
 - **It must never be headed `Demat Date`.** `headerKey`'s `/demat|dmat|dp charge/` rule claims
   that for the DP-CHARGE column, so the date would be read as a rupee amount and join the cost
   basis. Tested immediately after the trade-date rule; `Transfer Date` / `Transferred On` /
-  `Received On` all map.
+  `Received On` all map, in any case.
+- **It is the one column resolved through `headerKey` rather than `col()`'s exact `indexOf`.**
+  Every other column is written by the app; this one gets typed in by hand on an existing sheet,
+  because the transfer tool cannot retro-fit a leg already on the ledger. An exact match would
+  drop `Transfer date` in silence, and silence here reads as "the feature did nothing".
+- **`rebuildHoldingTab` CREATES the column and NAMES the rows that still need a date** (owner's
+  request, 23-Sep-2026: *"can't you do it when i rebuild holding you can add columns"*). Finding
+  the first free cell of row 1 and typing the header exactly is the fiddly half of the job; the
+  date itself cannot be inferred, so the cells stay blank and `transfersNeedingDate` goes on the
+  rebuild badge with both portfolios named. Only when the ledger HAS a transfer leg — a column on
+  a portfolio that never transfers anything is clutter, and clutter is how a real one stops being
+  noticed. Wrapped so it can never fail the rebuild, like the CMP write. The rebuild's read
+  widened to `A:Z` for the same reason the as-of one did: `Notes` is what identifies a transfer
+  leg written as a plain `Buy`.
+- **`colA1` has ONE definition**, in `tradeRowSchema.ts`. Two writers now append a header (the
+  trade writer and the rebuild) and `holdingsCalc` cannot import `manualTrades` — that module
+  imports IT. A second copy that disagreed would put the header one column off and orphan the
+  data under it.
+- **`isTransferLeg` reaches the rebuild, and only as a LIST.** It is called exactly once, to
+  collect the rows needing a date; `xfer` — which decides whether the same-day square-off leaves
+  a row alone — stays on the TYPE. Both directions probed: classifying the row from the note, and
+  letting the register import it at all.
 - **A row without one is unchanged**, exactly as a row without a `Ratio` keeps its stored
   quantity. Every row written before 23-Sep-2026 has none.
 - **The read range had to widen.** `computeHoldingsAsOf` read `True Entry!A:T`, which could not

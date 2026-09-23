@@ -337,10 +337,21 @@ ok('F1 the marker is a separate helper, not a widening of isTransferType',
   schema.includes('export const isTransferLeg') && schema.includes('XFER_NOTE_RE'));
 ok('F2 isTransferType still matches only the two real transfer TYPES',
   schema.includes('return XFER_OUT_RE.test(t) || XFER_IN_RE.test(t);'));
-ok('F3 ...and no engine consults the note-based one',
-  !src('src/lib/holdingsCalc.ts').includes('isTransferLeg')
-  && !src('src/lib/trxRegister.ts').includes('isTransferLeg')
-  && !src('src/lib/navTimeline.ts').includes('isTransferLeg'));
+ok('F3 no tax or valuation engine consults the note-based one',
+  !src('src/lib/trxRegister.ts').includes('isTransferLeg')
+  && !src('src/lib/navTimeline.ts').includes('isTransferLeg')
+  && !src('src/lib/openingBasis.ts').includes('isTransferLeg'));
+// holdingsCalc DOES call it — once, and only to LIST the rows that still need a demat date so
+// the rebuild can name them. It must never reach the row's classification: `xfer`, which decides
+// whether the same-day square-off leaves a row alone, stays on the TYPE. A hand-typed note would
+// otherwise start moving positions.
+{
+  const calc = src('src/lib/holdingsCalc.ts');
+  ok('F3b ...and holdingsCalc calls it exactly once, to list rows, never to classify one',
+    (calc.split('isTransferLeg(').length - 1) === 1
+    && /if \(isTransferLeg\(r\[typeIdx\], notesIdx >= 0 \? r\[notesIdx\] : ""\)\) \{/.test(calc)
+    && /const xfer = isTransferType\(r\[typeIdx\]\);/.test(calc));
+}
 
 // All four phrasings the transfer tool writes, and nothing else.
 const xfer = src('src/lib/transferHolding.ts');

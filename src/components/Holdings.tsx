@@ -4743,6 +4743,34 @@ export default function Holdings({
                             ⚠ {rb.result.nameCollisions.length} name collision{rb.result.nameCollisions.length > 1 ? 's' : ''}
                           </span>
                         )}
+                        {/* A cross-portfolio transfer carries TWO dates: the row's own date is the
+                            acquisition (which is what the holding period runs from), and the
+                            Transfer Date is when the shares actually reached this demat. Only the
+                            owner knows the second one, so the rebuild creates the column and names
+                            the rows — an empty column that the Historical Holding Report reads is
+                            exactly the shape of mistake that costs a week. */}
+                        {(rb.result.transfersNeedingDate?.length ?? 0) > 0 && (
+                          <span
+                            className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg"
+                            title={[
+                              rb.result.transferDateColumnAdded
+                                ? 'A "Transfer Date" column was added to the True Entry tab.'
+                                : 'The True Entry tab already has a "Transfer Date" column.',
+                              'Type the date the shares actually reached THIS demat against each row below. Until then the Historical Holding Report dates them from their ACQUISITION, which is before they arrived.',
+                              ...rb.result.transfersNeedingDate.map(
+                                (t) => `\u2022 ${t.name}${t.date ? `  (row dated ${formatDMY(t.date)})` : ''}`,
+                              ),
+                              "Do the same on the other portfolio's matching row, or the shares go missing from both books in between.",
+                            ].join('\n\n')}
+                          >
+                            &#9888; {rb.result.transfersNeedingDate.length} transfer{rb.result.transfersNeedingDate.length > 1 ? 's' : ''} need{rb.result.transfersNeedingDate.length > 1 ? '' : 's'} a demat date
+                          </span>
+                        )}
+                        {rb.result.transferColumnError && (
+                          <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={rb.result.transferColumnError}>
+                            &#9888; Transfer Date column not added
+                          </span>
+                        )}
                       </>
                     ) : (
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={rb.error}>✗ Rebuild failed</span>

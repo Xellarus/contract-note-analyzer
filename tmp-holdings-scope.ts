@@ -326,8 +326,39 @@ ok('the mount read stamps the same clock',
   ok('...and the lots are still stamped with it, so no holding period moves',
     /fifoEvents\.push\(\{ kind: "BUY", key, ts: t\.ts/.test(ASOF));
 
+  // Rebuild Holding creates the column, because finding the first free cell of row 1 and typing
+  // the header exactly is the fiddly half of the job (owner, 23-Sep-2026: "can't you do it when i
+  // rebuild holding you can add columns"). The DATE cannot be inferred — only the owner knows it.
+  const REB = CALC.slice(CALC.indexOf('export async function rebuildHoldingTab'));
+  ok('6 the rebuild creates the Transfer Date column',
+    /values\.update\(\{/.test(REB) && /True Entry!\$\{colA1\(hdrs\.length\)\}1/.test(REB)
+    && /values: \[\["Transfer Date"\]\]/.test(REB));
+  ok('...only when the ledger actually HAS a transfer leg',
+    /if \(transferRows\.length > 0 && xferDateIdx < 0\)/.test(REB));
+  ok('...and never fails the rebuild, which has already written the Holding tab',
+    /transferColumnError = e\?\.result\?\.error\?\.message/.test(REB));
+  ok('...it sees Notes, which is what marks a transfer written as a plain Buy',
+    /range: "True Entry!A:Z"/.test(REB) && /headerKey\(h\) === "notes"/.test(REB));
+  // An empty column the report reads is the shape of mistake that cost a week in September.
+  ok('6 the rows still needing a date are NAMED on the result',
+    /transfersNeedingDate: transferRows\.filter\(t => !t\.dated\)/.test(REB));
+  ok('...and surfaced on the rebuild badge',
+    /transfersNeedingDate\?\.length/.test(HOLD) && /reached THIS demat/.test(HOLD));
+  ok('...telling the owner to do the other portfolio too',
+    /matching row, or the shares go missing from both books/.test(HOLD));
+  // ONE colA1: two writers append a header now, and a second copy that disagreed would put it
+  // one column off and orphan the data under it.
+  ok('6 colA1 has a single definition, shared by both writers',
+    /export function colA1/.test(SCHEMA)
+    && !/^function colA1/m.test(strip('src/lib/manualTrades.ts'))
+    && /colA1/.test(strip('src/lib/manualTrades.ts')));
+
   // A row written before the column existed must behave exactly as it always did.
   ok('6 a row with no Transfer Date is unchanged', /const xferTs = xferDateIdx >= 0 \? parseDateTs/.test(CALC));
+  // This is the one column the owner adds BY HAND, so an exact-match lookup would drop
+  // "Transfer date" or "Received On" in silence — and silence reads as "the feature did nothing".
+  ok('...and the column is found by headerKey, not by an exact header string',
+    /headerKey\(h\) === "transferDate"/.test(CALC) && !/col\("Transfer Date"/.test(CALC));
   // The ledger is 22 columns wide now; A:T could not even see Notes.
   ok('...and the read range reaches the new column', /range: "True Entry!A:Z"/.test(CALC));
 
@@ -338,8 +369,11 @@ ok('the mount read stamps the same clock',
   ] as [string, string][]) {
     ok(`6 ${label} does not read the transfer date`, !/transferDate|Transfer Date/.test(strip(f)));
   }
-  ok('6 rebuildHoldingTab does not read it either (the Holding tab is "now")',
-    !/xferDateIdx/.test(CALC.slice(CALC.indexOf('export async function rebuildHoldingTab'))));
+  // rebuildHoldingTab DOES look at xferDateIdx — but only to decide whether the column already
+  // exists before creating it. What it must never do is let the date move a POSITION: the Holding
+  // tab states what is held now, and by now both dates are in the past.
+  ok('6 the rebuild never lets the transfer date move a position',
+    !/effTs/.test(CALC.slice(CALC.indexOf('export async function rebuildHoldingTab'))));
 
   // A holding that quietly disappears off a statement is the failure this column exists to
   // prevent — it must not create a second one.
