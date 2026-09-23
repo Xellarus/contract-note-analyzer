@@ -71,6 +71,14 @@ export interface HistoryGapResult {
   remaining?: number;
   /** Had a symbol, and the feed still returned nothing. */
   stillMissing?: string[];
+  /**
+   * WHY those fetches produced nothing, grouped. "rate limited (HTTP 429)" and "symbol not found"
+   * are the same empty cell with opposite answers — run it again more slowly, versus fix the
+   * master row — and before 23-Sep-2026 the response could not tell them apart.
+   */
+  failReasons?: { reason: string; count: number; sample: string }[];
+  /** False when the run wrote nothing to the tab because nothing was fetched. */
+  wrote?: boolean;
   dates?: number;
   cols?: number;
   busy?: boolean;

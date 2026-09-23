@@ -194,11 +194,26 @@ async function priceAsOfDate(
  */
 function describeGapFix(r: HistoryGapResult): string {
   const parts: string[] = [];
-  parts.push(r.filled
-    ? `Fetched price history for ${r.filled} scrip${r.filled === 1 ? '' : 's'}. Generate the report again to see the prices.`
-    : 'No scrip was missing a price-history column.');
+  // "Nothing was missing" and "nothing could be fetched" are OPPOSITE outcomes and the first
+  // version of this line printed the former for both — it told the owner there was no gap while
+  // 79 scrips were queued and none had come back. `filled === 0` means nothing was FETCHED.
+  const tried = r.targets ?? 0;
+  parts.push(
+    tried === 0
+      ? 'No scrip was missing a price-history column.'
+      : r.filled
+        ? `Fetched price history for ${r.filled} of ${tried} scrip${tried === 1 ? '' : 's'}. Generate the report again to see the prices.`
+        : `Tried ${tried} scrip${tried === 1 ? '' : 's'} and the feed returned data for none of them, so this is not a per-scrip problem. Nothing was written to the price history.`,
+  );
+  // The reason, grouped. This is the line that says whether to retry or to go fix the sheet.
+  if (r.failReasons?.length) {
+    parts.push('Why: ' + r.failReasons.map(f => `${f.count}\u00d7 ${f.reason}${f.sample ? ` (e.g. ${f.sample})` : ''}`).join('; ') + '.');
+    if (r.failReasons.some(f => /429|blocked|HTTP 5/.test(f.reason))) {
+      parts.push('That is the price feed refusing the request rather than a problem with these scrips — wait a few minutes and run it again.');
+    }
+  }
   if (r.remaining) parts.push(`${r.remaining} more ${r.remaining === 1 ? 'is' : 'are'} queued behind the per-run cap — run it again to continue.`);
-  if (r.stillMissing?.length) parts.push(`The feed returned nothing for ${nameSome(r.stillMissing)}.`);
+  if (r.stillMissing?.length) parts.push(`Affected: ${nameSome(r.stillMissing)}.`);
   if (r.noSymbol) {
     parts.push(
       `${r.noSymbol} scrip${r.noSymbol === 1 ? '' : 's'} cannot be fetched at all: the scrip master carries no NSE or BSE code for ${r.noSymbol === 1 ? 'it' : 'them'}, so the price script skips ${r.noSymbol === 1 ? 'it' : 'them'} before fetching anything. ${r.noSymbol === 1 ? 'It is' : 'They are'}: ${nameSome(r.noSymbolNames || [])}. Add the exchange code where the company has listed; where the IPO has not happened there is nothing to add.`,

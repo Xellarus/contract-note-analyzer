@@ -1024,9 +1024,20 @@ function backfillMissingHistory(deep, cap) {
     // MERGE — `full` is false, and that is the whole safety argument for this function. Passing
     // true would rebuild the tab from just the handful of scrips fetched here and destroy every
     // other column on it.
-    var written = writePriceHistory_(cols, byDate, false);
+    // Nothing came back → do not touch the tab at all. Rewriting ~330 columns x ~500 rows to
+    // add zero cells is a large, pointless write against the only copy of this history, and a
+    // partial failure half way through it would be unrecoverable.
+    var written = { dates: 0, cols: 0 };
+    if (got.length > 0) {
+      // MERGE — `full` is false, and that is the whole safety argument for this function. Passing
+      // true would rebuild the tab from the handful of scrips fetched here and destroy every other
+      // column on it.
+      written = writePriceHistory_(cols, byDate, false);
+    }
 
     out.filled = got.length;
+    out.wrote = got.length > 0;
+    out.failReasons = groupFailReasons_([res.failed, res2.failed]);
     out.stillMissing = uncoveredNames_(res, res2);
     out.dates = written.dates;
     out.cols = written.cols;
@@ -1101,9 +1112,23 @@ function priceHistoryLocked_(range, full) {
       }
     }
 
-    var written = writePriceHistory_(cols, byDate, full);
+    // A FULL pass REBUILDS the tab: every column not in `cols` disappears. That is correct when
+    // the fetch worked and catastrophic when it did not — and on 23-Sep-2026 a run came back with
+    // 0 of 60 scrips fetched, which as a rebuild would have emptied the whole history. So a full
+    // pass that lost most of its fetches is DOWNGRADED to a merge and says so. The caller asked
+    // to reset the tab; it did not ask to lose it.
+    var writeFull = !!full;
+    var downgradedToMerge = false;
+    if (writeFull && got.length < Math.ceil(targets.length * 0.6)) {
+      writeFull = false;
+      downgradedToMerge = true;
+      Logger.log('FULL rebuild downgraded to a merge: only ' + got.length + ' of ' + targets.length + ' scrips returned data.');
+    }
+    var written = writePriceHistory_(cols, byDate, writeFull);
     return {
-      ok: true, full: !!full, range: range,
+      ok: true, full: !!full, rebuilt: writeFull, downgradedToMerge: downgradedToMerge,
+      failReasons: groupFailReasons_([res.failed, res2.failed]),
+      range: range,
       universe: universe.length, targets: targets.length, noSymbol: noSymbol,
       noSymbolNames: noSymbolNames, dupes: dupes,
       priced: got.length, missed: res2.failed.length + (res.failed.length - retry.length),
@@ -1186,6 +1211,27 @@ function collectHistoryUniverse_() {
 }
 
 /**
+ * Failure reasons, grouped with a count and one example symbol each. One line saying
+ * "40 scrips: rate limited (HTTP 429)" is a different instruction from "40 scrips: symbol not
+ * found" — the first means run it again more slowly, the second means the master row is wrong.
+ */
+function groupFailReasons_(failedLists) {
+  var by = {}, order = [];
+  for (var i = 0; i < failedLists.length; i++) {
+    var list = failedLists[i] || [];
+    for (var j = 0; j < list.length; j++) {
+      var why = list[j].failReason || 'no reason recorded';
+      if (!by[why]) { by[why] = { reason: why, count: 0, sample: list[j].symbol || list[j].name || '' }; order.push(why); }
+      by[why].count++;
+    }
+  }
+  var out = [];
+  for (var k = 0; k < order.length; k++) out.push(by[order[k]]);
+  out.sort(function (a, b) { return b.count - a.count; });
+  return out.slice(0, 8);
+}
+
+/**
  * Names of the scrips NO symbol could price, so the app can name what a NAV is missing instead
  * of quietly under-reporting it. Capped, to keep the /exec JSON small.
  */
@@ -1202,8 +1248,32 @@ function uncoveredNames_(res, res2) {
 }
 
 /** Batched daily-candle fetch. Smaller chunks than the price pass: ~500 candles per response. */
+/**
+ * WHY a candle fetch produced nothing. `parseHistory_` returns null for a rate-limit, a missing
+ * symbol and a genuinely empty series alike, so "the feed returned nothing" covered three faults
+ * with completely different answers — reported 23-Sep-2026, when 60 of 60 scrips failed at once
+ * and the response could not say whether that was Yahoo throttling or 60 bad symbols.
+ */
+function historyFailReason_(resp) {
+  try {
+    var code = resp.getResponseCode();
+    if (code === 429) return 'rate limited (HTTP 429)';
+    if (code === 404) return 'symbol not found (HTTP 404)';
+    if (code === 401 || code === 403) return 'blocked (HTTP ' + code + ')';
+    if (code !== 200) return 'HTTP ' + code;
+    var j = JSON.parse(resp.getContentText());
+    var err = j && j.chart && j.chart.error;
+    if (err) return String(err.description || err.code || 'chart error').slice(0, 90);
+    var res = j && j.chart && j.chart.result && j.chart.result[0];
+    if (!res) return 'no chart data';
+    if (!res.timestamp || !res.timestamp.length) return 'no candles in this range';
+    return 'candles with no usable close';
+  } catch (e) { return 'unreadable response'; }
+}
+
 function fetchHistoryBatch_(targets, range) {
   var ok = [], failed = [];
+  var throttled = false;
   for (var start = 0; start < targets.length; start += CONFIG.HISTORY_BATCH) {
     var chunk = targets.slice(start, start + CONFIG.HISTORY_BATCH);
     var requests = chunk.map(function (t) {
@@ -1215,17 +1285,24 @@ function fetchHistoryBatch_(targets, range) {
         headers: { 'User-Agent': 'Mozilla/5.0' },   // Yahoo 403s a blank UA
       };
     });
+    // Back off after a batch that was throttled. ~500 candles x 15 symbols is a heavy ask and
+    // Yahoo answers a burst with 429s; without this the remaining batches inherit the block and
+    // the whole run reads as "no data for any of these scrips".
+    if (throttled) { Utilities.sleep(2000); throttled = false; }
     var responses;
     try { responses = UrlFetchApp.fetchAll(requests); }
     catch (e) {
       Logger.log('history fetchAll failed: ' + e);
-      for (var z = 0; z < chunk.length; z++) failed.push(chunk[z]);
+      for (var z = 0; z < chunk.length; z++) { chunk[z].failReason = 'request failed: ' + e; failed.push(chunk[z]); }
       continue;
     }
     for (var k = 0; k < responses.length; k++) {
       var h = parseHistory_(responses[k]);
-      if (h && h.dates.length) ok.push({ t: chunk[k], series: h });
-      else failed.push(chunk[k]);
+      if (h && h.dates.length) { ok.push({ t: chunk[k], series: h }); continue; }
+      var why = historyFailReason_(responses[k]);
+      if (why.indexOf('429') >= 0) throttled = true;
+      chunk[k].failReason = why;
+      failed.push(chunk[k]);
     }
   }
   return { ok: ok, failed: failed };

@@ -1157,7 +1157,24 @@ and it would look like a successful run. Pinned.
   it would be a button that cannot help. The price cache is dropped afterwards, and the summary
   says to generate the report again.
 - **Editing the repo copy changes nothing until it is saved in the Apps Script editor.** The
-  response carries `version` (`RESOLVER_VERSION_`) for exactly that reason.
+  response carries `version` (`RESOLVER_VERSION_`) for exactly that reason — and it must be BUMPED
+  when the file changes, or it proves nothing. It sat at `2026-09-08` through three later edits.
+- **`parseHistory_` returned `null` for a rate-limit, a missing symbol and an empty series alike**
+  (23-Sep-2026, on a real run that fetched **0 of 60** scrips and could not say why).
+  `historyFailReason_` now reads the response code and the chart error, and `groupFailReasons_`
+  returns them counted with an example symbol. *"40× rate limited (HTTP 429)"* and *"40× symbol
+  not found"* are the same empty column with opposite answers: retry more slowly, versus fix the
+  master row. A batch that is throttled sleeps 2s before the next one, or the whole run inherits
+  the block and reads as "no data for any of these scrips".
+- **A run that fetched nothing writes NOTHING.** Rewriting ~330 columns × ~500 rows to add zero
+  cells is a large pointless write against the only copy of this history, and a partial failure
+  inside it is unrecoverable.
+- **A FULL rebuild that lost most of its fetches is DOWNGRADED to a merge**, and says so. `full`
+  means every column not in this run's results disappears; the 0-of-60 failure through that path
+  would have emptied the entire history. The caller asked to reset the tab, not to lose it.
+- **"Nothing was missing" and "nothing could be fetched" are opposite outcomes**, and the first
+  version of the summary printed the former for both — telling the owner there was no gap while
+  79 scrips were queued and none had come back. `filled === 0` means nothing was FETCHED.
 
 **A TAXABLE CROSS-PORTFOLIO TRANSFER IS AN ORDINARY BUY, AND THE LEDGER IS RIGHT TO SAY SO**
 (23-Sep-2026, asked as *"in the app you have mentioned it in buy its good but for the ui purpose

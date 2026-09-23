@@ -368,5 +368,43 @@ ok('F6 the badge is suppressed where the type already says transfer',
 ok('F7 ...and carries the note itself as its tooltip',
   hold.includes("title={t.notes || 'Written by the cross-portfolio transfer tool'}"));
 
+
+// ── G. WHY the feed returned nothing ─────────────────────────────────────────
+//
+// 23-Sep-2026: a real run fetched 0 of 60 scrips and reported "No scrip was missing a
+// price-history column" — the opposite of the truth — while `parseHistory_` collapsed a
+// rate-limit, a missing symbol and an empty series into one `null`.
+ok('G1 a failed candle fetch records WHY, per response code',
+  gs.includes("if (code === 429) return 'rate limited (HTTP 429)'")
+  && gs.includes("if (code === 404) return 'symbol not found (HTTP 404)'")
+  && gs.includes("return 'no candles in this range'"));
+ok('G2 ...and the reasons are grouped with a count and an example',
+  gs.includes('function groupFailReasons_') && gapFn.includes('out.failReasons = groupFailReasons_'));
+ok('G3 ...a throttled batch backs off instead of poisoning the rest of the run',
+  gs.includes('if (throttled) { Utilities.sleep(2000); throttled = false; }'));
+
+// Writing ~330 columns x ~500 rows to add nothing is a large pointless write against the only
+// copy of this history, and a partial failure in it is unrecoverable.
+ok('G4 a run that fetched nothing does not touch the tab at all',
+  /var written = \{ dates: 0, cols: 0 \};\s*\n\s*if \(got\.length > 0\) \{/.test(gapFn));
+
+// THE DESTRUCTIVE ONE. `?hist=full` REBUILDS: every column not in this run's results disappears.
+// The same 0-of-60 failure through that path would have emptied the entire history.
+ok('G5 a FULL rebuild that lost most of its fetches is downgraded to a merge',
+  gs.includes('if (writeFull && got.length < Math.ceil(targets.length * 0.6))')
+  && gs.includes('downgradedToMerge = true'));
+ok('G6 ...and says so, rather than reporting a successful rebuild',
+  gs.includes('rebuilt: writeFull, downgradedToMerge: downgradedToMerge'));
+
+// The summary must not call "nothing was fetched" the same thing as "nothing was missing".
+ok('G7 the summary tells those two apart',
+  gapSummary.includes("tried === 0") && gapSummary.includes('No scrip was missing a price-history column.')
+  && gapSummary.includes('the feed returned data for none of them'));
+ok('G8 ...and says nothing was written when nothing was',
+  gapSummary.includes('Nothing was written to the price history.'));
+ok('G9 ...and names the reason, with retry advice only when it IS a feed refusal',
+  gapSummary.includes("parts.push('Why: '")
+  && /429\|blocked\|HTTP 5/.test(gapSummary));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
