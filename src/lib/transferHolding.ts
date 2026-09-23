@@ -138,6 +138,10 @@ export function buildTransferRecords(args: BuildTransferArgs): {
     txType: string, tradeDMY: string, lot: TransferLot, notes: string,
   ): TransferRecord => ({
     date: toIsoDate(tradeDMY),
+    // The day the shares actually moved, which is NOT the row's own date on the IN leg — that
+    // one carries the original acquisition so the holding period survives. Only the as-of
+    // holding question reads this; nothing about tax or cost basis may.
+    transferDate: toIsoDate(transferDMY),
     isin: "",                       // True Entry has no ISIN column; identity is the name
     name: securityName,
     txType,
@@ -190,6 +194,10 @@ export function buildSaleRecords(args: BuildTransferArgs & { salePrice: number }
     isin: "", name: securityName, qty, price: px, turnover, ...ZERO_CHARGES,
     totalWithExpInclSTT: turnover, totalWithExpExclSTT: turnover,
     tradeClass: "Delivery", importId: transferRef,
+    // Equal to each row's own date here, because a taxable transfer dates both legs at the
+    // transfer. It is still written, so a BACK-DATED one can be corrected in the sheet
+    // afterwards without the column having to be created by hand.
+    transferDate: toIsoDate(transferDMY),
   };
   return {
     // A real disposal: ONE row at the agreed price, dated the transfer date, and capital

@@ -31,7 +31,7 @@ import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
 import { useRowNav } from '../lib/rowNav';
 import { onShortcut, HOLDINGS_SEARCH_ID } from '../lib/shortcuts';
-import { ledgerSide, isSplitType, isTransferType, solveQtyPriceAmount, isFreeShareType, parseRatio, formatRatio, freeSharesFor, FreeShareRatio } from '../lib/tradeRowSchema';
+import { ledgerSide, isSplitType, isTransferType, isTransferLeg, solveQtyPriceAmount, isFreeShareType, parseRatio, formatRatio, freeSharesFor, FreeShareRatio } from '../lib/tradeRowSchema';
 import { TransferHoldingModal } from './TransferHoldingModal';
 import { formatDMY, formatDMYTime, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
 import ScripReviewModal from './ScripReviewModal';
@@ -4119,6 +4119,18 @@ export default function Holdings({
                                 }`}>
                                   {t.transactionType}
                                 </span>
+                                {/* A taxable cross-portfolio transfer is written as an ordinary
+                                    Sell + Buy, so the receiving row reads "Buy" and is right to.
+                                    This marks WHERE it came from without touching how it is
+                                    valued — display only, off the note the transfer tool wrote. */}
+                                {!isTransferType(t.transactionType) && isTransferLeg(t.transactionType, t.notes) && (
+                                  <span
+                                    className="inline-block ml-1.5 px-2 py-0.5 rounded-[6px] text-[10px] font-black border tracking-wider select-none bg-indigo-50 text-indigo-800 border-indigo-200"
+                                    title={t.notes || 'Written by the cross-portfolio transfer tool'}
+                                  >
+                                    Transferred
+                                  </span>
+                                )}
                               </td>
                               <td className="px-6 py-3.5 text-right font-mono font-bold text-slate-700">
                                 {/* A demerger leaves the parent's share count alone — it only moves cost;

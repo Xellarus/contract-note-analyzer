@@ -59,6 +59,7 @@ const DEFAULT_HEADER = [
   "Exchange Turnover Charges", "SEBI Turnover Fees", "IPF Charges", "IGST",
   "Stamp Duty", "Total Expenses (incl STT)", "Total Expenses (excl STT)",
   "Total Amount with Expense (Incl STT)", "Total Amount with Expense (Excl STT)", "Trade Class", "Ratio", "Notes",
+  "Transfer Date",
 ];
 
 const r2 = (n: number): number => Math.round((Number(n) || 0) * 100) / 100;
@@ -70,6 +71,8 @@ interface RowRecord {
   exchangeCharges: number; sebiFees: number; ipf: number; gst: number; stampDuty: number;
   totalExpInclSTT: number; totalExpExclSTT: number; totalWithExpInclSTT: number;
   totalWithExpExclSTT: number; tradeClass: string; ratio: string; notes: string;
+  /** Cross-portfolio transfers only: the day the shares reached this demat. See headerKey. */
+  transferDate?: string;
 }
 
 function buildRecord(line: ManualTradeLine, tradeDate: string, master: ScripMaster | null): RowRecord {
@@ -155,6 +158,7 @@ export async function appendRecordsToTab(spreadsheetId: string, tab: string, rec
   };
   await appendCol("Ratio", "ratio", (r) => (r.ratio || "").toString().trim() !== "");
   await appendCol("Notes", "notes", (r) => (r.notes || "").toString().trim() !== "");
+  await appendCol("Transfer Date", "transferDate", (r) => (r.transferDate || "").toString().trim() !== "");
 
   const rows = mapRecordsToHeader(header, records);
   const payload = empty ? [header, ...rows] : rows;

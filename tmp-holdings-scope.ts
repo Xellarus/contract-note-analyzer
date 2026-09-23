@@ -282,5 +282,78 @@ ok('the mount read stamps the same clock',
     /Years already filed are unaffected/.test(HOLD));
 }
 
+
+// ── 6. SHARES THAT WERE SOMEWHERE ELSE ON THAT DATE ──────────────────────────
+//
+// 23-Sep-2026: "it was a transfer so it wont be a part of historical holding on the aquisition
+// date but rather a part of transfer to demat date". A cross-portfolio transfer leg is dated at
+// the ORIGINAL acquisition so the holding period survives — which put the shares in the receiving
+// book months before they arrived. Two dates, two questions, and only ONE of them may move.
+{
+  const CALC = strip('src/lib/holdingsCalc.ts');
+  const SCHEMA = strip('src/lib/tradeRowSchema.ts');
+  const XFER = strip('src/lib/transferHolding.ts');
+  const REP = strip('src/components/Reports.tsx');
+
+  // The column, and the one heading it must never have: /demat|dmat|dp charge/ already claims
+  // the DP-CHARGE column, so "Demat Date" would be read as a rupee amount.
+  ok('6 the custody date has its own header key',
+    /transfer date\|transferred on\|received on/.test(SCHEMA) && /return "transferDate"/.test(SCHEMA));
+  ok('...tested before the demat CHARGE rule that would otherwise claim it',
+    SCHEMA.indexOf('return "transferDate"') < SCHEMA.indexOf('return "dmat"'));
+  ok('...and it is auto-appended like Ratio and Notes were',
+    /appendCol\("Transfer Date", "transferDate"/.test(strip('src/lib/manualTrades.ts')));
+
+  // Written on BOTH legs. Gating only the incoming side turns a double-count into a HOLE:
+  // the source book has already dropped the shares at its own (possibly back-dated) row date.
+  ok('...stamped by the cost-carrying transfer builder', /transferDate: toIsoDate\(transferDMY\)/.test(XFER));
+  ok('...and by the taxable one too', XFER.split('transferDate: toIsoDate(transferDMY)').length - 1 >= 2);
+
+  // THE WHOLE POINT: the as-of window tests the EFFECTIVE date, the lot keeps its own.
+  // SCOPED to computeHoldingsAsOf. `rebuildHoldingTab` further down carries a byte-identical
+  // FIFO sort and BUY push, so a file-wide regex is satisfied by the wrong function: two probes
+  // here came back silent with the as-of replay genuinely broken.
+  const ASOF = CALC.slice(CALC.indexOf('export async function computeHoldingsAsOf'),
+                          CALC.indexOf('export async function rebuildHoldingTab'));
+  ok('6 the as-of window filters on the effective date',
+    /trades\.filter\(t => \(t\.effTs \?\? t\.ts\) <= asOfTs\)/.test(ASOF));
+  ok('...effTs is max(row date, transfer date), never earlier',
+    /effTs: xferTs > ts \? xferTs : ts/.test(ASOF));
+  // If the SORT moved to effTs, FIFO would consume lots out of acquisition order and change a
+  // cost basis — the one thing this change must not touch.
+  ok('...while the FIFO sort stays on the acquisition date',
+    /trades\.sort\(\(a, b\) => \(a\.ts - b\.ts\) \|\| \(a\.idx - b\.idx\)\)/.test(ASOF));
+  ok('...and the lots are still stamped with it, so no holding period moves',
+    /fifoEvents\.push\(\{ kind: "BUY", key, ts: t\.ts/.test(ASOF));
+
+  // A row written before the column existed must behave exactly as it always did.
+  ok('6 a row with no Transfer Date is unchanged', /const xferTs = xferDateIdx >= 0 \? parseDateTs/.test(CALC));
+  // The ledger is 22 columns wide now; A:T could not even see Notes.
+  ok('...and the read range reaches the new column', /range: "True Entry!A:Z"/.test(CALC));
+
+  // NOTHING tax-side may read it. This is the guard that keeps the change report-only.
+  for (const [f, label] of [
+    ['src/lib/trxRegister.ts', 'the capital-gains register'],
+    ['src/lib/openingBasis.ts', 'the opening-basis engine'],
+  ] as [string, string][]) {
+    ok(`6 ${label} does not read the transfer date`, !/transferDate|Transfer Date/.test(strip(f)));
+  }
+  ok('6 rebuildHoldingTab does not read it either (the Holding tab is "now")',
+    !/xferDateIdx/.test(CALC.slice(CALC.indexOf('export async function rebuildHoldingTab'))));
+
+  // A holding that quietly disappears off a statement is the failure this column exists to
+  // prevent — it must not create a second one.
+  // Asserted on the footnote LIST, not on the const: deleting the line that files it left the
+  // variable defined and the probe silent.
+  ok('6 the report names what it held back',
+    /deferredTransfers/.test(REP) && /^\s*transferNote,$/m.test(REP));
+  ok('...both directions: not here yet, and not gone yet',
+    /d\.side === 'in'/.test(REP) && /d\.side === 'out'/.test(REP));
+  ok('...says the tax figures are unaffected',
+    /holding period and every capital-gains figure are unaffected/.test(REP));
+  ok('...and is narrowed the same way the rows are, so a scoped report names nothing it omitted',
+    /res\.deferredTransfers\.filter\(d =>/.test(REP));
+}
+
 console.log(`\n${'='.repeat(60)}\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

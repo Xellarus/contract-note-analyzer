@@ -147,9 +147,18 @@ export interface PriceAsOf {
   sessionDate: string;
   /** True when `sessionDate` is EARLIER than the session the requested date resolves to. */
   carried: boolean;
+  /**
+   * WHY there is no price, when there is none; "" when priced. The distinction is the whole
+   * value of this field: a scrip with no COLUMN was never fetched (a configuration gap, and the
+   * `Price History` writer skips any scrip it cannot resolve to a symbol — `if (!syms.primary)
+   * continue`), whereas a scrip with a column and no recent CLOSE is suspended or delisted. Both
+   * render as an empty cell, and they have nothing to do with each other.
+   */
+  miss: "" | "no-column" | "no-close" | "before-history";
 }
 
-const NO_PRICE: PriceAsOf = { price: null, sessionDate: "", carried: false };
+const noPrice = (miss: PriceAsOf["miss"]): PriceAsOf =>
+  ({ price: null, sessionDate: "", carried: false, miss });
 
 /**
  * One scrip's close **as at a past date** — what a historical valuation report needs, and the
@@ -180,14 +189,14 @@ export function priceAsOf(
   ts: number,
   maxCarry: number = MAX_CARRY_SESSIONS,
 ): PriceAsOf {
-  if (!key) return NO_PRICE;
+  if (!key) return noPrice("no-column");            // the resolver matched no column
   const ord = grid.colIndex.get(key);
-  if (ord === undefined) return NO_PRICE;
+  if (ord === undefined) return noPrice("no-column");
   const si = sessionIndexAsOf(grid, ts);
-  if (si < 0) return NO_PRICE;                       // the date precedes the grid entirely
+  if (si < 0) return noPrice("before-history");     // the date precedes the grid entirely
   for (let i = si; i >= 0 && si - i <= maxCarry; i--) {
     const v = grid.rows[i][ord];
-    if (v !== null) return { price: v, sessionDate: grid.dates[i], carried: i < si };
+    if (v !== null) return { price: v, sessionDate: grid.dates[i], carried: i < si, miss: "" };
   }
-  return NO_PRICE;
+  return noPrice("no-close");
 }

@@ -41,9 +41,9 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
-| `npx tsx tmp-price-asof.ts` | **Pricing a PAST position** — `priceAsOf` driven directly over a hand-built grid whose 31-March is deliberately a holiday: the session lookup, the bounded carry at exactly its boundary, a date before the grid (unpriced, never the grid's first close) and one after it (clamps, correctly), and `null`-never-0. Plus a source sweep over comment-stripped source for the wiring `tsc` cannot see — that the report prices at its OWN date and never `Date.now()`, that unlisted is tested with `classOfEntryAsOf` rather than a raw `assetClass` read, that no cell takes a zero fallback, that `computeHoldingsAsOf` still does NOT read the price grid, and that every reason a cell is blank is disclosed, and that the SCREEN renders the same disclosure the file carries (38). All 19 probes fire |
+| `npx tsx tmp-price-asof.ts` | **Pricing a PAST position** — `priceAsOf` driven directly over a hand-built grid whose 31-March is deliberately a holiday: the session lookup, the bounded carry at exactly its boundary, a date before the grid (unpriced, never the grid's first close) and one after it (clamps, correctly), and `null`-never-0. Plus a source sweep over comment-stripped source for the wiring `tsc` cannot see — that the report prices at its OWN date and never `Date.now()`, that unlisted is tested with `classOfEntryAsOf` rather than a raw `assetClass` read, that no cell takes a zero fallback, that `computeHoldingsAsOf` still does NOT read the price grid, and that every reason a cell is blank is disclosed, that the SCREEN renders the same disclosure the file carries, that the gap-filling backfill MERGES rather than rebuilding, and that the display-only transfer marker reaches no engine (82). All 44 probes fire |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
-| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, or a sheet the page never re-read (45). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
+| `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, the wrong DEMAT, or a sheet the page never re-read (63). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
 | `npx tsx tmp-verify.ts` | Report renderers — writes a real PDF + XLSX and reads them back |
 | `node tmp-xverify.mjs` | Cross-broker PDF extraction comparison |
@@ -1081,6 +1081,142 @@ statement about today; printing it against a 31-Mar-2025 position would date thi
 to last year's statement. The test is `classOfEntryAsOf(entry, asOfTs)` at the REPORT's date, not
 a raw `assetClass` read — so a company that has since listed is priced for the sessions it was
 actually listed for, and its pre-listing years stay blank.
+
+**A BLANK CELL MUST SAY WHICH KIND OF BLANK IT IS** (23-Sep-2026, reported against a real S713
+run: *"a few stocks dont have a current value registered … there are stocks who's ipo didnt happen
+so it's fine just mention in current value ipo didnt happen; you can see that a few stocks despite
+the exceptions their current value was blank so look at it"*). 15 of 103 rows came back empty and
+nothing on the page said which of them were EXPECTED. An ETF deliberately excluded from the price
+feed, a pre-IPO allotment that has never traded, and a listed company the price script has never
+managed to fetch all print an identical empty cell — and they have completely different remedies,
+one of which is *nothing*.
+
+The reason is now printed **in the Current Value cell**, not only in a footnote — `formatCell`
+renders a non-numeric value in a money column verbatim, so this needs no new column type. Six
+reasons, in `BLANK` in `Reports.tsx`, each with its label and the sentence the footnote prints:
+
+| Cell reads | Means | Remedy |
+|---|---|---|
+| `Unlisted` | unlisted on that date | none — by design |
+| `Price exception` | `Price Exception` set in the master | none — ETFs/liquid funds are marked this way |
+| `Not listed` | **no NSE and no BSE code in the master** | none if the IPO has not happened; otherwise add the code and re-run the backfill |
+| `No price history` | has a ticker, but no COLUMN in the grid | a real configuration gap — check `Price Status` |
+| `No recent close` | has a column, no close within 7 sessions | suspended, delisted, or untraded |
+
+- **The scrip-master reasons are decided BEFORE the grid is consulted**, and the order is
+  load-bearing: a scrip with no exchange code is ALSO absent from the grid, so asking the grid
+  first tells the owner to go debug the price script for a company that has not IPO'd. The
+  specific fact wins over the general one.
+- **`Not listed` is exactly the condition the price script skips on.** `priceHistoryLocked_` does
+  `var syms = symbolsFor_(master, u.isin, u.name); if (!syms.primary) { noSymbol++; continue; }`
+   — a scrip it cannot resolve to a symbol **never gets a column at all**. So "no ticker in the
+  master" and "no column in the grid" are the same fact seen from two sides, and naming the
+  former is what makes it actionable.
+- `PriceAsOf.miss` (`no-column` / `no-close` / `before-history`) carries the grid's half of this.
+  Collapsing those into one value is probed; so is asking the grid before the master.
+
+**THE REPORT STATES ITS OWN PRICING SESSION, and that is what keeps the straggler note quiet**
+(same report). The as-on date can resolve to a grid row that is nearly EMPTY — a holiday row, or
+a top-up that ran before the close — in which case every scrip carries back by one session and
+the per-scrip "priced from an earlier session" note fires on **86 of 103 positions**. A
+disclosure that fires on 83% of the rows is one nobody reads, which is how every crying-wolf
+diagnostic dies.
+
+So `pricedOn` is the session the MOST positions came from — the report's real pricing date — and
+it is stated once in the leading footnote (*"the close of 30-Mar-2026, the last session on or
+before 31-Mar-2026 carrying market data"*). Only positions older **than that** are named
+individually. Ties go to the LATER session, so a thin trading day cannot outvote the real one on
+count alone. Both halves are probed.
+
+**FILLING A PRICE-HISTORY GAP: `?hist=missing`, NEVER `?hist=full`** (23-Sep-2026, asked as
+*"we need to figure out a way to add the price history of those stocks which were trading and
+present on that day"*). `backfillPriceHistory()` was already there and is the wrong tool three
+ways: it writes with `full = true`, which **rebuilds** the tab and discards anything older than
+the two-year fetch window (the tab is the only copy); it refetches the whole ~330-scrip universe,
+which does not finish inside Apps Script's 6-minute limit; and it **skips the very scrips that are
+missing**, because `if (!syms.primary) continue` drops anything it cannot resolve to a symbol.
+
+`backfillMissingHistory(deep, cap)` fetches the full range for the gaps only and **merges**
+(`writePriceHistory_(cols, byDate, false)`). That false is the whole safety argument — `true`
+there would rebuild the tab from the handful of scrips in the run and destroy every other column,
+and it would look like a successful run. Pinned.
+
+- **Bounded and re-runnable.** `HISTORY_GAP_CAP` (60) per call, `remaining` in the response, and
+  the gap set is re-derived FROM THE TAB each time — so a second call continues rather than
+  repeats. An unbounded run dies mid-write against the 6-minute limit.
+- **`noSymbolNames`, not a count.** A scrip with no NSE/BSE code never gets a column, so no number
+  of re-runs helps it; the master row needs the code, or the company has not listed. That list was
+  being thrown away (`noSymbol++`) and is the only actionable half of the answer. The full pass
+  now names them too.
+- **`deep` is opt-in.** It also refetches columns that START later than the grid — the shape a
+  scrip gets when it first appeared in a daily top-up (those fetch `1mo`). Not the default,
+  because a company that genuinely listed recently also starts late and would be refetched every
+  run for nothing.
+- Surfaced as a button on the Reports holding result, offered **only** where a blank is
+  `No price history` or `No recent close` — the kinds a fetch can fix. Beside a `Not listed` row
+  it would be a button that cannot help. The price cache is dropped afterwards, and the summary
+  says to generate the report again.
+- **Editing the repo copy changes nothing until it is saved in the Apps Script editor.** The
+  response carries `version` (`RESOLVER_VERSION_`) for exactly that reason.
+
+**A TAXABLE CROSS-PORTFOLIO TRANSFER IS AN ORDINARY BUY, AND THE LEDGER IS RIGHT TO SAY SO**
+(23-Sep-2026, asked as *"in the app you have mentioned it in buy its good but for the ui purpose
+only also add a transfered small logo"*). `transferHolding.ts` has two modes and they date and
+label their rows differently — deliberately, and the difference matters:
+
+| | OUT leg | IN leg | Types |
+|---|---|---|---|
+| `buildTransferRecords` (cost-carrying) | `transferDMY` | **`l.acquiredDMY`** — the ORIGINAL acquisition date, so the holding period survives | `Transfer Out` / `Transfer In` |
+| `buildSaleRecords` (taxable) | `transferDMY` | `transferDMY` — the period genuinely restarts on a purchase | `Sell` / `Buy` |
+
+So a taxable transfer's receiving row is indistinguishable from any other buy, because it IS one.
+`isTransferLeg(type, notes)` marks it for DISPLAY off the four note phrasings the tool writes
+(`Transferred to/from`, `Bought from`, `Sold to`), and the trade book shows a `Transferred` badge
+beside the type badge — suppressed where the type already says `Transfer In`, which would read as
+a duplicate.
+
+- **Nothing but the badge may consult it.** `isTransferType` stays exactly as it was — the two
+  real transfer types and nothing else — and no engine imports `isTransferLeg`. Keying valuation,
+  tax or the replay off a NOTE would let a hand-typed note move filed figures. Probed by making
+  `holdingsCalc.ts` import it.
+**A TRANSFER HAS TWO DATES, AND ONLY THE HOLDING SNAPSHOT MAY READ THE SECOND** (23-Sep-2026,
+reported as *"manbro was bought as a LT so if wanna do the calculation we have to put the
+aquisition date so CG can apply correctly but it was a transfer so it wont be a part of historical
+holding on the aquisition date but rather a part of transfer to demat date"*).
+
+A transfer leg is dated at the ORIGINAL acquisition so the holding period survives — which put the
+shares in the receiving book months before they arrived. Two questions, two dates:
+
+| Date | Answers |
+|---|---|
+| the row's own **Trade Date** | short/long, cost basis, which FY the gain falls in |
+| the new **`Transfer Date`** column | which account held the shares on a given date |
+
+`ReplayTrade.effTs` is `max(ts, Transfer Date)` and **only `computeHoldingsAsOf`'s window test
+reads it**. The lot is still stamped `ts`, and the FIFO sort still runs on `ts`, so no holding
+period, no cost basis and no capital-gains figure moves. Scope is the Historical Holding Report
+ONLY — the owner's decision, 23-Sep-2026; the FY-end holding tabs and the register are untouched
+and will disagree with it for a transferred holding until that is revisited.
+
+- **It must be stamped on BOTH legs.** Gating only the incoming side turns a double-count into a
+  HOLE: the source book has already dropped the shares at its own row date, which on a back-dated
+  transfer is the acquisition date, so neither account would show them.
+- **It must never be headed `Demat Date`.** `headerKey`'s `/demat|dmat|dp charge/` rule claims
+  that for the DP-CHARGE column, so the date would be read as a rupee amount and join the cost
+  basis. Tested immediately after the trade-date rule; `Transfer Date` / `Transferred On` /
+  `Received On` all map.
+- **A row without one is unchanged**, exactly as a row without a `Ratio` keeps its stored
+  quantity. Every row written before 23-Sep-2026 has none.
+- **The read range had to widen.** `computeHoldingsAsOf` read `True Entry!A:T`, which could not
+  see `Notes` at U either — a column the reader cannot reach is the same failure as a column with
+  the wrong heading.
+- **What it holds back is NAMED**, in both directions: shares not here yet, and shares not gone
+  yet. A position that quietly disappears off a holding statement is the failure this column
+  exists to prevent, and it must not create a second one. Narrowed the same way the rows are, so
+  a scoped report never names a holding it did not list.
+- Two probes here came back SILENT at first: `rebuildHoldingTab` carries a byte-identical FIFO
+  sort and BUY push, so a file-wide regex was satisfied by the wrong function while the as-of
+  replay was genuinely broken. The assertions are sliced to `computeHoldingsAsOf`. All 11 fire.
 
 **KNOWN LIMIT, disclosed rather than defended against.** The grid holds TRUE un-adjusted closes,
 so a carry crossing a split or bonus ex-date states a pre-adjustment price beside a

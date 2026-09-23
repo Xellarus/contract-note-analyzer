@@ -63,6 +63,27 @@ export const isTransferType = (type: string | null | undefined): boolean => {
   return XFER_OUT_RE.test(t) || XFER_IN_RE.test(t);
 };
 
+/**
+ * True when a row was WRITTEN BY the cross-portfolio transfer tool, whatever type it carries.
+ *
+ * `isTransferType` only sees the cost-carrying legs (`Transfer In` / `Transfer Out`). A TAXABLE
+ * transfer is deliberately written as an ordinary `Sell` + `Buy` — the holding period genuinely
+ * restarts on a purchase — so the receiving portfolio's ledger row is indistinguishable from any
+ * other buy. It says `Buy`, because it IS one.
+ *
+ * The only surviving marker is the note, and `buildTransferRecords` / `buildSaleRecords` write
+ * exactly four phrasings. This is for DISPLAY only: nothing about how the row is valued, taxed or
+ * replayed may depend on it, or a hand-typed note would start moving figures. Asked for
+ * 23-Sep-2026 — *"in the app you have mentioned it in buy its good but for the ui purpose only
+ * also add a transfered small logo"*.
+ */
+const XFER_NOTE_RE = /^\s*(?:transferred\s+(?:to|from)|bought\s+from|sold\s+to)\b/i;
+
+export const isTransferLeg = (
+  type: string | null | undefined,
+  notes: string | null | undefined,
+): boolean => isTransferType(type) || XFER_NOTE_RE.test((notes || "").toString());
+
 /** True for the OUT leg specifically (shares leaving this portfolio). */
 export const isTransferOut = (type: string | null | undefined): boolean =>
   XFER_OUT_RE.test((type || "").toUpperCase());
@@ -122,6 +143,13 @@ export function headerKey(header: string): string {
   const s = (header || "").toLowerCase().trim();
   if (/import id|import batch|batch id/.test(s)) return "importId";
   if (/trade date|^date$/.test(s)) return "date";
+  // CUSTODY, not tax. The row's own Trade Date is the acquisition date and drives the holding
+  // period; this is the day the shares actually reached THIS demat, and only the as-of holding
+  // question reads it. Tested right after the trade-date rule so the two can never be confused.
+  //
+  // It must never be headed "Demat Date": `/demat|dmat|dp charge/` below claims that for the DP
+  // CHARGE column, so a date would be read as a rupee amount and silently join the cost basis.
+  if (/transfer date|transferred on|received on/.test(s)) return "transferDate";
   if (/isin/.test(s)) return "isin";
   if (/stock name|security name|company|scrip name/.test(s)) return "name";
   if (/transaction type/.test(s)) return "txType";

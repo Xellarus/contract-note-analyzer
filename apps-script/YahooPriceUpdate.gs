@@ -167,15 +167,25 @@ function doGet(e) {
     catch (e2) { s = { ok: false, error: (e2 && e2.message) ? e2.message : String(e2) }; }
     return ContentService.createTextOutput(JSON.stringify(s)).setMimeType(ContentService.MimeType.JSON);
   }
-  // /exec?hist=full  → full 2-year price-history rebuild (run this ONCE to seed the tab)
-  // /exec?hist=topup → the daily incremental pass, on demand
-  // A full backfill fetches ~500 candles per scrip, so it may exceed the 6-minute limit on a
-  // large universe; re-running is safe and picks up where the tab left off for the columns that
-  // already landed. Watch `priced` / `missed` / `dates` in the response.
+  // /exec?hist=full    → full 2-year price-history REBUILD (run this ONCE to seed the tab)
+  // /exec?hist=missing  → fetch only the scrips with NO column yet, and MERGE (the safe one)
+  // /exec?hist=missing&deep=1 → also refetch columns that start later than the grid does
+  // /exec?hist=missing&cap=N  → raise or lower the per-run scrip cap (default 60)
+  // /exec?hist=topup    → the daily incremental pass, on demand
+  //
+  // Prefer `missing` to `full`. A full backfill fetches ~500 candles per scrip, so it may exceed
+  // the 6-minute limit on a large universe, and it writes with `full = true` — a rebuild, which
+  // discards anything older than the fetch window. `missing` is bounded, merges, and is safe to
+  // re-run: it re-derives the gap list from the tab each time. Watch `filled` / `remaining` /
+  // `noSymbolNames` in the response — the last of those is the list of scrips no backfill can
+  // ever help, because their master row carries no exchange code.
   if (e && e.parameter && e.parameter.hist) {
     var h;
     try {
-      h = e.parameter.hist === 'full' ? backfillPriceHistory() : updatePriceHistory();
+      h = e.parameter.hist === 'full' ? backfillPriceHistory()
+        : e.parameter.hist === 'missing'
+          ? backfillMissingHistory(e.parameter.deep === '1', parseInt(e.parameter.cap || '0', 10) || 0)
+          : updatePriceHistory();
     } catch (e3) { h = { ok: false, error: (e3 && e3.message) ? e3.message : String(e3) }; }
     return ContentService.createTextOutput(JSON.stringify(h)).setMimeType(ContentService.MimeType.JSON);
   }
@@ -895,6 +905,138 @@ function writeMisses_(misses) {
 function backfillPriceHistory() { return priceHistoryLocked_(CONFIG.HISTORY_RANGE, true); }
 
 /**
+ * FILL THE GAPS in the price history instead of rebuilding it (23-Sep-2026).
+ *
+ * Reported as a Historical Holding Report for 31-Mar-2026 on which 15 of 103 positions carried no
+ * Current Price. `backfillPriceHistory()` is not the answer to that, for three separate reasons:
+ *
+ *   - it writes with `full = true`, which REBUILDS the tab from scratch. Anything older than the
+ *     2-year fetch window is discarded, and the tab is the only copy.
+ *   - it refetches the whole universe (~330 scrips x ~500 candles), which will not finish inside
+ *     the 6-minute limit on a web request.
+ *   - it skips every scrip `symbolsFor_` cannot resolve, exactly as this does — so for a scrip
+ *     whose master row carries NO NSE or BSE code it changes nothing at all, however often it is
+ *     run. That set is the important half of the answer and it used to be a bare COUNT
+ *     (`noSymbol++`), so the names were thrown away. They are returned now, because they are a
+ *     data-entry list for the owner and nothing else can produce them.
+ *
+ * So: work out which column keys are genuinely absent from the tab, fetch the full range for
+ * THOSE ONLY, and merge. Bounded per run and re-runnable — the gap set is re-derived from the tab
+ * every time, so a second call picks up exactly where the first stopped.
+ *
+ * `deep` additionally targets columns that EXIST but start later than the grid does, which is the
+ * shape a scrip gets when it first appeared in a daily top-up (those fetch `1mo`, so a security
+ * bought recently has a column that simply begins too late to price an older report). It is not
+ * the default because a company that genuinely listed recently also starts late and would be
+ * refetched on every run for no gain.
+ */
+var HISTORY_GAP_CAP = 60;
+
+function backfillMissingHistory(deep, cap) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) return { ok: false, busy: true };
+  try {
+    var t0 = new Date().getTime();
+
+    // What the tab already holds: the first date carrying a real close, per column key.
+    var firstByKey = {}, gridFirst = '';
+    var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
+    var sh = ss.getSheetByName(CONFIG.HISTORY_TAB);
+    if (sh) {
+      var vals = sh.getDataRange().getValues();
+      if (vals.length > 1) {
+        var hdr = vals[0];
+        for (var r = 1; r < vals.length; r++) {
+          var ymd = ymdCell_(vals[r][0]);
+          if (!ymd) continue;
+          if (!gridFirst || ymd < gridFirst) gridFirst = ymd;
+          for (var c = 1; c < hdr.length; c++) {
+            var k = String(hdr[c] == null ? '' : hdr[c]).trim();
+            if (!k) continue;
+            var v = vals[r][c];
+            if (!(typeof v === 'number' && isFinite(v) && v > 0)) continue;
+            if (!firstByKey[k] || ymd < firstByKey[k]) firstByKey[k] = ymd;
+          }
+        }
+      }
+    }
+
+    var master = loadMasterSymbols_();
+    var universe = collectHistoryUniverse_();
+
+    var targets = [], noSymbol = [], absent = [], late = [], seenKey = {};
+    for (var i = 0; i < universe.length; i++) {
+      var u = universe[i];
+      var e = (u.isin && master.byIsin[u.isin]) || master.byName[normName_(u.name)] || null;
+      var key = u.isin || (e && e.isin) || normName_(u.name);
+      if (!key || seenKey[key]) continue;
+      seenKey[key] = true;
+      var syms = symbolsFor_(master, u.isin, u.name);
+      // NO TICKER AT ALL. Nothing here can fix this one: there is no symbol to fetch. It is
+      // either a company that has not listed (a pre-IPO allotment) or a master row missing its
+      // exchange code, and only the owner can tell those apart. Named, not counted.
+      if (!syms.primary) { noSymbol.push(u.name); continue; }
+      var first = firstByKey[key];
+      if (!first) { absent.push(u.name); }
+      else if (gridFirst && first > gridFirst) { late.push(u.name); if (!deep) continue; }
+      else { continue; }
+      targets.push({ key: key, name: u.name, symbol: syms.primary, fallback: syms.fallback });
+    }
+
+    // Bounded, so a large gap list cannot blow the 6-minute limit half way through a write.
+    var lim = (cap > 0) ? cap : HISTORY_GAP_CAP;
+    var remaining = Math.max(0, targets.length - lim);
+    if (targets.length > lim) targets = targets.slice(0, lim);
+
+    var out = {
+      ok: true, mode: deep ? 'deep' : 'missing', version: RESOLVER_VERSION_,
+      universe: universe.length, absent: absent.length, late: late.length,
+      absentNames: absent.slice(0, 60), lateNames: late.slice(0, 60),
+      noSymbol: noSymbol.length, noSymbolNames: noSymbol.slice(0, 60),
+      gridFirst: gridFirst, targets: targets.length, remaining: remaining,
+    };
+    if (!targets.length) {
+      out.filled = 0; out.stillMissing = [];
+      out.ms = new Date().getTime() - t0; out.at = nowStamp_();
+      return out;
+    }
+
+    var res = fetchHistoryBatch_(targets, CONFIG.HISTORY_RANGE);
+    var retry = [];
+    for (var f = 0; f < res.failed.length; f++) {
+      var t = res.failed[f];
+      if (t.fallback) retry.push({ key: t.key, name: t.name, symbol: t.fallback, fallback: '' });
+    }
+    var res2 = retry.length ? fetchHistoryBatch_(retry, CONFIG.HISTORY_RANGE) : { ok: [], failed: [] };
+    var got = res.ok.concat(res2.ok);
+
+    var byDate = {}, cols = [], seenCol = {};
+    for (var g = 0; g < got.length; g++) {
+      var row = got[g];
+      if (!seenCol[row.t.key]) { seenCol[row.t.key] = true; cols.push(row.t.key); }
+      for (var d = 0; d < row.series.dates.length; d++) {
+        var ymd2 = row.series.dates[d];
+        if (!byDate[ymd2]) byDate[ymd2] = {};
+        byDate[ymd2][row.t.key] = row.series.closes[d];
+      }
+    }
+
+    // MERGE — `full` is false, and that is the whole safety argument for this function. Passing
+    // true would rebuild the tab from just the handful of scrips fetched here and destroy every
+    // other column on it.
+    var written = writePriceHistory_(cols, byDate, false);
+
+    out.filled = got.length;
+    out.stillMissing = uncoveredNames_(res, res2);
+    out.dates = written.dates;
+    out.cols = written.cols;
+    out.ms = new Date().getTime() - t0;
+    out.at = nowStamp_();
+    return out;
+  } finally { lock.releaseLock(); }
+}
+
+/**
  * Daily top-up. Deliberately re-fetches a MONTH rather than a day, so a missed run, a late
  * correction or a Yahoo outage heals itself on the next pass instead of leaving a permanent
  * hole (the failure mode of the old append-only AUM log).
@@ -917,11 +1059,14 @@ function priceHistoryLocked_(range, full) {
     // by name (True Entry has no ISIN column), and only the master lookup below collapses them.
     // Deduping late meant fetching ~500 candles twice for the same symbol — measured 551 fetches
     // collapsing into 328 columns on the first real backfill, i.e. 40% of the run wasted.
-    var targets = [], noSymbol = 0, dupes = 0, seenKey = {};
+    // `noSymbolNames` and not merely a count: a scrip with no resolvable ticker NEVER gets a
+    // column, so no amount of re-running fixes it — the master row needs its exchange code. That
+    // list is the only thing that makes the gap actionable, and it used to be discarded.
+    var targets = [], noSymbol = 0, noSymbolNames = [], dupes = 0, seenKey = {};
     for (var i = 0; i < universe.length; i++) {
       var u = universe[i];
       var syms = symbolsFor_(master, u.isin, u.name);
-      if (!syms.primary) { noSymbol++; continue; }
+      if (!syms.primary) { noSymbol++; if (noSymbolNames.length < 60) noSymbolNames.push(u.name); continue; }
       var e = (u.isin && master.byIsin[u.isin]) || master.byName[normName_(u.name)] || null;
       var key = u.isin || (e && e.isin) || normName_(u.name);
       if (!key) continue;
@@ -959,7 +1104,8 @@ function priceHistoryLocked_(range, full) {
     var written = writePriceHistory_(cols, byDate, full);
     return {
       ok: true, full: !!full, range: range,
-      universe: universe.length, targets: targets.length, noSymbol: noSymbol, dupes: dupes,
+      universe: universe.length, targets: targets.length, noSymbol: noSymbol,
+      noSymbolNames: noSymbolNames, dupes: dupes,
       priced: got.length, missed: res2.failed.length + (res.failed.length - retry.length),
       splitAdjusted: splitScrips,
       dates: written.dates, cols: written.cols,

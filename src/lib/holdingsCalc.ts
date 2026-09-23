@@ -90,6 +90,14 @@ interface ReplayTrade {
   freeRatio?: FreeShareRatio | null;
   /** The raw ledger action, so Bonus (N per M held) and Split (new:old) are told apart. */
   rawType?: string;
+  /**
+   * When this row takes EFFECT in this portfolio, which is `max(ts, Transfer Date)`.
+   *
+   * It differs from `ts` only on a cross-portfolio transfer leg, and only the as-of holding
+   * question reads it: `ts` stays the acquisition date, so the lot's holding period, its cost
+   * basis and every capital-gains figure are untouched. Absent on every other row.
+   */
+  effTs?: number;
 }
 
 /**
@@ -381,10 +389,28 @@ export interface HistoricalHolding {
   avgBuyPrice: number;
   invested: number;
 }
+/** A transfer leg whose shares had not reached (or left) this demat by the as-of date. */
+export interface DeferredTransfer {
+  name: string;
+  /** The row's own date — the acquisition, which is what the holding period runs from. */
+  acquired: string;
+  /** The Transfer Date: when the shares actually moved. */
+  arrives: string;
+  qty: number;
+  /** 'in' = not here yet; 'out' = still here, because it had not left. */
+  side: "in" | "out";
+}
+
 export interface HistoricalHoldingResult {
   positions: HistoricalHolding[];
   totalInvested: number;
   tradeRows: number;     // Buy/Sell rows replayed (on or before the as-of date)
+  /**
+   * Rows held back because their Transfer Date is after the as-of date. Surfaced by the report:
+   * a holding that quietly disappears from a statement is the failure this whole column exists
+   * to prevent, and it must not create a second one.
+   */
+  deferredTransfers: DeferredTransfer[];
 }
 
 /**
@@ -398,6 +424,7 @@ export interface HistoricalHoldingResult {
  */
 export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number): Promise<HistoricalHoldingResult> {
   const master = await loadScripMaster(SCRIP_MASTER_SPREADSHEET_ID);
+  const deferredTransfers: DeferredTransfer[] = [];
   const byKey = new Map<string, HoldingAcc>();
   const resolve = (isin: string, name: string): HoldingAcc => {
     const r = resolveScrip(master, isin, name);
@@ -505,7 +532,10 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
   let teRows: any[][] = [];
   try {
     const teRes: any = await (gapi.client as any).sheets.spreadsheets.values.get({
-      spreadsheetId, range: "True Entry!A:T",
+      // A:Z, not A:T — the ledger is 22 columns wide once Ratio, Notes and Transfer Date are
+      // appended, and A:T stopped short of all three. A column the reader cannot see is the
+      // same failure as a column with the wrong heading.
+      spreadsheetId, range: "True Entry!A:Z",
       // Dates as serials, not display strings — see parseDateTs for why.
       valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "SERIAL_NUMBER",
     });
@@ -523,6 +553,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
     const dateIdx = col("Trade Date", 0), isinIdx = col("ISIN", -1), nameIdx = col("Stock Name", 2);
     const typeIdx = col("Transaction Type", 3), qtyIdx = col("Number of Shares", 4), priceIdx = col("Avg Price", 5);
     const ratioIdx = col("Ratio", -1);   // absent on every sheet written before 14-Sep-2026
+    const xferDateIdx = col("Transfer Date", -1);   // absent before 23-Sep-2026
     const turnoverIdx = col("Total Amount (Turnover)", 6);
     const inclIdx = col("Total Amount with Expense (Incl STT)", 15);
 
@@ -549,14 +580,37 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
         ? (inclSTT > 0 ? inclSTT / qty : (turnover > 0 ? turnover / qty : avgPrice))
         : avgPrice;
       if (type === "BUY" && isNaN(price)) continue;
-      trades.push({ ts: parseDateTs(r[dateIdx]), idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price, xfer,
+      const ts = parseDateTs(r[dateIdx]);
+      // A transfer leg is dated at the ACQUISITION so its holding period survives, but the shares
+      // were not in this demat until they moved. Reported 23-Sep-2026: *"it was a transfer so it
+      // wont be a part of historical holding on the aquisition date but rather a part of transfer
+      // to demat date"*. A row with no Transfer Date — every row written before this — behaves
+      // exactly as it always did, the same rule a row with no Ratio follows.
+      const xferTs = xferDateIdx >= 0 ? parseDateTs(r[xferDateIdx]) : 0;
+      trades.push({ ts, effTs: xferTs > ts ? xferTs : ts, idx: i, isin: (r[isinIdx] || "").toString().trim(), name, type, qty, price: isNaN(price) ? 0 : price, xfer,
         freeRatio: ratioIdx >= 0 ? parseRatio(r[ratioIdx]) : null, rawType: (r[typeIdx] || "").toString() });
     }
     trades.sort((a, b) => (a.ts - b.ts) || (a.idx - b.idx));
 
     // Only trades on/before the as-of date, with intraday round-trips squared off
     // (same-day buy+sell on a scrip is excluded so it can't lift the cost basis).
-    const window = trades.filter(t => t.ts <= asOfTs);
+    //
+    // The test is the EFFECTIVE date, so a transfer leg back-dated to its acquisition does not
+    // put the shares in this book before they arrived. The sort above is deliberately left on
+    // `ts`: FIFO must consume lots in acquisition order, and the lots themselves are still
+    // stamped `ts`, so no holding period and no gain moves.
+    const window = trades.filter(t => (t.effTs ?? t.ts) <= asOfTs);
+    // What that held back, so a position can never vanish off a holding statement in silence.
+    for (const t of trades) {
+      if ((t.effTs ?? t.ts) <= asOfTs || t.ts > asOfTs) continue;
+      deferredTransfers.push({
+        name: t.name,
+        acquired: new Date(t.ts).toISOString().slice(0, 10),
+        arrives: new Date(t.effTs!).toISOString().slice(0, 10),
+        qty: t.qty,
+        side: t.type === "SELL" ? "out" : "in",
+      });
+    }
     const playable = squareOffIntraday(window, (t) => keyFor(t.isin, t.name));
     replayed = window.length;
     for (const t of playable) {
@@ -652,7 +706,7 @@ export async function computeHoldingsAsOf(spreadsheetId: string, asOfTs: number)
       return { securityName: h.securityName, isin: h.isin, quantity: h.quantity, avgBuyPrice: parseFloat(h.avgBuyPrice.toFixed(4)), invested: parseFloat(invested.toFixed(2)) };
     });
   }
-  return { positions, totalInvested: parseFloat(totalInvested.toFixed(2)), tradeRows: replayed + openingCount };
+  return { positions, totalInvested: parseFloat(totalInvested.toFixed(2)), tradeRows: replayed + openingCount, deferredTransfers };
 }
 
 /**
