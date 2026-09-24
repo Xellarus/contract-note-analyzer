@@ -42,6 +42,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-price-asof.ts` | **Pricing a PAST position** — `priceAsOf` driven directly over a hand-built grid whose 31-March is deliberately a holiday: the session lookup, the bounded carry at exactly its boundary, a date before the grid (unpriced, never the grid's first close) and one after it (clamps, correctly), and `null`-never-0. Plus a source sweep over comment-stripped source for the wiring `tsc` cannot see — that the report prices at its OWN date and never `Date.now()`, that unlisted is tested with `classOfEntryAsOf` rather than a raw `assetClass` read, that no cell takes a zero fallback, that `computeHoldingsAsOf` still does NOT read the price grid, and that every reason a cell is blank is disclosed, that the SCREEN renders the same disclosure the file carries, that the gap-filling backfill MERGES rather than rebuilding, and that the display-only transfer marker reaches no engine (82). All 44 probes fire |
+| `node tmp-gs-refcheck.mjs` | **Does every helper the `.gs` calls actually exist in it.** `node --check` validates SYNTAX only, so a patch that deletes a declaration while leaving its callers passes cleanly and throws `ReferenceError` on the live sheet — where the symptom is a probe returning nothing, a paste-deploy-run round trip away. Exactly what happened twice on 24-Sep-2026: a range replacement took `BSE_HEADERS_` out with the function above it, and a second took both editor-runnable wrappers. Scans TOP-LEVEL declarations only, which is the real Apps Script global scope |
 | `npx tsx tmp-import-tab.ts` | Import Log rows + SPA back-navigation — reads the portfolio registry, so a label change breaks it |
 | `npx tsx tmp-holdings-scope.ts` | **Holdings that belong to something else** — the wrong ACCOUNT, the wrong DATE, the wrong DEMAT, or a sheet the page never re-read (72). Source sweep over comment-stripped source: that `heldFor` is called with a date at every one of its five sites, that it refuses to fall back to today's figure, that the cross-account clear runs BEFORE the first guard returns, and that no consumer reads the ungated `sheetHoldings`. Also pins the `visibilitychange` master refresh and the predates-a-listing note. Caught two undated call sites the author had missed, on its first run |
 | `npx tsx tmp-factsheet.ts` | Factsheet model + PDF (writes `verify-factsheet.pdf`) |
@@ -1175,6 +1176,249 @@ and it would look like a successful run. Pinned.
 - **"Nothing was missing" and "nothing could be fetched" are opposite outcomes**, and the first
   version of the summary printed the former for both — telling the owner there was no gap while
   79 scrips were queued and none had come back. `filled === 0` means nothing was FETCHED.
+- **`/exec?probe=hist[&sym=…]` tells the three 404s apart.** The gap-fill reported
+  `60× symbol not found (HTTP 404)` for WELL-FORMED symbols (`514010.BO`, and `firstToken_` means
+  a `|`-joined BSE cell cannot produce that shape). Three unrelated faults give exactly that
+  answer, so the probe always fetches **two known-good CONTROLS** — `RELIANCE.NS` and
+  `500325.BO`, the same company on both exchanges — beside whatever is asked for:
+
+  | Controls | Means | Answer |
+  |---|---|---|
+  | both fail | the candle endpoint is not serving this script at all | not about the scrips |
+  | NSE passes, BSE fails | Yahoo will not serve `.BO` from here | BSE-only scrips need another source |
+  | both pass, symbol fails | Yahoo has no candles for that company | per-scrip |
+
+  A probe that tested only the failing symbol could separate none of them — which is precisely
+  why the original 404 was useless. It reports the response code, the candle count and a 200-char
+  body snippet, and carries `version` like every other probe.
+- **Each failed scrip is reported WITH the symbol that was tried** (`Name  [514010.BO]`). A
+  malformed symbol is invisible in a list of company names and is the first thing to rule out.
+**YAHOO NO LONGER SERVES `.BO` HISTORY, AND THE CONTROLS ARE THE PROOF** (23-Sep-2026).
+`/exec?probe=hist` returned:
+
+```
+RELIANCE.NS  200  23 candles   last 2026-09-23
+500325.BO    404  0 candles    "No data found, symbol may be delisted"
+514010.BO    404  0 candles    "No data found, symbol may be delisted"
+```
+
+`500325.BO` is **Reliance on BSE**, which is plainly not delisted — so this is the feed dropping
+an exchange, not a data problem, and it explains all 79 failures at once (312 `.NS` scrips fetched
+normally in the same run). **No amount of re-running the backfill will ever price a BSE-only
+scrip from Yahoo.** This is exactly what the two known-good controls exist for: the same 404, with
+no control beside it, was read for two days as "those companies are uncovered".
+
+- **`bseOnly` is its own blank reason**, told apart from `noHistory` by `entry.bse && !entry.nse`.
+  The old label sent the owner to the `Price Status` tab about a scrip nothing can ever fetch,
+  which is worse than saying nothing. The Fetch button is not offered for it either.
+- **The remedy where the company is ALSO on NSE is a scrip-master edit**: put the NSE symbol on
+  the row and it goes out as `.NS`, which demonstrably works. Where it is genuinely BSE-only the
+  price must come from elsewhere — `api.bseindia.com` is already reachable from this script (the
+  corp-action scan uses it), which makes it the obvious candidate. NOT built.
+
+- **A FULL rebuild PRESERVES the columns it could not refetch.** A real run fetched 312 of 391
+  scrips (80%, so the downgrade guard correctly did not fire) and took the other **79 columns**
+  with it — including history the tab already held. A feed 404 today is not evidence that
+  yesterday's closes are wrong, and the tab is the only copy. `writePriceHistory_` now takes
+  `keepKeys` — the keys this run targeted and failed — and carries those columns over.
+- **The row read was misaligned, and it was a money bug.** It walked the DEDUPED column list
+  while indexing the RAW header position (`vals[r][c2 + 1]`), so one duplicate or blank heading
+  shifted every column after it and loaded one scrip's closes into another scrip's column. Found
+  while adding `keepKeys`; now mapped per header column through `slotOf`.
+- **Failures and successes are counted by EXCHANGE SUFFIX** (`failBySuffix` / `okBySuffix`). Two
+  runs reported 79 identical `symbol not found (HTTP 404)` and neither could say whether the feed
+  was refusing an exchange or those 79 companies were individually uncovered. All-`.BO` failures
+  beside all-`.NS` successes settles it from the run itself. BOTH sides are reported, because
+  one alone proves nothing.
+- **The unknown-probe guard is the FIRST branch of `doGet`, and that position is load-bearing.**
+  Placed last it was still SHADOWED: `?probe=hist&sym=514010.BO` against a deployment predating
+  that probe skipped the (absent) hist branch, fell to `if (e.parameter.sym)` and answered with
+  the SYMBOL RESOLVER — a well-formed reply to a question nobody asked, mistaken for the probe's
+  own answer twice in a row. Refusing early is the only placement that cannot be shadowed.
+- **`/exec?probe=bse[&code=…]` comes BEFORE any BSE parser is written.** Several historical
+  routes are plausible (`StockPriceCSVDownload` in two date formats, `StockReachGraph`, plus a
+  `HighLow` sanity call) and only the live service can say which exist and in what shape. The
+  probe fetches each with the header recipe the corp-action scan already proved past BSE's WAF
+  (`User-Agent` + `Origin` + `Referer`), reports the status code and the first 300 bytes, and
+  **parses nothing**. A parser written against a guessed shape is the hand-typed fixture this
+  repo keeps being bitten by. It probes a known-good control (500325 = Reliance) alongside the
+  code asked for, for the same reason `probe=hist` does, and its verdict separates *403, the WAF*
+  from *404, the route is gone*.
+- **Every diagnostic has an EDITOR-RUNNABLE wrapper** — `runBseProbe()` / `runHistoryProbe()`,
+  no trailing underscore. A trailing underscore makes a function PRIVATE in Apps Script and it
+  then never appears in the editor's Run dropdown, so every probe here was reachable only through
+  a DEPLOYMENT — and deploying (not saving) is the step that had not happened on three consecutive
+  attempts, each of which answered about the old code. They `Logger.log` their result, because the
+  editor shows no return value.
+**`PROBE_URL_` + `runUrlProbe()` answers "is this reachable FROM APPS SCRIPT" for any candidate
+source.** Paste a URL into the constant, press Run. It tries a plain and a browser-shaped request
+and always captures the body: **both failing identically is an IP rule and no header will fix it;
+one succeeding is a header rule.** That distinction is the entire lesson below, and every new
+source has to be asked from Google's IPs rather than from a browser. Deliberately EDITOR-ONLY and
+never a `doGet` route — the web app is deployed "Anyone", and a fetch-any-URL endpoint on it would
+be an open proxy.
+
+**SAMCO REPUBLISHES THE BHAVCOPY AT A DETERMINISTIC URL** (24-Sep-2026), which is what makes a
+backfill expressible at all:
+
+```
+https://www.samco.in/bse_nse_mcx/datacopy/<base64, padding stripped, of>
+/var/www/html/samco/public_html/Downloads/bhavcopy_data/YYYY-MM-DD/YYYYMMDD_BSE.csv
+```
+
+`samcoBhavUrl_(date, segment)` builds it, and `tmp-yahoo-symbols.mjs` pins it against a link the
+owner really downloaded — the same fixtures-from-real-output rule the parsers follow. The date
+appears TWICE in two formats, so padding one and not the other produces a URL that looks entirely
+plausible and 404s on every date, which is indistinguishable from the source being blocked. Five
+probes fire, including leaving the base64 padding on.
+
+**CONFIRMED REACHABLE, 24-Sep-2026.** All three probe dates returned 200 `application/csv`:
+30-Mar-2026 (462 KB / 5,104 rows), 23-Sep-2026 (457 KB / 5,061), and 01-Apr-2016 (224 KB / 2,792)
+— so the 2016 claim is real and a deep backfill is possible. The header is BSE's canonical
+bhavcopy:
+
+```
+SC_CODE,SC_NAME,SC_GROUP,SC_TYPE,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,NO_TRADES,NO_OF_SHRS,NET_TURNOV,TDCLOINDI
+```
+
+**`SC_CODE` IS the BSE scrip code**, which is exactly what the scrip master's BSE column holds and
+what `symbolsFor_` builds `514010.BO` from — so the join is an exact numeric match. No name
+matching, no prefix rule, and no THIRD resolver to drift out of step with the two that already
+disagree. That was the largest risk in the idea and it is absent.
+
+`CLOSE` is the day's actual traded close, un-adjusted — the same basis the grid already holds
+(the .gs deliberately un-adjusts Yahoo's splits), so no adjustment is needed on the way in.
+
+**`backfillFromBhavcopy(from, to, cap)` is the backfill, and ONE rule shapes it: the write that
+would hang the sheet.** `writePriceHistory_` reads the whole tab, rebuilds it in memory and writes
+it all back — ~196,000 cells once these columns exist. Calling it per day-file, five hundred
+times, is the failure mode. So a run fetches MANY days (`BHAV_DAYS_PER_RUN`, 40), accumulates them
+in memory, and writes **once**. `remaining` says whether to run it again; `runBhavBackfill()` is
+the editor wrapper and walks back two years.
+
+- **Fill-only** (`writePriceHistory_`'s fifth argument). A cell already carrying a close is left
+  alone, so the bhavcopy backfill and the Yahoo top-up can never contend for one — and a re-run
+  changes nothing, which is what makes the backfill resumable with **no stored state**: the work
+  left is whatever is still blank. The flag must stay optional, or the top-up could never correct
+  a value it had previously written. Both directions probed.
+- **A date with no file is a holiday**, not an error. No trading calendar to keep.
+- **Resume is a recorded high-water mark, not a test on the tab**, and the first real run is why.
+  350 targets, 13,161 closes over 38 sessions — about 346 a day, because roughly four scrips
+  simply do not trade. So "all targets filled" almost never holds and every completed day would
+  have been refetched; "any target filled" is useless too, since 350 of the targets are ALSO
+  Yahoo-fed and carry values whether or not the bhavcopy ever ran for that date. Neither can be
+  read off the tab. The mark is written AFTER the single write, so a run that dies mid-fetch is
+  repeated rather than skipped, and it is a HINT only — fill-only means a wrong or cleared mark
+  costs fetches and nothing else. `resetBhavBackfillMark()` starts it over.
+- **Fetching stops on a CLOCK, not a day count** (`BHAV_FETCH_BUDGET_MS`, 3.5 minutes), and the
+  day cap is the secondary limit. A cap tuned to one measurement is a guess about the network:
+  40 days took 104s on the first run (~2.6s a fetch), and 90 days had not finished in EIGHT
+  MINUTES on the second, because the source slows as a run goes on. The clock is what makes a run
+  LAND — exceed Apps Script's limit and every fetch already paid for dies in memory with the
+  process. The response says which limit stopped it (`stoppedOn`). A timeout still costs only
+  that run's fetches, because the single write is at the end and the resume mark advances only
+  after it.
+- **Header-driven, never positional.** `CLOSE` is column 8 of 14 and its neighbours are `LOW`,
+  `LAST` and `PREVCLOSE` — every one of which would read as a plausible price. The suite's first
+  fixture used a REAL row where `CLOSE` and `LAST` happen to be equal, so a probe swapping them
+  came back **silent**; there is now a row whose columns are all distinct.
+- **`SC_TYPE` is `STK` in 2026 and `Q` in 2016.** An equity filter that knew only `STK` would
+  silently drop every row of the older half of the backfill. Pinned with a real 2016 row.
+- **The CSV split is quote-aware.** `SC_NAME` is quoted and can contain a comma, which on a naive
+  split shifts every later column left — so `CLOSE` would silently come back as `PREVCLOSE` for
+  exactly those rows.
+- **Leading zeros are normalised on both sides**, because the master stores the code as typed and
+  the file pads it.
+- **`bhavTargets_` computes the key exactly as `priceHistoryLocked_` does**, or the backfill would
+  open a SECOND column for a scrip that already has one.
+
+**THE DAILY TOP-UP IS A FALLBACK, AND THE ORDER IS THE WHOLE DESIGN.** `dailyBhavTopUp()` runs
+at **20:30 IST — AFTER the Yahoo pass at 19:30** — and `writePriceHistory_` is fill-only. So for
+any scrip Yahoo can price, Yahoo's close is already in the cell and the bhavcopy finds it occupied
+and leaves it: nothing changes while Yahoo is healthy. If Yahoo drops `.NS` as it dropped `.BO`,
+the blanks simply start being filled from here. A fallback that needs **no precedence rules**,
+because "first writer wins" already is one. Reversing the two hours would silently make the
+bhavcopy primary for all 350 scrips.
+
+- **Three sessions, not one.** A missed run, a holiday, or a bhavcopy published late must
+  self-heal without anyone noticing — the same reason the Yahoo pass re-fetches a whole month.
+  Re-covering a filled day costs a fetch and writes nothing; three files a day is the deliberate
+  price of a gap that would otherwise need a human to spot it.
+- **It must NOT share the backfill's resume mark.** That mark points at the oldest date reached
+  walking backwards; the top-up walks the newest few. Sharing it would make each undo the other's
+  progress, so the top-up saves, clears and restores it around its own call.
+- **A REFUSAL IS NOT A HOLIDAY, and they arrive looking nearly identical.** An hour after the
+  backfill's ~500 fetches, dates that had returned 460 KB of `application/csv` began answering
+  **200 with `text/html` and zero bytes** — the source throttling us. Counted as a market holiday
+  that is invisible, and in a DAILY job invisible means it stops working until a report comes back
+  blank. `refused` is counted separately, the note says so outright when refusals dominate, and
+  **the resume mark does not advance on such a run** — otherwise it would step past days that were
+  never read and fill-only would never revisit them, which is the one way this design could lose
+  data rather than just time.
+- **NSE has its own parser, `parseBhavcopyNse_`**, because the file is a different shape:
+  `SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,…,ISIN`. It carries **ISIN**, which is a stronger join than
+  anything the BSE file offers — the grid keys on `isin || …`, so an ISIN match IS the identity
+  rather than a lookup through a ticker two series can share. SYMBOL is the fallback for a holding
+  whose master row has no ISIN, and `SERIES` is consulted only on that path (`EQ`/`BE`/`BZ`/`SM`/
+  `ST`): a gold bond like `SGBJUN28` has its own ISIN, so the ISIN path needs no series test.
+  First-writer-wins applies within a file too, or a later series row overwrites the close already
+  taken. It is NOT yet wired into the daily pass — the BSE side is the exchange with a hole.
+- **NSE was never wired blind.** The NSE bhavcopy keys on a `SYMBOL`
+  string, not the numeric `SC_CODE` the BSE join uses, so `runSamcoProbe()` now reports the NSE
+  file's header too — the parser gets written against the real columns, like everything else here.
+
+**Whether Apps Script can REACH it is a separate question** and `runSamcoProbe()` asks it, over
+three dates: the session the owner's own report priced at (30-Mar-2026), a recent weekday, and
+2016 (their page claims that far back, and a backfill depends on it). It reports the first two
+lines of whatever comes back, because the CSV header is what the parser gets written against.
+
+**BSE HAS NO FREE DAILY-CLOSE ROUTE FROM APPS SCRIPT. CLOSED 24-SEP-2026 — DO NOT RE-TRY IT
+BLIND.** Three probe rounds, and the conclusion is evidenced rather than assumed:
+
+| Route | Result |
+|---|---|
+| `StockReachGraph` | 200 with real data, but **intraday only** — flags 0/2/3/4/5 return byte-identical payloads (13,387 RUDRAECO / 31,172 RELIANCE), all one session 09:15→16:01, 390 rows being one trading day minute by minute. There is no period parameter |
+| `StockPriceCSVDownload` | 200 with a **zero-byte** body on six parameter shapes — exists, rejects silently |
+| Bhavcopy (`www.bseindia.com/download/`) | **403 `<TITLE>Access Denied</TITLE>`**, byte-identical (484 / 431) across three header profiles and both filename conventions |
+
+The bhavcopy 403 is the one that ends it: an identical block page whatever headers are sent is an
+edge WAF refusing by **IP**, and Google's datacentre ranges are what Apps Script fetches from.
+`api.bseindia.com` answers this script perfectly — the corp-action scan has used it for months —
+so this is one host's rule, not BSE blocking us.
+
+**The owner's own browser is NOT blocked**, which is the useful asymmetry: a bhavcopy downloaded
+by hand imports fine, and an as-of report needs a handful of specific dates rather than 500.
+
+What is NOT worth re-trying: more header permutations, more parameter shapes, more filename
+conventions. What WOULD change the answer: a fetch from an IP that is not Google's.
+
+- **Superseded by the above; kept for what each round proved** (24-Sep-2026, three rounds):
+  `api.bseindia.com` answers this script on every route, so its WAF is not the obstacle;
+  `StockReachGraph` has **no period parameter** — flags 0/2/3/4/5 return byte-identical payloads
+  (13,387 for RUDRAECO, 31,172 for RELIANCE) all stamped the same session 09:15→16:01, 390 rows
+  being one trading day minute by minute, so it is an intraday chart and nothing else;
+  `StockPriceCSVDownload` answers 200 with a **zero-byte** body, existing but rejecting its
+  parameters silently; and the **bhavcopy is 403** on every date and both filename conventions —
+  from `www.bseindia.com`, a DIFFERENT host from the `api.` one that works. Round two could not
+  say why, because it captured the response body **only on a 200** and so discarded the one piece
+  of evidence a 403 carries. Round three varies the HEADERS against the download host and always
+  captures the body. If it also fails, BSE has no free daily-close route reachable from Apps
+  Script, and the answer is to record closes FORWARD from the quote feed rather than backfill.
+- **A COMMENT STRIPPER CAN EAT REAL CODE, and that is worse than not stripping.** The suite's
+  `strip` matched `/*` anywhere, so the Accept header `'application/json, text/plain, */*'`
+  opened a phantom comment at the `/` of `*/*` and the strip deleted every line to the next real
+  `*/` — removing a whole function and failing three assertions that had nothing to do with the
+  change. The opener must not be preceded by `*`. This is the mirror of the trap already written
+  up for scanning RAW source: one makes documentation look like code, the other makes code
+  disappear, and both make a source assertion pass or fail for reasons that are not in the code.
+- **`RESOLVER_VERSION_` must be bumped on EVERY change to the file**, not once per session. It was
+  bumped early, then three further edits shipped under the same string — so the marker said the
+  deploy had taken while the deployed code was missing the probe being tested.
+- **An UNRECOGNISED `probe=` is refused, not ignored.** Every probe branch is an exact match, so
+  `?probe=hist` against a deployment predating that probe fell through and ran `updatePrices()`,
+  answering `{ok:true, updated:…}` — which reads as a probe that worked. It now names the probes
+  that deployment actually has, which is how "the editor has newer code than the deployment"
+  becomes visible instead of guessed at. Every response carries `version`, the default one included.
 
 **A TAXABLE CROSS-PORTFOLIO TRANSFER IS AN ORDINARY BUY, AND THE LEDGER IS RIGHT TO SAY SO**
 (23-Sep-2026, asked as *"in the app you have mentioned it in buy its good but for the ui purpose

@@ -138,6 +138,19 @@ function scheduledUpdate() {
 
 // Web-app entry — the app's "Refresh Prices" button GETs this. Always fetches (manual intent).
 function doGet(e) {
+  // FIRST, before any other branch. An unrecognised probe must not fall through — and it must not
+  // be SHADOWED either: `?probe=hist&sym=514010.BO` against a deployment predating that probe
+  // skipped the (then absent) hist branch, reached `if (e.parameter.sym)` and answered with the
+  // SYMBOL RESOLVER instead. A well-formed reply to a question nobody asked, twice mistaken for
+  // the probe's own answer. Placing this last was not enough; placing it first is.
+  if (e && e.parameter && e.parameter.probe &&
+      ['hist', 'bse', 'tv', 'nse'].indexOf(String(e.parameter.probe)) < 0) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false, version: RESOLVER_VERSION_,
+      error: 'Unknown probe "' + e.parameter.probe + '". This deployment knows: hist, bse, tv, nse. '
+           + 'If you expected one that is missing, the Apps Script editor has newer code than the deployment.',
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
   // Diagnostic route: /exec?probe=tv → run ONLY the TradingView reachability check (no full
   // update), so it can be tested straight from the URL. Remove once TradingView is decided.
   if (e && e.parameter && e.parameter.probe === 'tv') {
@@ -146,6 +159,21 @@ function doGet(e) {
   // /exec?scan=corp → run the split/bonus scan on demand and rewrite the "Corp Action Alerts"
   // tab, without opening the editor. Safe to hit repeatedly: writeCorpActionAlerts_ merges by
   // ISIN+ex-date and preserves the Status column, so dismissals survive.
+  // /exec?probe=hist[&sym=514010.BO] -> is the candle endpoint reachable, is it .BO, or is it
+  // this scrip? Two known-good controls run alongside whatever is asked for. See probeHistory_.
+  // /exec?probe=bse[&code=514010] -> which BSE historical route answers, and in what shape.
+  if (e && e.parameter && e.parameter.probe === 'bse') {
+    var pb;
+    try { pb = probeBse_(e.parameter.code || ''); }
+    catch (e6) { pb = { ok: false, error: (e6 && e6.message) ? e6.message : String(e6) }; }
+    return ContentService.createTextOutput(JSON.stringify(pb)).setMimeType(ContentService.MimeType.JSON);
+  }
+  if (e && e.parameter && e.parameter.probe === 'hist') {
+    var ph;
+    try { ph = probeHistory_(e.parameter.sym || ''); }
+    catch (e5) { ph = { ok: false, error: (e5 && e5.message) ? e5.message : String(e5) }; }
+    return ContentService.createTextOutput(JSON.stringify(ph)).setMimeType(ContentService.MimeType.JSON);
+  }
   if (e && e.parameter && e.parameter.probe === 'nse') {
     return ContentService.createTextOutput(JSON.stringify(probeNse_())).setMimeType(ContentService.MimeType.JSON);
   }
@@ -199,8 +227,8 @@ function doGet(e) {
     var r = updatePrices();
     out = r.busy
       ? { ok: true, busy: true, at: r.at }
-      : { ok: true, updated: r.updated, total: r.total, missed: r.missed, deferred: r.deferred,
-          truncated: r.truncated, session: r.session, staleYahoo: r.staleYahoo, at: r.at };
+      : { ok: true, version: RESOLVER_VERSION_, updated: r.updated, total: r.total, missed: r.missed,
+          deferred: r.deferred, truncated: r.truncated, session: r.session, staleYahoo: r.staleYahoo, at: r.at };
   }
   catch (err) { out = { ok: false, error: (err && err.message) ? err.message : String(err) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
@@ -423,7 +451,7 @@ function loadMasterSymbols_() {
 // this script has no user to ask. So: exactly one distinct row, or nothing.
 // Bumped whenever the RESOLVER changes. Echoed by /exec?sym= so "the fix is not working" and
 // "the fix is not deployed" stop being the same observation.
-var RESOLVER_VERSION_ = '2026-09-23 gap-fill backfill + noSymbolNames';
+var RESOLVER_VERSION_ = '2026-09-24 bse history probe';
 
 var PREFIX_MIN_ = 6;
 function masterPrefixHit_(master, nk) {
@@ -1038,6 +1066,25 @@ function backfillMissingHistory(deep, cap) {
     out.filled = got.length;
     out.wrote = got.length > 0;
     out.failReasons = groupFailReasons_([res.failed, res2.failed]);
+    out.failBySuffix = countBySuffix_(res.failed.concat(res2.failed));
+    out.okBySuffix = countBySuffix_(got);
+    // Name → SYMBOL, because a malformed symbol is invisible in a list of company names and is
+    // the first thing to rule out. `uncoveredNames_` is shared with the full pass and only
+    // carries names, so the gap-fill builds its own.
+    var affected = [], seenAff = {};
+    for (var q = 0; q < res.failed.length; q++) {
+      var fa = res.failed[q];
+      if (fa.fallback || seenAff[fa.key]) continue;   // retried below; reported there instead
+      seenAff[fa.key] = true;
+      if (affected.length < 40) affected.push(fa.name + '  [' + fa.symbol + ']');
+    }
+    for (var q2 = 0; q2 < res2.failed.length; q2++) {
+      var fb = res2.failed[q2];
+      if (seenAff[fb.key]) continue;
+      seenAff[fb.key] = true;
+      if (affected.length < 40) affected.push(fb.name + '  [' + fb.symbol + ']');
+    }
+    out.affected = affected;
     out.stillMissing = uncoveredNames_(res, res2);
     out.dates = written.dates;
     out.cols = written.cols;
@@ -1073,11 +1120,17 @@ function priceHistoryLocked_(range, full) {
     // `noSymbolNames` and not merely a count: a scrip with no resolvable ticker NEVER gets a
     // column, so no amount of re-running fixes it — the master row needs its exchange code. That
     // list is the only thing that makes the gap actionable, and it used to be discarded.
-    var targets = [], noSymbol = 0, noSymbolNames = [], dupes = 0, seenKey = {};
+    var targets = [], noSymbol = 0, noSymbolNames = [], dupes = 0, seenKey = {}, seenNoSym = {};
     for (var i = 0; i < universe.length; i++) {
       var u = universe[i];
       var syms = symbolsFor_(master, u.isin, u.name);
-      if (!syms.primary) { noSymbol++; if (noSymbolNames.length < 60) noSymbolNames.push(u.name); continue; }
+      // Deduped: this runs BEFORE the column-key dedupe below, so a scrip reached from two
+      // portfolios (or from both the Holding tab and True Entry) was listed twice.
+      if (!syms.primary) {
+        noSymbol++;
+        if (!seenNoSym[u.name]) { seenNoSym[u.name] = true; if (noSymbolNames.length < 60) noSymbolNames.push(u.name); }
+        continue;
+      }
       var e = (u.isin && master.byIsin[u.isin]) || master.byName[normName_(u.name)] || null;
       var key = u.isin || (e && e.isin) || normName_(u.name);
       if (!key) continue;
@@ -1124,10 +1177,18 @@ function priceHistoryLocked_(range, full) {
       downgradedToMerge = true;
       Logger.log('FULL rebuild downgraded to a merge: only ' + got.length + ' of ' + targets.length + ' scrips returned data.');
     }
-    var written = writePriceHistory_(cols, byDate, writeFull);
+    // Keys this run TARGETED but could not fetch. On a full rebuild they are carried over from
+    // the tab instead of being dropped: the feed refusing a symbol today says nothing about the
+    // closes already recorded for it.
+    var keepKeys = {};
+    for (var kf = 0; kf < res.failed.length; kf++) keepKeys[res.failed[kf].key] = true;
+    for (var kf2 = 0; kf2 < res2.failed.length; kf2++) keepKeys[res2.failed[kf2].key] = true;
+    var written = writePriceHistory_(cols, byDate, writeFull, keepKeys);
     return {
       ok: true, full: !!full, rebuilt: writeFull, downgradedToMerge: downgradedToMerge,
       failReasons: groupFailReasons_([res.failed, res2.failed]),
+      failBySuffix: countBySuffix_(res.failed.concat(res2.failed)),
+      okBySuffix: countBySuffix_(got),
       range: range,
       universe: universe.length, targets: targets.length, noSymbol: noSymbol,
       noSymbolNames: noSymbolNames, dupes: dupes,
@@ -1215,6 +1276,23 @@ function collectHistoryUniverse_() {
  * "40 scrips: rate limited (HTTP 429)" is a different instruction from "40 scrips: symbol not
  * found" — the first means run it again more slowly, the second means the master row is wrong.
  */
+/**
+ * Failures and successes counted by EXCHANGE SUFFIX. One line — `{".BO": 79, ".NS": 0}` beside
+ * `okBySuffix {".NS": 300, ".BO": 12}` — settles the question the 404s could not: is the feed
+ * refusing BSE specifically, or are these 79 companies individually uncovered? Two runs on
+ * 23-Sep-2026 reported 79 identical 404s without being able to say which.
+ */
+function countBySuffix_(items) {
+  var by = {};
+  for (var i = 0; i < items.length; i++) {
+    var sym = String((items[i] && (items[i].symbol || (items[i].t && items[i].t.symbol))) || '');
+    var dot = sym.lastIndexOf('.');
+    var suf = dot > 0 ? sym.slice(dot) : '(none)';
+    by[suf] = (by[suf] || 0) + 1;
+  }
+  return by;
+}
+
 function groupFailReasons_(failedLists) {
   var by = {}, order = [];
   for (var i = 0; i < failedLists.length; i++) {
@@ -1237,10 +1315,13 @@ function groupFailReasons_(failedLists) {
  */
 function uncoveredNames_(res, res2) {
   var out = [], seen = {}, CAP = 40;
+  // WITH the symbol that was tried. A list of company names cannot show that a well-known scrip
+  // was sent to the wrong ticker, which is the first thing to rule out when the feed 404s — and
+  // it is exactly what a run reporting 79 bare names could not reveal.
   var push = function (t) {
     if (!t || !t.name || seen[t.name]) return;
     seen[t.name] = true;
-    if (out.length < CAP) out.push(t.name);
+    if (out.length < CAP) out.push(t.name + '  [' + (t.symbol || '?') + ']');
   };
   for (var i = 0; i < res.failed.length; i++) if (!res.failed[i].fallback) push(res.failed[i]);
   for (var j = 0; j < res2.failed.length; j++) push(res2.failed[j]);
@@ -1254,6 +1335,802 @@ function uncoveredNames_(res, res2) {
  * with completely different answers — reported 23-Sep-2026, when 60 of 60 scrips failed at once
  * and the response could not say whether that was Yahoo throttling or 60 bad symbols.
  */
+/**
+ * The header recipe that gets past BSE's WAF, proved by the corporate-action scan long before the
+ * history work and re-proved by probe round one (every route answered 200).
+ */
+var BSE_HEADERS_ = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+  'Accept': 'application/json, text/plain, */*',
+  'Origin': 'https://www.bseindia.com',
+  'Referer': 'https://www.bseindia.com/',
+};
+
+/**
+ * BSE HISTORY PROBE, round three. `runBseHistoryProbe()`.
+ *
+ * Rounds one and two closed two of the three questions, and this one is narrow because of it:
+ *
+ *   - `api.bseindia.com` answers this script on every route, so the WAF there is not the problem;
+ *   - `StockReachGraph` has NO period parameter. flag 0/2/3/4/5 return byte-identical payloads
+ *     (13,387 for RUDRAECO, 31,172 for RELIANCE), all stamped the SAME session 09:15 to 16:01,
+ *     390 rows being one trading day minute by minute. It is an intraday chart and nothing else;
+ *   - `StockPriceCSVDownload` answers 200 with a ZERO-byte body, so it exists and rejects the
+ *     parameters silently;
+ *   - the BHAVCOPY answered 403 on every date and both filename conventions — but from
+ *     `www.bseindia.com`, which is a DIFFERENT HOST from the `api.` one that works. A 403 with a
+ *     484-byte body is a block page, and a block page usually names what refused it.
+ *
+ * So the only live question is whether the download host can be satisfied with different headers,
+ * and round two could not answer it because it captured the body ONLY on a 200 — discarding
+ * precisely the evidence a 403 carries. Every response body is captured here whatever the code.
+ *
+ * If this round also fails, BSE has no free daily-close route reachable from Apps Script and the
+ * answer is to record closes FORWARD from the quote feed instead of backfilling.
+ */
+function probeBse_(code) {
+  var sc = String(code || '514010');
+  var out = [], bhav = [];
+
+  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  var ymd = function (d) { return '' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()); };
+  var dmy = function (d) { return p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + d.getFullYear(); };
+
+  var get = function (url, headers) {
+    try {
+      var r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: headers || BSE_HEADERS_ });
+      return { code: r.getResponseCode(), text: String(r.getContentText() || '') };
+    } catch (e) { return { code: 0, text: 'threw: ' + ((e && e.message) ? e.message : String(e)) }; }
+  };
+
+  // ── A. liveness control. One call, to prove the run reached BSE at all. ────
+  var ctl = get('https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w?scripcode=' + sc +
+                '&flag=0&fromdate=&todate=&seriesid=');
+  out.push({ group: 'control', label: 'StockReachGraph intraday (known to work)',
+             code: ctl.code, bytes: ctl.text.length });
+
+  // ── B. the download host, three header profiles ────────────────────────────
+  // `Origin` is what the api host wants and is exactly the kind of header a static-file host
+  // treats as a cross-site request and refuses, so the profiles differ in that and in `Accept`.
+  var to = new Date();
+  var d = new Date(to.getTime() - 86400000);
+  while (d.getDay() === 0 || d.getDay() === 6) d = new Date(d.getTime() - 86400000);
+
+  var profiles = [
+    { label: 'api-style (Origin + Referer) - what round two sent', headers: BSE_HEADERS_ },
+    { label: 'browser navigation (no Origin, page Referer)', headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-GB,en;q=0.9',
+        'Referer': 'https://www.bseindia.com/markets/MarketInfo/BhavCopy.aspx',
+      } },
+    { label: 'bare (no headers but a UA)', headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      } },
+  ];
+
+  var files = [
+    { label: 'BhavCopy_BSE_CM (current)',
+      url: 'https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_' + ymd(d) + '_F_0000.CSV' },
+    { label: 'EQ<ddmmyy>_CSV.ZIP (legacy)',
+      url: 'https://www.bseindia.com/download/BhavCopy/Equity/EQ' + p2(d.getDate()) + p2(d.getMonth() + 1) +
+           String(d.getFullYear()).slice(2) + '_CSV.ZIP' },
+  ];
+
+  for (var f = 0; f < files.length; f++) {
+    for (var p = 0; p < profiles.length; p++) {
+      var r = get(files[f].url, profiles[p].headers);
+      bhav.push({
+        group: 'bhavcopy', date: ymd(d), file: files[f].label, profile: profiles[p].label,
+        code: r.code, bytes: r.text.length,
+        // ALWAYS, not only on 200. A block page names what refused it, and round two threw that
+        // away by capturing the body only on success.
+        body: r.text.slice(0, 220),
+      });
+    }
+  }
+
+  // ── C. the CSV route that answers 200 with nothing, a few more param shapes ─
+  var csv = [];
+  var shapes = [
+    { label: 'no dates at all', q: 'pageType=0&scripcode=' + sc + '&flag=0&fromdate=&todate=&seriesid=' },
+    { label: 'pageType=1', q: 'pageType=1&scripcode=' + sc + '&flag=0&fromdate=' + encodeURIComponent(dmy(new Date(to.getTime() - 30 * 86400000))) + '&todate=' + encodeURIComponent(dmy(to)) + '&seriesid=' },
+    { label: 'flag=1', q: 'pageType=0&scripcode=' + sc + '&flag=1&fromdate=' + encodeURIComponent(dmy(new Date(to.getTime() - 30 * 86400000))) + '&todate=' + encodeURIComponent(dmy(to)) + '&seriesid=' },
+  ];
+  for (var q = 0; q < shapes.length; q++) {
+    var rc = get('https://api.bseindia.com/BseIndiaAPI/api/StockPriceCSVDownload/w?' + shapes[q].q);
+    csv.push({ group: 'csv', label: shapes[q].label, code: rc.code, bytes: rc.text.length, body: rc.text.slice(0, 220) });
+  }
+
+  var bhavHit = null;
+  for (var b = 0; b < bhav.length; b++) if (bhav[b].code === 200 && bhav[b].bytes > 1000) { bhavHit = bhav[b]; break; }
+  var csvHit = null;
+  for (var c = 0; c < csv.length; c++) if (csv[c].code === 200 && csv[c].bytes > 200) { csvHit = csv[c]; break; }
+
+  return {
+    ok: true, version: RESOLVER_VERSION_,
+    verdict: bhavHit
+      ? 'The bhavcopy answered with the "' + bhavHit.profile + '" headers - backfill goes day by day across the whole exchange.'
+      : csvHit
+        ? 'StockPriceCSVDownload answered with the "' + csvHit.label + '" shape - per-scrip backfill is on.'
+        : 'Still nothing. Read the body snippets: they name what is refusing. If it is a WAF on the download host, BSE has no free daily-close route from Apps Script and the answer is to record closes FORWARD from the quote feed.',
+    control: out, bhavcopy: bhav, csv: csv, at: nowStamp_(),
+  };
+}
+
+/**
+ * EDITOR-RUNNABLE WRAPPERS for the two diagnostics.
+ *
+ * A trailing underscore makes a function PRIVATE in Apps Script, and a private function does not
+ * appear in the editor's Run dropdown — so `probeBse_` and `probeHistory_` were reachable only
+ * through a deployment. Deploying is exactly the step that had not happened on three consecutive
+ * attempts (Save updates the editor; the /exec URL keeps serving the deployed version), and each
+ * time the answer that came back was about the OLD code.
+ *
+ * These have no underscore, so they can be run from the editor the moment the file is saved, and
+ * the result lands in the execution log. No deployment, no URL, nothing to get wrong.
+ *
+ * NAMED for the SOURCE and the SUBJECT, because `testBseProbe` already exists and probes BSE
+ * CORPORATE ACTIONS. A `runBseProbe` beside it in the Run dropdown was picked by mistake on the
+ * first attempt, and the reply — a well-formed corp-action reachability report — looked enough
+ * like an answer to be pasted back as one.
+ */
+// ── BHAVCOPY BACKFILL ────────────────────────────────────────────────────────
+//
+// Yahoo stopped serving `.BO` (proved 23-Sep-2026: RELIANCE.NS returns candles, 500325.BO — the
+// same company — answers "No data found, symbol may be delisted"), and BSE's own bhavcopy is
+// blocked to Google's IPs. Samco republishes it at a deterministic URL that Apps Script CAN
+// reach, and its `SC_CODE` column is the BSE scrip code the master already stores — an exact
+// numeric join, with no third resolver to drift out of step with the two that already disagree.
+//
+// WHAT WOULD HANG THE SHEET, and what this does instead. `writePriceHistory_` reads the whole
+// tab, rebuilds it in memory and writes it all back — around 196,000 cells once these columns
+// exist. Calling it once per day-file, five hundred times, is the failure mode. So a run fetches
+// MANY days, accumulates them in memory, and writes ONCE. The cap keeps a run inside the
+// six-minute limit; `remaining` says whether to run it again.
+//
+// Days per run, MEASURED rather than guessed: the first real run did 40 days in 104s, so a fetch
+// is ~2.6s and the read+write is ~25s. 90 days is ~260s against the 6-minute limit, which keeps a
+// working margin. A run that times out loses only its own fetches — the single write happens at
+// the end, so there is no half-written grid to recover from.
+var BHAV_DAYS_PER_RUN = 150;
+
+/**
+ * Stop FETCHING after this long and write what the run has, whatever the day count says.
+ *
+ * With the clock in place the day cap is deliberately set HIGH and is no longer the real limit:
+ * a fast run gets more days, a slow one stops safely, and neither needs a number tuned by hand.
+ * Measured across three real runs — 40 days in 104s, 90 days that took eight minutes, 60 days in
+ * 128s — the per-fetch time is not stable enough for a count to mean anything.
+ *
+ * A day cap alone assumes the per-fetch time holds, and it does not: 40 days took 104s on the
+ * first run (~2.6s each), 90 days had not finished in EIGHT MINUTES on the second — the source
+ * slows down as a run goes on. A cap tuned to one measurement is a guess about the network.
+ *
+ * The clock is the honest limit. 3.5 minutes of fetching leaves the rest of Apps Script's
+ * 6-minute budget for the single write, so a run ALWAYS lands what it has collected instead of
+ * being killed with it in memory.
+ */
+var BHAV_FETCH_BUDGET_MS = 210 * 1000;
+
+// How far back the backfill has already reached, as `yyyy-mm-dd`.
+//
+// A high-water mark rather than "is this date already filled", because the two cannot be told
+// apart from the tab: 350 of the targets are ALSO Yahoo-fed, so almost every date has some values
+// whether or not the bhavcopy ever ran for it — and requiring ALL 350 never holds either, since
+// roughly four scrips a day simply do not trade. Measured on the first run: 13,161 closes over 38
+// sessions is ~346 of 350, so every completed day would have been refetched on every later run.
+//
+// It is a HINT, never a correctness mechanism. Fill-only means a wrong or reset mark costs
+// fetches and changes nothing on the tab.
+var BHAV_MARK_KEY_ = 'BHAV_BACKFILL_OLDEST';
+
+/**
+ * The BSE codes worth extracting, mapped to the Price History column key they belong in.
+ *
+ * Built from the scrips actually HELD, not from the 5,000 rows a bhavcopy carries: we want ~79
+ * numbers out of each file and nothing else. The key is computed exactly as `priceHistoryLocked_`
+ * computes it, or the backfill would create a SECOND column for a scrip that already has one.
+ */
+function bhavTargets_(master, universe) {
+  var byCode = {}, n = 0;
+  var seen = {};
+  for (var i = 0; i < universe.length; i++) {
+    var u = universe[i];
+    var e = (u.isin && master.byIsin[u.isin]) || master.byName[normName_(u.name)] || null;
+    if (!e || !e.bse) continue;                       // no BSE code, nothing to look up
+    var code = String(e.bse).replace(/\s+/g, '').replace(/^0+/, '');
+    if (!code) continue;
+    var key = u.isin || e.isin || normName_(u.name);
+    if (!key || seen[key]) continue;
+    seen[key] = true;
+    byCode[code] = key;
+    n++;
+  }
+  return { byCode: byCode, count: n };
+}
+
+/**
+ * Pull `SC_CODE` -> `CLOSE` out of one bhavcopy, for the codes asked for only.
+ *
+ * Header-driven, never positional: the 2016 files and the 2026 files are both
+ * `SC_CODE,SC_NAME,SC_GROUP,SC_TYPE,OPEN,HIGH,LOW,CLOSE,...` today, but a column inserted
+ * upstream would silently shift OPEN into CLOSE and every price would be wrong by a day's range
+ * with nothing downstream able to tell. Same rule the Sheets writers follow.
+ *
+ * `SC_NAME` is quoted and can contain commas ("ABB INDIA LIMITED, LTD"), so the split is
+ * quote-aware. A naive split on ',' moves every later column left for exactly those rows.
+ */
+function parseBhavcopy_(text, wantedByCode) {
+  var out = {}, matched = 0;
+  if (!text) return { closes: out, matched: 0, rows: 0 };
+  var lines = text.split(/\r?\n/);
+  if (!lines.length) return { closes: out, matched: 0, rows: 0 };
+
+  var splitCsv = function (line) {
+    var cells = [], cur = '', q = false;
+    for (var i = 0; i < line.length; i++) {
+      var ch = line.charAt(i);
+      if (ch === '"') { q = !q; continue; }
+      if (ch === ',' && !q) { cells.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    cells.push(cur);
+    return cells;
+  };
+
+  var hdr = splitCsv(lines[0]);
+  var ci = { code: -1, close: -1, type: -1 };
+  for (var h = 0; h < hdr.length; h++) {
+    var name = hdr[h].trim().toUpperCase();
+    if (name === 'SC_CODE') ci.code = h;
+    else if (name === 'CLOSE') ci.close = h;
+    else if (name === 'SC_TYPE') ci.type = h;
+  }
+  // No header, no guessing. A bhavcopy whose columns cannot be identified must contribute
+  // nothing rather than contribute the wrong column.
+  if (ci.code < 0 || ci.close < 0) return { closes: out, matched: 0, rows: 0, noHeader: true };
+
+  var rows = 0;
+  for (var r = 1; r < lines.length; r++) {
+    if (!lines[r]) continue;
+    rows++;
+    var cells = splitCsv(lines[r]);
+    var code = String(cells[ci.code] || '').trim().replace(/^0+/, '');
+    var key = wantedByCode[code];
+    if (!key) continue;
+    // Equity only. The tab also carries debt and other instruments, and a bond's close in an
+    // equity column is a wrong valuation that looks entirely plausible.
+    if (ci.type >= 0) {
+      var t = String(cells[ci.type] || '').trim().toUpperCase();
+      if (t && t !== 'STK' && t !== 'Q') continue;
+    }
+    var v = parseFloat(String(cells[ci.close] || '').replace(/,/g, ''));
+    if (!(isFinite(v) && v > 0)) continue;            // 0 is not a price, it is an absent one
+    out[key] = v;
+    matched++;
+  }
+  return { closes: out, matched: matched, rows: rows };
+}
+
+/**
+ * Pull `CLOSE` out of an NSE bhavcopy. A DIFFERENT shape from the BSE one, and the difference is
+ * the whole reason this is a second function rather than a parameter:
+ *
+ *   SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN
+ *
+ * It carries **ISIN**, which is a stronger join than anything the BSE file offers: the grid keys
+ * on `isin || …`, so an ISIN match is the identity itself rather than a lookup through a ticker
+ * that two series can share. SYMBOL is the fallback, for a holding whose master row has no ISIN.
+ *
+ * `SERIES` matters only on the SYMBOL path. An ISIN identifies one instrument outright — a gold
+ * bond like `SGBJUN28` has its own — whereas a SYMBOL can appear under EQ and BE in one file, so
+ * an unqualified symbol match could take the wrong row's close.
+ */
+function parseBhavcopyNse_(text, wantedByIsin, wantedBySymbol) {
+  var out = {}, matched = 0;
+  if (!text) return { closes: out, matched: 0, rows: 0 };
+  var lines = text.split(/\r?\n/);
+  if (!lines.length) return { closes: out, matched: 0, rows: 0 };
+
+  var splitCsv = function (line) {
+    var cells = [], cur = '', q = false;
+    for (var i = 0; i < line.length; i++) {
+      var ch = line.charAt(i);
+      if (ch === '"') { q = !q; continue; }
+      if (ch === ',' && !q) { cells.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    cells.push(cur);
+    return cells;
+  };
+
+  var hdr = splitCsv(lines[0]);
+  var ci = { sym: -1, series: -1, close: -1, isin: -1 };
+  for (var h = 0; h < hdr.length; h++) {
+    var name = hdr[h].trim().toUpperCase();
+    if (name === 'SYMBOL') ci.sym = h;
+    else if (name === 'SERIES') ci.series = h;
+    else if (name === 'CLOSE') ci.close = h;
+    else if (name === 'ISIN') ci.isin = h;
+  }
+  if (ci.close < 0 || (ci.isin < 0 && ci.sym < 0)) {
+    return { closes: out, matched: 0, rows: 0, noHeader: true };
+  }
+
+  // Equity series only, and ONLY consulted on the symbol path. EQ is the main board; BE/BZ are
+  // trade-for-trade; SM/ST are the SME board, which several of these holdings are on.
+  var EQ_SERIES = { EQ: 1, BE: 1, BZ: 1, SM: 1, ST: 1 };
+
+  var rows = 0;
+  for (var r = 1; r < lines.length; r++) {
+    if (!lines[r]) continue;
+    rows++;
+    var cells = splitCsv(lines[r]);
+    var key = '';
+    if (ci.isin >= 0) {
+      var isin = String(cells[ci.isin] || '').trim().toUpperCase();
+      if (isin) key = wantedByIsin[isin] || '';
+    }
+    if (!key && ci.sym >= 0) {
+      var series = ci.series >= 0 ? String(cells[ci.series] || '').trim().toUpperCase() : '';
+      if (series && !EQ_SERIES[series]) continue;
+      var sym = String(cells[ci.sym] || '').trim().toUpperCase();
+      if (sym) key = wantedBySymbol[sym] || '';
+    }
+    if (!key) continue;
+    var v = parseFloat(String(cells[ci.close] || '').replace(/,/g, ''));
+    if (!(isFinite(v) && v > 0)) continue;
+    // First writer wins within a file too: an ISIN match already taken must not be replaced by a
+    // later row of another series carrying the same symbol.
+    if (out[key] === undefined) { out[key] = v; matched++; }
+  }
+  return { closes: out, matched: matched, rows: rows };
+}
+
+/**
+ * Backfill daily closes from the bhavcopy, `fromYmd` to `toYmd` inclusive (both `yyyy-mm-dd`).
+ *
+ * Fill-only and therefore idempotent: a cell already carrying a close is left alone, so a re-run
+ * costs fetches and changes nothing, and RESUMABILITY needs no stored state — the work still to
+ * do is whatever is still blank.
+ *
+ * A date with no file is a market holiday, not an error; there is no trading calendar to keep.
+ */
+function backfillFromBhavcopy(fromYmd, toYmd, cap) {
+  var lock = LockService.getScriptLock();
+  // The same lock the Yahoo top-up takes. Two writers rebuilding this tab at once would have one
+  // of them write a grid it read before the other's changes landed.
+  if (!lock.tryLock(30 * 1000)) return { ok: false, busy: true };
+  try {
+    var t0 = new Date().getTime();
+    var master = loadMasterSymbols_();
+    var universe = collectHistoryUniverse_();
+    var tg = bhavTargets_(master, universe);
+    if (!tg.count) {
+      return { ok: true, targets: 0, note: 'No held scrip carries a BSE code in the scrip master.' };
+    }
+
+    // What the tab already holds, so a day whose targets are all filled is never refetched.
+    var have = {};
+    var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
+    var sh = ss.getSheetByName(CONFIG.HISTORY_TAB);
+    var wantKeys = [];
+    for (var c0 in tg.byCode) if (tg.byCode.hasOwnProperty(c0)) wantKeys.push(tg.byCode[c0]);
+    if (sh) {
+      var vals = sh.getDataRange().getValues();
+      if (vals.length > 1) {
+        var hdr0 = vals[0], colOf = {};
+        for (var c = 1; c < hdr0.length; c++) {
+          var k = String(hdr0[c] == null ? '' : hdr0[c]).trim();
+          if (k) colOf[k] = c;
+        }
+        for (var r0 = 1; r0 < vals.length; r0++) {
+          var ymd0 = ymdCell_(vals[r0][0]);
+          if (!ymd0) continue;
+          var filled = 0;
+          for (var w = 0; w < wantKeys.length; w++) {
+            var cc = colOf[wantKeys[w]];
+            if (cc == null) continue;
+            var vv = vals[r0][cc];
+            if (typeof vv === 'number' && isFinite(vv) && vv > 0) filled++;
+          }
+          have[ymd0] = filled;
+        }
+      }
+    }
+
+    var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+    var parseYmd = function (t) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(t || ''));
+      return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+    };
+    var from = parseYmd(fromYmd), to = parseYmd(toYmd);
+    if (!from || !to) return { ok: false, error: 'Dates must be yyyy-mm-dd.' };
+
+    // Resume below whatever the last run reached, so a completed day is never fetched twice.
+    var props = PropertiesService.getScriptProperties();
+    var mark = props.getProperty(BHAV_MARK_KEY_);
+    var startAt = new Date(to.getTime());
+    if (mark) {
+      var md = parseYmd(mark);
+      if (md && md.getTime() <= to.getTime()) {
+        startAt = new Date(md.getTime());
+        startAt.setDate(startAt.getDate() - 1);
+      }
+    }
+
+    var lim = (cap > 0) ? cap : BHAV_DAYS_PER_RUN;
+    var byDate = {}, colsSeen = {}, cols = [];
+    var fetched = 0, holidays = 0, skipped = 0, remaining = 0, added = 0, refused = 0, stoppedOn = 'range';
+    var firstDone = '', lastDone = '';
+
+    for (var d = new Date(startAt.getTime()); d.getTime() >= from.getTime(); d.setDate(d.getDate() - 1)) {
+      if (d.getDay() === 0 || d.getDay() === 6) continue;          // no session
+      var ymd = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+      // Belt and braces behind the mark: a date already complete for EVERY target cannot need
+      // anything, whatever the mark says.
+      if (have[ymd] !== undefined && have[ymd] >= tg.count) { skipped++; continue; }
+      // Whichever comes first. The clock is what makes a run land: exceed it and every fetch
+      // already paid for is lost with the process.
+      if (fetched >= lim) { stoppedOn = 'cap'; remaining++; continue; }
+      if (new Date().getTime() - t0 > BHAV_FETCH_BUDGET_MS) { stoppedOn = 'time'; remaining++; continue; }
+
+      var url = samcoBhavUrl_(d, 'BSE');
+      var resp;
+      try {
+        resp = UrlFetchApp.fetch(url, {
+          muteHttpExceptions: true, followRedirects: true,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept': 'text/csv,text/plain,*/*',
+            'Referer': 'https://www.samco.in/bhavcopy-nse-bse-mcx',
+          },
+        });
+      } catch (e) { holidays++; continue; }
+      fetched++;
+      if (resp.getResponseCode() !== 200) { holidays++; continue; }
+      var body = String(resp.getContentText() || '');
+      // A REFUSAL IS NOT A HOLIDAY, and the two arrive looking almost identical.
+      //
+      // Observed 24-Sep-2026, an hour after the backfill's ~500 fetches: dates that had returned
+      // 460 KB of `application/csv` started answering 200 with `text/html` and ZERO bytes. That
+      // is the source throttling us. Counted as a holiday it is invisible — and in a DAILY job
+      // invisible means it stops working and nobody finds out until a report comes back blank.
+      var ctype = '';
+      try {
+        var hh = resp.getAllHeaders() || {};
+        ctype = String(hh['Content-Type'] || hh['content-type'] || '');
+      } catch (eh) { ctype = ''; }
+      if (/html/i.test(ctype) || (body.length === 0 && ctype.indexOf('csv') < 0)) {
+        refused++;
+        continue;
+      }
+      if (body.length < 1000) { holidays++; continue; }
+
+      var pr = parseBhavcopy_(body, tg.byCode);
+      if (!pr.matched) continue;
+      byDate[ymd] = pr.closes;
+      added += pr.matched;
+      if (!lastDone || ymd > lastDone) lastDone = ymd;
+      if (!firstDone || ymd < firstDone) firstDone = ymd;
+      for (var kk in pr.closes) {
+        if (pr.closes.hasOwnProperty(kk) && !colsSeen[kk]) { colsSeen[kk] = true; cols.push(kk); }
+      }
+    }
+
+    // ONE write for the whole run. This is the part that would hang the sheet if it were per-day.
+    var written = { dates: 0, cols: 0 };
+    if (cols.length) written = writePriceHistory_(cols, byDate, false, null, true);
+
+    // AFTER the write, never before: a run that dies mid-fetch must be repeated, not skipped.
+    //
+    // And NOT AT ALL when the source was mostly refusing: the mark would step past days that were
+    // never really read, and fill-only would then never revisit them. A refused run must cost
+    // nothing but time.
+    if (firstDone && !(refused > 0 && refused >= fetched / 2)) props.setProperty(BHAV_MARK_KEY_, firstDone);
+
+    return {
+      ok: true, version: RESOLVER_VERSION_, resumedBelow: mark || '(start)',
+      from: fromYmd, to: toYmd,
+      targets: tg.count, daysFetched: fetched, daysSkipped: skipped, stoppedOn: stoppedOn,
+      holidaysOrMissing: holidays, refused: refused, remaining: remaining,
+      closesAdded: added, scripsTouched: cols.length,
+      filledFrom: firstDone, filledTo: lastDone,
+      dates: written.dates, gridCols: written.cols,
+      note: refused > 0 && refused >= fetched / 2
+        ? 'THE SOURCE IS REFUSING US: ' + refused + ' of ' + fetched + ' fetches came back as an ' +
+          'empty HTML page rather than a CSV. That is throttling, not a market holiday. Wait, then ' +
+          'run it again - nothing is lost, the grid is fill-only.'
+        : remaining > 0
+          ? remaining + ' more session(s) still to do - run it again, it picks up where this stopped.'
+            + (refused ? ' (' + refused + ' fetch(es) were refused, not missing - the source is rate-limiting.)' : '')
+          : 'Range complete.' + (refused ? ' ' + refused + ' fetch(es) were refused and skipped - re-run later to fill those.' : ''),
+      ms: new Date().getTime() - t0, at: nowStamp_(),
+    };
+  } finally { lock.releaseLock(); }
+}
+
+/**
+ * DAILY: fill in the sessions the Yahoo pass cannot reach.
+ *
+ * Yahoo will not serve `.BO`, so without this the BSE-only scrips get their two years of history
+ * from the backfill and then nothing further — a fresh gap opening at the recent end, which is
+ * the same hole this whole exercise started from.
+ *
+ * ORDER IS THE WHOLE DESIGN. This runs AFTER the Yahoo top-up (19:30 IST; this is 20:30), and
+ * `writePriceHistory_` is fill-only, so for a scrip Yahoo can price, Yahoo's close is already in
+ * the cell and this finds it occupied and leaves it. Nothing changes while Yahoo is healthy. If
+ * Yahoo drops `.NS` as it dropped `.BO`, the blanks simply start being filled from here instead —
+ * a fallback that needs no precedence rules, because "first writer wins" already is one.
+ *
+ * THREE sessions, not one. A missed run, a holiday, or a bhavcopy published late must all
+ * self-heal without anybody noticing they happened — the same reason the Yahoo pass re-fetches a
+ * whole month. Re-covering a filled day costs a fetch and writes nothing, which is the deliberate
+ * trade: three files a day against a gap that would otherwise need a human to spot it.
+ */
+function dailyBhavTopUp() {
+  var to = new Date();
+  var from = new Date(to.getTime());
+  var back = 0, weekdays = 0;
+  while (weekdays < 3 && back < 10) {
+    from.setDate(from.getDate() - 1);
+    back++;
+    if (from.getDay() !== 0 && from.getDay() !== 6) weekdays++;
+  }
+  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  var f = function (d) { return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
+
+  // The backfill's resume mark must NOT be consulted here: it points at the oldest date reached
+  // walking backwards, and this walks the newest few. Passing the dates explicitly keeps the two
+  // uses of the same function from interfering.
+  var saved = PropertiesService.getScriptProperties().getProperty(BHAV_MARK_KEY_);
+  PropertiesService.getScriptProperties().deleteProperty(BHAV_MARK_KEY_);
+  var r;
+  try {
+    r = backfillFromBhavcopy(f(from), f(to), 5);
+  } finally {
+    if (saved) PropertiesService.getScriptProperties().setProperty(BHAV_MARK_KEY_, saved);
+  }
+  Logger.log('Daily bhavcopy top-up: ' + JSON.stringify(r));
+  return r;
+}
+
+function installBhavTopUpTrigger() {
+  removeBhavTopUpTrigger();
+  // After the Yahoo top-up at 19:30, so Yahoo keeps first claim on every cell it can fill.
+  ScriptApp.newTrigger('dailyBhavTopUp').timeBased().atHour(20).nearMinute(30).everyDays(1)
+    .inTimezone('Asia/Kolkata').create();
+  Logger.log('Daily bhavcopy top-up trigger installed (~20:30 IST, after the Yahoo pass).');
+}
+
+function removeBhavTopUpTrigger() {
+  var ts = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < ts.length; i++) {
+    if (ts[i].getHandlerFunction() === 'dailyBhavTopUp') ScriptApp.deleteTrigger(ts[i]);
+  }
+}
+
+/**
+ * Forget how far the backfill has reached, so the next run starts again from today.
+ *
+ * Safe at any time: fill-only means a repeat costs fetches and changes nothing on the tab. Use it
+ * after adding scrips to the book, when the earlier runs did not know to look for them.
+ */
+function resetBhavBackfillMark() {
+  PropertiesService.getScriptProperties().deleteProperty(BHAV_MARK_KEY_);
+  Logger.log('Backfill mark cleared - the next run starts from today again.');
+}
+
+/**
+ * Editor-runnable: walk BACKWARDS from today, one capped chunk per press, until it says complete.
+ * Two years and a bit, which is the span the grid already covers for the Yahoo-fed scrips.
+ */
+function runBhavBackfill() {
+  var to = new Date();
+  var from = new Date(to.getFullYear() - 2, to.getMonth(), to.getDate());
+  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  var f = function (d) { return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
+  var r = backfillFromBhavcopy(f(from), f(to), 0);
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+/**
+ * Samco republishes the daily BSE and NSE bhavcopies, and unlike `www.bseindia.com/download/`
+ * its URLs are DETERMINISTIC — which is what makes a backfill possible at all.
+ *
+ * The path segment is a base64 of the file's location on their server, padding stripped:
+ *
+ *   https://www.samco.in/bse_nse_mcx/datacopy/<base64 of>
+ *   /var/www/html/samco/public_html/Downloads/bhavcopy_data/YYYY-MM-DD/YYYYMMDD_BSE.csv
+ *
+ * Verified by decoding a real download link (24-Sep-2026) and re-encoding it to the same string.
+ * Standard base64, no URL-safe substitution needed — `+` and `/` do not occur for these paths.
+ *
+ * NOT yet known, and what `runSamcoProbe` is for: whether Apps Script's IPs can reach it. The
+ * owner's browser can, and so it could for BSE — where the block turned out to be on Google's
+ * ranges. A source is not usable until it has been asked from HERE.
+ */
+var SAMCO_BHAV_BASE_ = 'https://www.samco.in/bse_nse_mcx/datacopy/';
+
+function samcoBhavUrl_(d, segment) {
+  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  var iso = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+  var ymd = '' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate());
+  var path = '/var/www/html/samco/public_html/Downloads/bhavcopy_data/' + iso + '/' + ymd + '_' +
+             (segment || 'BSE') + '.csv';
+  return SAMCO_BHAV_BASE_ + Utilities.base64Encode(path).replace(/=+$/, '');
+}
+
+/**
+ * Is Samco's bhavcopy reachable from Apps Script, and what shape is the file?
+ *
+ * Three dates on purpose, each answering something different: the session the owner's own report
+ * priced at (30-Mar-2026, the one that matters), a recent weekday (is it still being published?),
+ * and an old one (their page claims 2016 onwards — a backfill depends on that being true).
+ *
+ * Reports the FIRST TWO LINES of any file it gets, because the header row is what the parser will
+ * be written against, and writing one against a guessed set of column names is the mistake this
+ * whole investigation has been avoiding.
+ */
+function runSamcoProbe() {
+  var dates = [
+    { label: 'the session 31-Mar-2026 priced at', d: new Date(2026, 2, 30) },
+    { label: 'recent weekday', d: (function () {
+        var x = new Date(); x.setDate(x.getDate() - 1);
+        while (x.getDay() === 0 || x.getDay() === 6) x.setDate(x.getDate() - 1);
+        return x;
+      })() },
+    { label: 'oldest claimed (their page says 2016 onwards)', d: new Date(2016, 3, 1) },
+  ];
+  var out = [];
+  for (var i = 0; i < dates.length; i++) {
+    var url = samcoBhavUrl_(dates[i].d, 'BSE');
+    var row = { label: dates[i].label, url: url };
+    try {
+      var r = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true, followRedirects: true,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+          'Accept': 'text/csv,text/plain,*/*',
+          'Referer': 'https://www.samco.in/bhavcopy-nse-bse-mcx',
+        },
+      });
+      row.code = r.getResponseCode();
+      var h = r.getAllHeaders() || {};
+      row.contentType = h['Content-Type'] || h['content-type'] || '';
+      var body = String(r.getContentText() || '');
+      row.bytes = body.length;
+      row.lines = body ? body.split('\n').length : 0;
+      // Always, whatever the status: a block page names what refused it, and a CSV names its
+      // columns. Two lines is enough for both.
+      row.head = body.split('\n').slice(0, 2).join(' || ').slice(0, 400);
+    } catch (e) {
+      row.code = 0;
+      row.head = 'threw: ' + ((e && e.message) ? e.message : String(e));
+    }
+    out.push(row);
+  }
+  // The NSE file, for its HEADER only. It is a different shape from the BSE one — keyed on a
+  // SYMBOL string rather than a numeric SC_CODE — and the parser for it has to be written against
+  // the real columns, not against an assumption that the two match.
+  var nse = { label: 'NSE bhavcopy (header only, for the parser)' };
+  try {
+    var nurl = samcoBhavUrl_(new Date(2026, 2, 30), 'NSE');
+    var nr = UrlFetchApp.fetch(nurl, {
+      muteHttpExceptions: true, followRedirects: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'text/csv,text/plain,*/*',
+        'Referer': 'https://www.samco.in/bhavcopy-nse-bse-mcx',
+      },
+    });
+    nse.url = nurl;
+    nse.code = nr.getResponseCode();
+    var nb = String(nr.getContentText() || '');
+    nse.bytes = nb.length;
+    nse.head = nb.split('\n').slice(0, 2).join(' || ').slice(0, 400);
+  } catch (e2) { nse.code = 0; nse.head = 'threw: ' + ((e2 && e2.message) ? e2.message : String(e2)); }
+
+  var hit = null;
+  for (var k = 0; k < out.length; k++) if (out[k].code === 200 && out[k].bytes > 1000) { hit = out[k]; break; }
+  var res = {
+    ok: true, version: RESOLVER_VERSION_, nse: nse,
+    verdict: hit
+      ? 'Reachable from Apps Script - "' + hit.label + '" returned ' + hit.bytes + ' bytes over ' +
+        hit.lines + ' lines. The header in `head` decides the parser.'
+      : 'Not reachable from Apps Script. If the bodies are identical block pages it is an IP rule, ' +
+        'the same as bseindia.com/download - and the answer is a hand-downloaded file imported by the app.',
+    results: out, at: nowStamp_(),
+  };
+  Logger.log(JSON.stringify(res, null, 2));
+  return res;
+}
+
+/**
+ * PASTE A URL HERE AND RUN `runUrlProbe`.
+ *
+ * "Does this URL work from Apps Script?" is not the same question as "does it work in my
+ * browser", and the difference is the whole story of 24-Sep-2026: the owner's browser downloads
+ * BSE's bhavcopy perfectly while this script gets a byte-identical `Access Denied` whatever
+ * headers it sends, because the block is on Google's datacentre IPs. Every candidate source has
+ * to be asked from HERE, and until now that meant me editing the file and another
+ * paste-save-run cycle each time.
+ *
+ * Deliberately EDITOR-ONLY and not a `doGet` route: the web app is deployed "Anyone", and a
+ * fetch-any-URL endpoint on it would be an open proxy for whoever finds the link.
+ */
+var PROBE_URL_ = '';
+
+/**
+ * Fetch `PROBE_URL_` and report what came back — status, size, content type, and the first 300
+ * characters, which is where a block page names what refused it.
+ *
+ * Tries the plain request first and then a browser-shaped one, because those are the two answers
+ * that mean different things: both failing is an IP rule, one succeeding is a header rule.
+ */
+function runUrlProbe() {
+  if (!PROBE_URL_) {
+    Logger.log('Set PROBE_URL_ at the top of this file to the URL you want tested, then Run again.');
+    return { ok: false, error: 'PROBE_URL_ is empty' };
+  }
+  var profiles = [
+    { label: 'plain (UA only)', headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } },
+    { label: 'browser-shaped', headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-GB,en;q=0.9',
+        'Referer': 'https://www.samco.in/bhavcopy-nse-bse-mcx',
+      } },
+  ];
+  var out = [];
+  for (var i = 0; i < profiles.length; i++) {
+    var row = { profile: profiles[i].label };
+    try {
+      var r = UrlFetchApp.fetch(PROBE_URL_, {
+        muteHttpExceptions: true, followRedirects: true, headers: profiles[i].headers,
+      });
+      row.code = r.getResponseCode();
+      var h = r.getAllHeaders() || {};
+      row.contentType = h['Content-Type'] || h['content-type'] || '';
+      var body = String(r.getContentText() || '');
+      row.bytes = body.length;
+      // ALWAYS, whatever the status. A 403 body is the only thing that says WHY.
+      row.body = body.slice(0, 300);
+    } catch (e) {
+      row.code = 0;
+      row.body = 'threw: ' + ((e && e.message) ? e.message : String(e));
+    }
+    out.push(row);
+  }
+  var okRow = null;
+  for (var k = 0; k < out.length; k++) if (out[k].code === 200 && out[k].bytes > 500) { okRow = out[k]; break; }
+  var res = {
+    ok: true, version: RESOLVER_VERSION_, url: PROBE_URL_,
+    verdict: okRow
+      ? 'Reachable from Apps Script with the "' + okRow.profile + '" headers - ' + okRow.bytes + ' bytes, ' + okRow.contentType
+      : (out.length && out[0].code === 403)
+        ? 'Refused. If both profiles give the SAME body, it is an IP rule and no header will fix it.'
+        : 'Not usable - read the bodies below.',
+    results: out, at: nowStamp_(),
+  };
+  Logger.log(JSON.stringify(res, null, 2));
+  return res;
+}
+
+function runBseHistoryProbe() {
+  var r = probeBse_('514010');
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
+function runYahooHistoryProbe() {
+  var r = probeHistory_('514010.BO');
+  Logger.log(JSON.stringify(r, null, 2));
+  return r;
+}
+
 function historyFailReason_(resp) {
   try {
     var code = resp.getResponseCode();
@@ -1269,6 +2146,67 @@ function historyFailReason_(resp) {
     if (!res.timestamp || !res.timestamp.length) return 'no candles in this range';
     return 'candles with no usable close';
   } catch (e) { return 'unreadable response'; }
+}
+
+/**
+ * CANDLE-ENDPOINT PROBE. `/exec?probe=hist[&sym=514010.BO]`
+ *
+ * 23-Sep-2026: the gap-fill came back `60x symbol not found (HTTP 404)` for well-formed BSE
+ * symbols like `514010.BO`, and three very different faults produce exactly that:
+ *
+ *   1. Yahoo has stopped serving the candle endpoint to this script at all (auth / IP block) —
+ *      then the NSE control fails too;
+ *   2. Yahoo serves `.NS` but not `.BO` from here — then the NSE control passes and the BSE one
+ *      fails, and the answer is a different source for BSE-only scrips;
+ *   3. Yahoo simply has no data for THOSE companies — then both controls pass and only the
+ *      supplied symbol fails, and the answer is per-scrip.
+ *
+ * So the probe always fetches two CONTROLS of known-good symbols — one NSE, one BSE, the same
+ * company — alongside whatever was asked for. A probe that only tested the failing symbol could
+ * not separate any of this, which is the whole reason the 404 was ambiguous in the first place.
+ */
+function probeHistory_(sym) {
+  var targets = [
+    { label: 'control NSE', symbol: 'RELIANCE.NS' },
+    { label: 'control BSE', symbol: '500325.BO' },
+  ];
+  if (sym) targets.push({ label: 'asked for', symbol: String(sym) });
+
+  var out = [];
+  for (var i = 0; i < targets.length; i++) {
+    var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(targets[i].symbol) +
+              '?interval=1d&range=1mo&events=split';
+    var row = { label: targets[i].label, symbol: targets[i].symbol };
+    try {
+      var resp = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true, followRedirects: true,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      row.code = resp.getResponseCode();
+      var h = parseHistory_(resp);
+      row.candles = (h && h.dates) ? h.dates.length : 0;
+      row.lastDate = (h && h.dates && h.dates.length) ? h.dates[h.dates.length - 1] : '';
+      row.reason = row.candles > 0 ? '' : historyFailReason_(resp);
+      if (row.candles === 0) row.body = String(resp.getContentText() || '').slice(0, 200);
+    } catch (e) {
+      row.code = 0;
+      row.reason = 'request threw: ' + ((e && e.message) ? e.message : String(e));
+    }
+    out.push(row);
+  }
+
+  var nse = out[0], bse = out[1];
+  var verdict;
+  if (!nse.candles && !bse.candles) {
+    verdict = 'The candle endpoint is not serving this script AT ALL - both known-good controls failed. This is not about your scrips.';
+  } else if (nse.candles && !bse.candles) {
+    verdict = 'Yahoo serves NSE but not BSE from here, so every BSE-only scrip will stay unpriced however often the backfill is re-run.';
+  } else if (sym && out[2] && !out[2].candles) {
+    verdict = 'Both controls work, so the endpoint is fine and Yahoo simply has no candles for ' + sym + '.';
+  } else {
+    verdict = 'Everything asked for returned candles.';
+  }
+  return { ok: true, version: RESOLVER_VERSION_, verdict: verdict, results: out, at: nowStamp_() };
 }
 
 function fetchHistoryBatch_(targets, range) {
@@ -1359,30 +2297,51 @@ function parseHistory_(resp) {
  * Write the wide grid: Date | <key> | <key> | … Merges into whatever is already there when
  * `full` is false, so a top-up neither loses columns nor reorders them.
  */
-function writePriceHistory_(newCols, byDate, full) {
+/**
+ * Write the wide grid. `full` REBUILDS (anything not in `newCols` disappears); otherwise it
+ * merges into what is already there.
+ *
+ * `keepKeys` is the exception that makes a full rebuild safe: column keys to carry over from the
+ * existing tab even though this run did not refetch them. A feed 404 is not evidence that the
+ * history already on the sheet is wrong, and dropping it is unrecoverable — a full pass on
+ * 23-Sep-2026 fetched 312 of 391 scrips and silently took the other 79 columns with it.
+ */
+function writePriceHistory_(newCols, byDate, full, keepKeys, fillOnly) {
   var ss = SpreadsheetApp.openById(CONFIG.SCRIP_MASTER_ID);
   var sh = ss.getSheetByName(CONFIG.HISTORY_TAB) || ss.insertSheet(CONFIG.HISTORY_TAB);
 
   var colIndex = {}, cols = [], rowByDate = {};
 
-  if (!full) {
+  // A merge reads everything back; a full rebuild reads back ONLY the columns it is preserving.
+  var carryOnly = !!(full && keepKeys);
+  if (!full || carryOnly) {
     var vals = sh.getDataRange().getValues();
     if (vals.length > 1) {
       var hdr = vals[0];
+      // Header column -> slot in `cols`, or -1 to skip. The previous version walked `cols` and
+      // read `vals[r][c2 + 1]`, which assumes the deduped list lines up with the raw header —
+      // so ONE duplicate or blank heading shifted every column after it and silently loaded one
+      // scrip's closes into another scrip's column. Money, wrong, invisible.
+      var slotOf = [];
       for (var c = 1; c < hdr.length; c++) {
         var key = String(hdr[c] == null ? '' : hdr[c]).trim();
-        if (!key || (key in colIndex)) continue;
-        colIndex[key] = cols.length; cols.push(key);
+        var take = !!key && !(key in colIndex) && (!carryOnly || !!keepKeys[key]);
+        if (!take) { slotOf.push(-1); continue; }
+        colIndex[key] = cols.length;
+        slotOf.push(cols.length);
+        cols.push(key);
       }
       for (var r = 1; r < vals.length; r++) {
         var ymd = ymdCell_(vals[r][0]);
         if (!ymd) continue;
-        var arr = [];
-        for (var c2 = 0; c2 < cols.length; c2++) {
-          var v = vals[r][c2 + 1];
-          arr.push((typeof v === 'number' && isFinite(v)) ? v : '');
+        var arr = rowByDate[ymd] || (rowByDate[ymd] = []);
+        for (var c2 = 1; c2 < hdr.length; c2++) {
+          var dst = slotOf[c2 - 1];
+          if (dst < 0) continue;
+          var v = vals[r][c2];
+          while (arr.length <= dst) arr.push('');
+          arr[dst] = (typeof v === 'number' && isFinite(v)) ? v : '';
         }
-        rowByDate[ymd] = arr;
       }
     }
   }
@@ -1400,6 +2359,11 @@ function writePriceHistory_(newCols, byDate, full) {
       var ci = colIndex[key2];
       if (ci == null) continue;
       while (row.length <= ci) row.push('');
+      // FILL-ONLY: never replace a close that is already on the tab. The bhavcopy backfill and
+      // the Yahoo top-up both write here, and this is what stops them contending for a cell —
+      // whoever got there first keeps it, so a re-run changes nothing and resumability is free
+      // rather than something that has to be tracked.
+      if (fillOnly && row[ci] !== '' && row[ci] !== null && row[ci] !== undefined) continue;
       row[ci] = m[key2];
     }
   }

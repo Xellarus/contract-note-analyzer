@@ -79,6 +79,12 @@ export interface HistoryGapResult {
   failReasons?: { reason: string; count: number; sample: string }[];
   /** False when the run wrote nothing to the tab because nothing was fetched. */
   wrote?: boolean;
+  /** `Name  [SYMBOL]` per failed scrip — a malformed symbol is invisible in a list of names. */
+  affected?: string[];
+  /** Failures counted by exchange suffix, and the same for successes. All-.BO failures beside
+   *  all-.NS successes means the feed is refusing an exchange, not these companies. */
+  failBySuffix?: Record<string, number>;
+  okBySuffix?: Record<string, number>;
   dates?: number;
   cols?: number;
   busy?: boolean;

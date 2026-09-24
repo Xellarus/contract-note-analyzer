@@ -64,7 +64,11 @@ const BLANK: Record<string, { label: string; why: string }> = {
   },
   noHistory: {
     label: 'No price history',
-    why: 'it carries an exchange code but has no column in the price history at all, so the price script has never fetched it — a configuration gap rather than an absent price. The “Price Status” tab records why a scrip was skipped.',
+    why: 'it carries an NSE symbol but has no column in the price history at all, so the price script has never fetched it — a configuration gap rather than an absent price. The “Price Status” tab records why a scrip was skipped.',
+  },
+  bseOnly: {
+    label: 'BSE only — no feed',
+    why: 'the scrip master carries a BSE code but NO NSE symbol, and the price feed no longer serves BSE history. Confirmed 23-Sep-2026: Yahoo answers even 500325.BO (Reliance on BSE) with “No data found, symbol may be delisted”, while RELIANCE.NS returns candles normally. Re-running the backfill cannot fix these. Where the company is ALSO listed on NSE, putting its NSE symbol on the scrip-master row fixes it immediately; where it is genuinely BSE-only, the price has to come from somewhere else.',
   },
   beforeHistory: {
     label: 'No price history',
@@ -145,8 +149,13 @@ async function priceAsOfDate(
       totalValue += value;
       return { ...p, mktPrice: r.price, mktValue: value, priceDate: r.sessionDate, stale: false, blankReason: '' };
     }
+    // A missing COLUMN has two very different causes now, and only one of them is fixable here:
+    // a BSE-only scrip cannot be fetched at all, while an NSE one that has no column means the
+    // price script skipped it and the Price Status tab will say why. Telling the owner to go
+    // check a tab about a scrip nothing can ever fetch is worse than saying nothing.
+    const noColumn = entry?.bse && !entry?.nse ? 'bseOnly' : 'noHistory';
     const reason = fromMaster
-      || (r!.miss === 'no-close' ? 'noClose' : r!.miss === 'before-history' ? 'beforeHistory' : 'noHistory');
+      || (r!.miss === 'no-close' ? 'noClose' : r!.miss === 'before-history' ? 'beforeHistory' : noColumn);
     const seen = blanks.get(reason);
     if (seen) seen.push(p.securityName); else blanks.set(reason, [p.securityName]);
     unpricedInvested += p.invested;
@@ -205,6 +214,13 @@ function describeGapFix(r: HistoryGapResult): string {
         ? `Fetched price history for ${r.filled} of ${tried} scrip${tried === 1 ? '' : 's'}. Generate the report again to see the prices.`
         : `Tried ${tried} scrip${tried === 1 ? '' : 's'} and the feed returned data for none of them, so this is not a per-scrip problem. Nothing was written to the price history.`,
   );
+  // Failures vs successes by EXCHANGE SUFFIX. When every failure is .BO and the successes are
+  // .NS, the feed is refusing an exchange and no amount of re-running will help — which no count
+  // of 404s could say on its own.
+  if (r.failBySuffix && Object.keys(r.failBySuffix).length) {
+    const fmt = (m: Record<string, number>) => Object.entries(m).map(([k, v]) => `${v}${k}`).join(', ');
+    parts.push(`By exchange — failed: ${fmt(r.failBySuffix)}${r.okBySuffix && Object.keys(r.okBySuffix).length ? `; fetched: ${fmt(r.okBySuffix)}` : ''}.`);
+  }
   // The reason, grouped. This is the line that says whether to retry or to go fix the sheet.
   if (r.failReasons?.length) {
     parts.push('Why: ' + r.failReasons.map(f => `${f.count}\u00d7 ${f.reason}${f.sample ? ` (e.g. ${f.sample})` : ''}`).join('; ') + '.');
@@ -213,7 +229,10 @@ function describeGapFix(r: HistoryGapResult): string {
     }
   }
   if (r.remaining) parts.push(`${r.remaining} more ${r.remaining === 1 ? 'is' : 'are'} queued behind the per-run cap — run it again to continue.`);
-  if (r.stillMissing?.length) parts.push(`Affected: ${nameSome(r.stillMissing)}.`);
+  // The SYMBOL beside each name: a malformed one (a `|`-joined BSE cell, a stray space) is
+  // invisible in a list of company names and is the first thing to rule out.
+  const affected = r.affected?.length ? r.affected : r.stillMissing;
+  if (affected?.length) parts.push(`Affected: ${nameSome(affected, 6)}.`);
   if (r.noSymbol) {
     parts.push(
       `${r.noSymbol} scrip${r.noSymbol === 1 ? '' : 's'} cannot be fetched at all: the scrip master carries no NSE or BSE code for ${r.noSymbol === 1 ? 'it' : 'them'}, so the price script skips ${r.noSymbol === 1 ? 'it' : 'them'} before fetching anything. ${r.noSymbol === 1 ? 'It is' : 'They are'}: ${nameSome(r.noSymbolNames || [])}. Add the exchange code where the company has listed; where the IPO has not happened there is nothing to add.`,
@@ -1328,7 +1347,7 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
                         {/* Offered only for the blanks a fetch can actually fix. A pre-IPO
                             allotment or a deliberate price exception is not a gap, and a button
                             that cannot help the row beside it is worse than none. */}
-                        {hasYahooWebApp() && (priceMeta?.blanks || []).some(b => b.reason === 'noHistory' || b.reason === 'noClose') && (
+                        {hasYahooWebApp() && (priceMeta?.blanks || []).some(b => b.reason === 'noHistory' || b.reason === 'noClose')   /* NOT bseOnly: no backfill can fetch those */ && (
                           <div className="pt-1.5 space-y-1.5">
                             <button
                               type="button"

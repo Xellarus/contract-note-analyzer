@@ -123,7 +123,13 @@ ok('A14 an unpriced result is null — never 0',
 // Comments are stripped first: this file and the ones it reads discuss `assetClass` and zero
 // fallbacks in prose, and a raw scan would report the documentation as the violation — the trap
 // tmp-shortcuts.ts and tmp-date-input.ts already strip for.
-const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+// The `/*` opener must NOT be preceded by `*`. Without that guard the Accept header
+// 'application/json, text/plain, */*' opens a phantom comment at the `/` of `*/*`, and the
+// strip then deletes every line up to the NEXT real `*/` - which silently removed a whole
+// function and made three unrelated assertions fail. A stripper that eats code is worse than
+// no stripper: it makes source assertions pass or fail for reasons that are not in the code.
+const strip = (s: string) =>
+  s.replace(/(^|[^*])\/\*[\s\S]*?\*\//g, '$1').replace(/^[ \t]*\/\/.*$/gm, '');
 const src = (p: string) => strip(readFileSync(p, 'utf8'));
 
 const reports = src('src/components/Reports.tsx');
@@ -221,7 +227,7 @@ ok('C5 a deliberate Price Exception is told apart from a failure',
 // while every one of them was present. A check that cannot pass is worse than no check.
 const blankBlock = reports.slice(reports.indexOf('const BLANK:'),
                                  reports.indexOf('async function priceAsOfDate'));
-for (const key of ['unlisted', 'exception', 'notListed', 'noHistory', 'beforeHistory', 'noClose']) {
+for (const key of ['unlisted', 'exception', 'notListed', 'noHistory', 'bseOnly', 'beforeHistory', 'noClose']) {
   const at = blankBlock.indexOf(key + ': {');
   const seg = at < 0 ? '' : blankBlock.slice(at, at + 600);
   ok(`C6 a labelled, explained reason exists for: ${key}`,
@@ -232,6 +238,24 @@ ok('C7 "not listed" says the IPO has not happened, and what to do if it since ha
   /IPO has not happened yet/.test(reports) && /re-run the price-history backfill/.test(reports));
 ok('C8 "no price history" says it is a CONFIGURATION gap, not an absent price',
   /a configuration gap rather than an absent price/.test(reports));
+// PROVEN 23-Sep-2026 by the two controls: RELIANCE.NS returns candles, 500325.BO (the same
+// company on BSE) answers "No data found, symbol may be delisted". A BSE-only scrip therefore
+// cannot be fetched at all, and sending the owner to the Price Status tab about it is worse
+// than saying nothing.
+ok('C9 a BSE-only scrip is told apart from one the price script merely skipped',
+  reports.includes("const noColumn = entry?.bse && !entry?.nse ? 'bseOnly' : 'noHistory';"));
+ok('C10 ...and the reason says a backfill cannot fix it, plus what does',
+  /Re-running the backfill cannot fix these/.test(reports)
+  && /putting its NSE symbol on the scrip-master row fixes it immediately/.test(reports));
+ok('C11 ...and the Fetch button is not offered for it',
+  (() => {
+    // Asserted on the CONDITION, not on a comment beside it: comments are stripped before this
+    // scan, so a check for the explanatory note could never have matched.
+    const at = reports.indexOf('(priceMeta?.blanks || []).some(b =>');
+    const cond = at < 0 ? '' : reports.slice(at, at + 140);
+    return cond.includes("b.reason === 'noHistory'") && cond.includes("b.reason === 'noClose'")
+      && !cond.includes('bseOnly');
+  })());
 
 // ── D. the report's own pricing session ──────────────────────────────────────
 //
@@ -405,6 +429,258 @@ ok('G8 ...and says nothing was written when nothing was',
 ok('G9 ...and names the reason, with retry advice only when it IS a feed refusal',
   gapSummary.includes("parts.push('Why: '")
   && /429\|blocked\|HTTP 5/.test(gapSummary));
+
+
+// ── H. telling the three 404s apart ──────────────────────────────────────────
+//
+// The gap-fill came back `60x symbol not found (HTTP 404)` for WELL-FORMED symbols (514010.BO).
+// Three faults produce exactly that, and they have nothing in common: the endpoint is blocked
+// here, Yahoo serves .NS but not .BO, or those companies genuinely have no candles.
+ok('H1 the probe always runs two known-good CONTROLS, one per exchange',
+  gs.includes("{ label: 'control NSE', symbol: 'RELIANCE.NS' }")
+  && gs.includes("{ label: 'control BSE', symbol: '500325.BO' }"));
+// A probe that tested only the failing symbol could not separate any of the three — which is
+// exactly why the original 404 was useless.
+ok('H2 ...and reaches a verdict naming which of the three it is',
+  gs.includes('The candle endpoint is not serving this script AT ALL')
+  && gs.includes('Yahoo serves NSE but not BSE from here')
+  && gs.includes('Yahoo simply has no candles for'));
+ok('H3 ...reporting the response code, candle count and a body snippet',
+  gs.includes('row.code = resp.getResponseCode()') && gs.includes('row.candles =')
+  && gs.includes('row.body = String(resp.getContentText()'));
+ok('H4 ...on its own route, leaving the price probes alone',
+  gs.includes("e.parameter.probe === 'hist'") && gs.includes('probeHistory_(e.parameter.sym'));
+ok('H5 ...and carries the deploy marker, like every other probe',
+  /return \{ ok: true, version: RESOLVER_VERSION_, verdict/.test(gs));
+
+// A malformed symbol is invisible in a list of company names, and is the first thing to rule out.
+ok('H6 each failed scrip is reported WITH the symbol that was tried',
+  gapFn.includes("affected.push(fa.name + '  [' + fa.symbol + ']')"));
+ok('H7 ...and the app prefers that list over the names-only one',
+  gapSummary.includes('const affected = r.affected?.length ? r.affected : r.stillMissing;'));
+
+
+// An unknown probe MUST NOT fall through to the default branch: every probe test above is an
+// exact match, so `?probe=hist` against a deployment that predates that probe quietly ran a
+// PRICE UPDATE and answered `{ok:true, updated:..}` — which reads as a probe that worked.
+// Asserted on the GUARD as well as the message: disabling the `if` left the error string in the
+// file and the first version of this check passed with the fall-through fully restored.
+// It must be the FIRST branch in doGet, not merely present. Placed last, `probe=hist&sym=...`
+// on a deployment predating that probe reached `if (e.parameter.sym)` and answered with the
+// SYMBOL RESOLVER — a well-formed reply to a question nobody asked, mistaken for the probe twice.
+ok('H8a the unknown-probe guard is the FIRST thing doGet does',
+  (() => {
+    const at = gs.indexOf('function doGet(e) {');
+    const g = gs.indexOf("['hist', 'bse', 'tv', 'nse'].indexOf(String(e.parameter.probe)) < 0");
+    return at >= 0 && g > at && g - at < 400;   // no other branch may precede it
+  })());
+ok('H8 an unrecognised probe is refused, and names the ones this deployment has',
+  gs.includes("['hist', 'bse', 'tv', 'nse'].indexOf(String(e.parameter.probe)) < 0")
+  && gs.includes("error: 'Unknown probe \"' + e.parameter.probe + '\". This deployment knows: hist, bse, tv, nse. '")
+  && gs.includes('the Apps Script editor has newer code than the deployment'));
+ok('H9 ...and every response carries the deploy marker, including the default one',
+  /\{ ok: true, version: RESOLVER_VERSION_, updated: r\.updated/.test(gs));
+
+
+// ── I. a full rebuild must not delete what it could not refetch ──────────────
+//
+// A real `?hist=full` fetched 312 of 391 scrips and took the other 79 columns with it — the feed
+// 404ing a symbol today says nothing about the closes already recorded for it, and the tab is the
+// only copy. 312/391 is 80%, so the downgrade guard did not (and should not) fire: the answer is
+// to PRESERVE the failures, not to abandon the rebuild.
+// Sliced FORWARD to the next top-level function: writePriceHistory_ sits AFTER uncoveredNames_
+// in the file, so slicing between them by name produced an empty string and two assertions
+// passed on nothing.
+const wph = gs.slice(gs.indexOf('function writePriceHistory_'),
+                     gs.indexOf('function installPriceHistoryTrigger'));
+ok('I1 the writer takes the keys to preserve',
+  gs.includes('function writePriceHistory_(newCols, byDate, full, keepKeys, fillOnly)'));
+ok('I2 ...a full rebuild reads back only those, a merge reads back everything',
+  wph.includes('var carryOnly = !!(full && keepKeys);') && wph.includes('if (!full || carryOnly) {'));
+ok('I3 ...and the failed keys are what gets passed',
+  gs.includes('for (var kf = 0; kf < res.failed.length; kf++) keepKeys[res.failed[kf].key] = true;')
+  && gs.includes('writePriceHistory_(cols, byDate, writeFull, keepKeys)'));
+
+// The row read walked the DEDUPED column list while indexing the RAW header position, so one
+// duplicate or blank heading shifted every column after it — loading one scrip's closes into
+// another scrip's column. Money, wrong, and invisible on the tab.
+ok('I4 rows are read by header position, not by deduped position',
+  wph.includes('var dst = slotOf[c2 - 1];') && !wph.includes('vals[r][c2 + 1]'));
+
+// A list of company names cannot show that a well-known scrip was sent to the wrong ticker.
+ok('I5 every uncovered scrip is named with the symbol that was tried',
+  gs.includes("out.push(t.name + '  [' + (t.symbol || '?') + ']')"));
+ok('I6 the no-symbol list is deduped', gs.includes('if (!seenNoSym[u.name])'));
+
+
+// Two runs reported 79 identical 404s and neither could say whether the feed was refusing an
+// EXCHANGE or those 79 companies. Counting both sides by suffix answers it from the run itself:
+// all-.BO failures beside all-.NS successes is a feed decision, not a per-scrip one.
+ok('I7 failures AND successes are counted by exchange suffix',
+  gs.includes('function countBySuffix_') && gs.includes('failBySuffix: countBySuffix_(')
+  && gs.includes('okBySuffix: countBySuffix_(got)'));
+ok('I8 ...on the gap-fill path too', gapFn.includes('out.failBySuffix = countBySuffix_'));
+ok('I9 ...and the app prints both sides, because one alone proves nothing',
+  gapSummary.includes('By exchange — failed:') && gapSummary.includes('fetched:'));
+
+
+// ── J. the BSE route ─────────────────────────────────────────────────────────
+//
+// Yahoo has dropped .BO entirely, so BSE-only scrips need another source. BSE publishes its own
+// and api.bseindia.com is already reachable from this script. What must NOT happen is a parser
+// written against a guessed response shape — the hand-typed fixture this repo keeps being bitten
+// by — so the probe reports what each candidate route actually returns, and nothing is parsed yet.
+ok('J1 the probe varies the HEADERS against the download host, not the URL again',
+  gs.includes("label: 'api-style (Origin + Referer) - what round two sent'")
+  && gs.includes("label: 'browser navigation (no Origin, page Referer)'")
+  && gs.includes("label: 'bare (no headers but a UA)'"));
+// THE ROUND-TWO OMISSION. A 403 body names what refused it, and capturing it only on a 200 threw
+// away the single piece of evidence the failure carried.
+ok('J2 ...and captures every response body, not only the successful ones',
+  gs.includes('body: r.text.slice(0, 220),') && !gs.includes('if (rb.code === 200 && rb.text) brow.head'));
+ok('J3 ...with a liveness control, so "reached BSE and was refused" is not read as "never ran"',
+  gs.includes("group: 'control', label: 'StockReachGraph intraday (known to work)'"));
+ok('J4 ...still reusing the header recipe the api host is known to accept',
+  gs.includes("'Origin': 'https://www.bseindia.com'") && gs.includes('headers: headers || BSE_HEADERS_'));
+// The probe must be able to end the investigation, not only continue it.
+ok('J5 ...and its verdict names the fallback when BSE has no route at all',
+  gs.includes('per-scrip backfill is on.')
+  && gs.includes('backfill goes day by day across the whole exchange.')
+  && gs.includes('record closes FORWARD from the quote feed.'));
+// "Does this URL work from Apps Script?" is a different question from "does it work in my
+// browser", and it is the whole story of 24-Sep: the owner's browser downloads BSE's bhavcopy
+// while this script gets Access Denied, because the block is on Google's IPs. Every candidate
+// source has to be asked from THERE, and each one used to cost a paste-save-run cycle.
+ok('J5a a URL can be tested from Apps Script without editing the probe',
+  gs.includes('var PROBE_URL_ =') && gs.includes('function runUrlProbe() {'));
+ok('J5b ...with two header profiles, because both failing means an IP rule and one working means a header rule',
+  gs.includes("label: 'plain (UA only)'") && gs.includes("label: 'browser-shaped'")
+  && gs.includes('it is an IP rule and no header will fix it.'));
+// Asserted UNCONDITIONAL: wrapping the same line in `if (row.code === 200)` left the text in
+// place and `includes` was satisfied by it, which is exactly the omission round two shipped.
+ok('J5c ...capturing the body whatever the status, since a 403 body is the only thing that says why',
+  (() => {
+    const at = gs.indexOf('function runUrlProbe() {');
+    const block = at < 0 ? '' : gs.slice(at, gs.indexOf('function runBseHistoryProbe'));
+    return block.includes('\n      row.body = body.slice(0, 300);')
+      && !/if\s*\([^)]*\)\s*row\.body/.test(block);
+  })());
+// The web app is deployed "Anyone". A fetch-any-URL route on it would be an open proxy.
+ok('J5d ...and it is EDITOR-ONLY, never a doGet route',
+  !gs.includes("e.parameter.probe === 'url'") && !gs.includes('probeUrl_(e.parameter'));
+
+// ── the bhavcopy backfill's resume ───────────────────────────────────────────
+//
+// Measured on the first real run: 350 targets, 13,161 closes over 38 sessions — about 346 a day,
+// because roughly four scrips simply do not trade. So "all targets filled" is a test that almost
+// never holds, and "any target filled" is useless too, since 350 of them are ALSO Yahoo-fed and
+// carry values whether or not the bhavcopy ever ran for that date. Neither can be read off the
+// tab, so the run records how far back it reached.
+ok('J5e the backfill resumes from a recorded high-water mark',
+  gs.includes("var BHAV_MARK_KEY_ = 'BHAV_BACKFILL_OLDEST';")
+  && gs.includes('var mark = props.getProperty(BHAV_MARK_KEY_);')
+  // The LOOP must start from it. Reading the mark and then walking from `to` anyway leaves every
+  // line of this feature present and refetches the same days forever.
+  && gs.includes('for (var d = new Date(startAt.getTime());'));
+// Written AFTER the single write, or a run that died mid-fetch would be skipped rather than
+// repeated — and the whole point of fill-only is that repeating is free. Asserted as "exactly
+// once, and after": a stray second assignment before the write satisfied an ordering regex.
+ok('J5f ...advanced only after the write lands',
+  (() => {
+    const setAt = gs.indexOf('props.setProperty(BHAV_MARK_KEY_, firstDone);');
+    const writeAt = gs.indexOf('writePriceHistory_(cols, byDate, false, null, true);');
+    const once = gs.split('props.setProperty(BHAV_MARK_KEY_').length - 1;
+    return setAt > 0 && writeAt > 0 && setAt > writeAt && once === 1;
+  })());
+ok('J5g ...and it is a HINT — fill-only means a wrong mark costs fetches, not correctness',
+  gs.includes('function resetBhavBackfillMark()')
+  && gs.includes('writePriceHistory_(cols, byDate, false, null, true)'));
+// The cap is measured, not guessed: 40 days took 104s, so ~2.6s a fetch.
+// A day cap alone is a guess about the network: 40 days took 104s on one run and 90 days had not
+// finished in EIGHT MINUTES on the next. The clock is what makes a run LAND — exceed the limit
+// and every fetch already paid for dies in memory with the process.
+ok('J5h fetching stops on a TIME budget, not only a day count',
+  gs.includes('var BHAV_FETCH_BUDGET_MS = 210 * 1000;')
+  && gs.includes("if (new Date().getTime() - t0 > BHAV_FETCH_BUDGET_MS) { stoppedOn = 'time'; remaining++; continue; }"));
+// The day cap is deliberately HIGH now: with a clock in place it is a backstop, not the limit,
+// so a fast run gets more days and a slow one stops safely without a hand-tuned number.
+ok('J5i ...with the day cap left high, as a backstop rather than the real bound',
+  gs.includes('var BHAV_DAYS_PER_RUN = 150;'));
+ok('J5j ...and the run says which limit stopped it',
+  gs.includes("stoppedOn = 'cap'") && gs.includes("stoppedOn = 'time'")
+  && gs.includes('stoppedOn: stoppedOn,'));
+
+// ── the daily top-up ─────────────────────────────────────────────────────────
+//
+// Without it the BSE-only scrips get two years of history and then nothing further — the same
+// gap at the recent end that started all of this.
+ok('J5k a daily top-up exists and is wired to a trigger',
+  gs.includes('function dailyBhavTopUp() {') && gs.includes('function installBhavTopUpTrigger() {')
+  && gs.includes('function removeBhavTopUpTrigger() {'));
+// ORDER IS THE DESIGN. Yahoo's pass is 19:30; this is 20:30. Fill-only then means Yahoo keeps
+// first claim on every cell it can fill, so nothing changes while Yahoo is healthy and the blanks
+// simply start coming from here if it is not. A fallback needing no precedence rules.
+ok('J5l ...AFTER the Yahoo pass, so Yahoo keeps first claim on every cell',
+  /atHour\(20\)\.nearMinute\(30\)[\s\S]{0,120}dailyBhavTopUp|dailyBhavTopUp[\s\S]{0,200}atHour\(20\)\.nearMinute\(30\)/.test(gs)
+  && gs.includes("atHour(19).nearMinute(30)"));
+// Three sessions, not one: a missed run, a holiday or a late bhavcopy must self-heal unnoticed,
+// the same reason the Yahoo pass re-fetches a month.
+ok('J5m ...covering several sessions so a missed run heals itself',
+  gs.includes('while (weekdays < 3 && back < 10)'));
+// The backfill's mark points at the OLDEST date reached walking backwards; the top-up walks the
+// newest few. Letting them share it would make each undo the other's progress.
+ok('J5n ...and it does not disturb the backfill’s resume mark',
+  gs.includes('PropertiesService.getScriptProperties().deleteProperty(BHAV_MARK_KEY_);')
+  && gs.includes('if (saved) PropertiesService.getScriptProperties().setProperty(BHAV_MARK_KEY_, saved);'));
+// The NSE file is a DIFFERENT shape — keyed on a SYMBOL string, not a numeric SC_CODE — so its
+// parser must be written against the real columns.
+ok('J5o the NSE header is probed, not assumed',
+  gs.includes("label: 'NSE bhavcopy (header only, for the parser)'")
+  && gs.includes("samcoBhavUrl_(new Date(2026, 2, 30), 'NSE')"));
+
+// ── a refusal is not a holiday ───────────────────────────────────────────────
+//
+// Observed an hour after the backfill's ~500 fetches: dates that had returned 460 KB of
+// `application/csv` started answering 200 with `text/html` and ZERO bytes. That is throttling.
+// Counted as a market holiday it is invisible — and in a DAILY job invisible means it stops
+// working and nobody finds out until a report comes back blank.
+ok('J5p a throttled response is told apart from a missing session',
+  gs.includes("if (/html/i.test(ctype) || (body.length === 0 && ctype.indexOf('csv') < 0)) {")
+  && gs.includes('refused++;'));
+ok('J5q ...counted separately from holidays in the result',
+  gs.includes('holidaysOrMissing: holidays, refused: refused,'));
+// A number in a field nobody reads is not a diagnostic.
+ok('J5r ...and the note SAYS it when the source is mostly refusing',
+  gs.includes('THE SOURCE IS REFUSING US: '));
+// The mark would otherwise step past days that were never really read, and fill-only would then
+// never revisit them — the one way this design could lose data rather than just time.
+ok('J5s ...and the resume mark does not advance over a refused run',
+  gs.includes('if (firstDone && !(refused > 0 && refused >= fetched / 2)) props.setProperty(BHAV_MARK_KEY_, firstDone);'));
+
+ok('J6 the route is wired and the unknown-probe guard knows about it',
+  gs.includes("e.parameter.probe === 'bse'")
+  && gs.includes("['hist', 'bse', 'tv', 'nse'].indexOf(String(e.parameter.probe)) < 0"));
+ok('J7 ...and the deploy marker moved with the file',
+  gs.includes("RESOLVER_VERSION_ = '2026-09-24 bse history probe'"));
+// A trailing underscore makes a function PRIVATE in Apps Script, so it never appears in the
+// editor's Run dropdown and is reachable only through a DEPLOYMENT — the one step that had not
+// happened on three consecutive attempts, each of which then answered about the old code.
+// Named for the SOURCE and the SUBJECT. `testBseProbe` already exists and probes BSE CORPORATE
+// ACTIONS; a `runBseProbe` sitting beside it in the Run dropdown was picked by mistake, and its
+// well-formed corp-action report looked enough like an answer to be pasted back as one.
+ok('J8 both probes have an editor-runnable wrapper with no underscore',
+  gs.includes('function runBseHistoryProbe() {') && gs.includes('function runYahooHistoryProbe() {'));
+ok('J8b ...and neither collides with the corp-action probe already in that dropdown',
+  gs.includes('function testBseProbe() {') && !gs.includes('function runBseProbe() {'));
+// BOTH of them, counted WITHIN the wrapper block: `includes` was satisfied by the other
+// wrapper's copy when one was deleted, and a file-wide count is satisfied by two unrelated
+// functions that log the same way. Neither version could see half the feature going missing.
+ok('J9 ...which BOTH log their result, since the editor shows no return value',
+  (() => {
+    const at = gs.indexOf('function runBseHistoryProbe() {');
+    const block = at < 0 ? '' : gs.slice(at, gs.indexOf('function historyFailReason_'));
+    return (block.split('Logger.log(JSON.stringify(r, null, 2));').length - 1) === 2;
+  })());
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
