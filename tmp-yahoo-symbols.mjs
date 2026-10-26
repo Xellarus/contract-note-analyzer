@@ -504,6 +504,126 @@ console.log('\n── the ?sym= probe ' + '─'.repeat(39));
       { 'INE000A01000': 'K' }, {}).closes).length, 0);
 }
 
+// ── the REAL NSE file, 24-Sep-2026 ──────────────────────────────────────────────────────────
+//
+// Rows copied verbatim out of the bhavcopy the owner downloaded, never hand-typed — the same rule
+// the broker parsers follow, and the reason the block-deal trap below was found at all rather
+// than shipped.
+{
+  const { parseBhavcopyNse_, bhavTargets_, normName_ } = load([]);
+
+  const HDR = 'SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN';
+
+  // The six holdings that Yahoo answered 404 for. Every one is on the SME board (SM) or ST, which
+  // is exactly why `.NS` failed for them while 312 mainboard scrips fetched in the same run — and
+  // exactly why NSE had to be wired in rather than the master rows "fixed".
+  const SME = [
+    'OBSCP,SM,955,972,920,931.25,945,952.6,42000,39942540.00,24-Sep-2026,102,INE0YHV01011',
+    'SSEGL,SM,384,404,384,400.2,402.75,386.05,112000,44602330.00,24-Sep-2026,228,INE0RFP01011',
+    'PARTH,SM,515,532.95,515,520,520,524,4800,2501960.00,24-Sep-2026,10,INE1H7V01011',
+    'HAPPY,SM,76,79,74,78.85,79,75.4,60000,4635800.00,24-Sep-2026,29,INE1GFG01011',
+    'ANAWIL,SM,438,445.3,420.2,428.9,428.65,440.3,95200,41257860.00,24-Sep-2026,222,INE1J5V01013',
+    'CURIS,ST,222.95,222.95,213,213,213,222.95,12000,2610750.00,24-Sep-2026,11,INE1BZN01016',
+  ];
+  const SME_ISINS = {
+    'INE0YHV01011': 'k-obsc', 'INE0RFP01011': 'k-sath', 'INE1H7V01011': 'k-parth',
+    'INE1GFG01011': 'k-happy', 'INE1J5V01013': 'k-anawil', 'INE1BZN01016': 'k-curis',
+  };
+  const smeR = parseBhavcopyNse_([HDR].concat(SME).join('\n'), SME_ISINS, {});
+  eq('nse/real: all six SME holdings price on the ISIN path', Object.keys(smeR.closes).length, 6);
+  eq('nse/real: OBSC Perfection', smeR.closes['k-obsc'], 931.25);
+  eq('nse/real: Sathlokhar Synergys', smeR.closes['k-sath'], 400.2);
+  eq('nse/real: Curis Lifesciences (series ST, not SM)', smeR.closes['k-curis'], 213);
+
+  // ...and on the SYMBOL path too, for a master row carrying no ISIN of its own. SM/ST must both
+  // survive the series guard there, or the fallback silently covers none of these.
+  const smeSym = parseBhavcopyNse_([HDR].concat(SME).join('\n'), {},
+    { OBSCP: 'k-obsc', CURIS: 'k-curis', ANAWIL: 'k-anawil' });
+  eq('nse/real: the SYMBOL fallback reaches the SME board', smeSym.closes['k-obsc'], 931.25);
+  eq('nse/real: ...and the ST series', smeSym.closes['k-curis'], 213);
+  eq('nse/real: ...and Anawil, the truncated-name scrip', smeSym.closes['k-anawil'], 428.9);
+
+  // THE BLOCK-DEAL TRAP, and it is a MONEY bug. `BL` is the block-deal window, not a security: it
+  // carries the EQUITY'S OWN ISIN and a different price, and in the real file it comes FIRST. Plain
+  // first-writer-wins stored 3052 against Sanofi (true close 3132.70) and 3010 against Sedemac
+  // (true close 3313.60) - 9% low, on the only copy of this history.
+  const BLOCK = [
+    'SANOFI,BL,3052,3052,3052,3052,3052,10072.65,3500000,10682000000.00,24-Sep-2026,1,INE058A01010',
+    'SANOFI,EQ,3075,3220.9,3075,3132.7,3138,3052.4,112839,356025529.00,24-Sep-2026,16500,INE058A01010',
+    'SEDEMAC,BL,3010,3010,3010,3010,3010,1352,4879838,14688312380.00,24-Sep-2026,18,INE00XB01019',
+    'SEDEMAC,EQ,2998,3350,2998,3313.6,3328,3035.2,1058936,3408762220.30,24-Sep-2026,96711,INE00XB01019',
+  ];
+  const blk = parseBhavcopyNse_([HDR].concat(BLOCK).join('\n'),
+    { 'INE058A01010': 'k-sanofi', 'INE00XB01019': 'k-sedemac' }, {});
+  eq('nse/real: a block deal does NOT answer for the equity (Sanofi)', blk.closes['k-sanofi'], 3132.7);
+  eq('nse/real: ...nor for Sedemac, 9% away', blk.closes['k-sedemac'], 3313.6);
+  eq('nse/real: ...and each scrip is still counted once', Object.keys(blk.closes).length, 2);
+
+  // The precedence rule must NOT have become a series filter on the ISIN path: a sovereign gold
+  // bond has its own ISIN and its `GB` row is the only close it will ever have.
+  const GB = 'SGBJUN28,GB,15298,15298,14900,14925.83,14900,15059,210,3147752.45,24-Sep-2026,58,IN0020200104';
+  eq('nse/real: a gold bond is still priced off its own ISIN',
+    parseBhavcopyNse_([HDR, GB].join('\n'), { 'IN0020200104': 'k-sgb' }, {}).closes['k-sgb'], 14925.83);
+  // ...but it must never answer through the SYMBOL path, where one ticker spans several series.
+  eq('nse/real: ...and never through the symbol path',
+    Object.keys(parseBhavcopyNse_([HDR, GB].join('\n'), {}, { SGBJUN28: 'k-sgb' }).closes).length, 0);
+
+  // A non-equity row that arrives AFTER the equity one must still not displace it.
+  const AFTER = [
+    'SANOFI,EQ,3075,3220.9,3075,3132.7,3138,3052.4,112839,356025529.00,24-Sep-2026,16500,INE058A01010',
+    'SANOFI,BL,3052,3052,3052,3052,3052,10072.65,3500000,10682000000.00,24-Sep-2026,1,INE058A01010',
+  ];
+  eq('nse/real: a block deal after the equity row changes nothing either',
+    parseBhavcopyNse_([HDR].concat(AFTER).join('\n'), { 'INE058A01010': 'k-sanofi' }, {}).closes['k-sanofi'], 3132.7);
+
+  // `bhavTargets_` has to OFFER the NSE side at all. It used to `continue` on a row with no BSE
+  // code, which dropped every NSE-only scrip before anything else could run.
+  const row = { isin: 'INE0YHV01011', bse: '', nse: 'OBSCP' };
+  const master = { byIsin: { 'INE0YHV01011': row }, byName: { [normName_('OBSC Perfection Ltd')]: row } };
+  const tg2 = bhavTargets_(master, [{ isin: '', name: 'OBSC Perfection Ltd' }]);
+  eq('nse/real: an NSE-only holding is an NSE target', tg2.nseCount, 1);
+  eq('nse/real: ...keyed by ISIN, which is the grid key', tg2.byIsin['INE0YHV01011'], 'INE0YHV01011');
+  eq('nse/real: ...and by symbol as the fallback', tg2.bySymbol['OBSCP'], 'INE0YHV01011');
+  eq('nse/real: ...and is NOT a BSE target', tg2.count, 0);
+
+  // A `|`-joined NSE cell is the shape the master really uses for a scrip with two spellings.
+  const row2 = { isin: '', bse: '', nse: 'OBSCP | OBSCPERF' };
+  const tg3 = bhavTargets_({ byIsin: {}, byName: { [normName_('X Ltd')]: row2 } }, [{ isin: '', name: 'X Ltd' }]);
+  eq('nse/real: a pipe-joined NSE cell yields the FIRST symbol', tg3.bySymbol['OBSCP'], normName_('X Ltd'));
+}
+
+// ── the NSE parser is actually WIRED, not merely written ────────────────────────────────────
+//
+// It sat written, tested and called by nothing for a day. A parser no caller reaches is a suite
+// that stays green while the feature does not exist.
+{
+  // Comments are stripped FIRST and the slices are bounded to one function each. Both matter: the
+  // merge rule is documented in a comment that quotes the very code it forbids, and a scan running
+  // to end-of-file would let any later function satisfy an assertion about this one.
+  const body = SRC.replace(/(^|[^*])\/\*[\s\S]*?\*\//g, '$1').replace(/^\s*\/\/.*$/gm, '');
+  const between = (a, b) => body.slice(body.indexOf(a), body.indexOf(b));
+  const bf = between('function backfillFromBhavcopy', 'function dailyBhavTopUp');
+  ok('wired: the backfill calls the NSE parser', /parseBhavcopyNse_\(/.test(bf));
+  ok('wired: ...and still calls the BSE one', /parseBhavcopy_\(body/.test(bf));
+  ok('wired: it asks samco for the NSE segment', /seg:\s*'NSE'/.test(bf));
+
+  // MERGE, never assign. Both segments write into one `byDate`, so `byDate[ymd] = pr.closes`
+  // would drop every close the other segment had already put there - silently, and only for the
+  // dates both covered.
+  ok('wired: the per-date map is merged, not overwritten', !/byDate\[ymd\]\s*=\s*pr\.closes/.test(bf));
+
+  // Each segment keeps its OWN cursor. Sharing one would make each undo the other's progress.
+  ok('wired: the resume mark is per segment', /bhavMarkKey_\(SEG\.seg\)/.test(bf));
+
+  // The top-up must clear EVERY segment's mark, not just BSE's - leaving NSE's would make it
+  // resume from the bottom of the NSE backfill and cover dates two years old instead of
+  // yesterday's. Asserted on the LOOP BOUND: `BHAV_SEGMENTS_` alone is satisfied by the unrelated
+  // `5 * BHAV_SEGMENTS_.length` two lines below, which is how this probe first came back silent.
+  const tu = between('function dailyBhavTopUp', 'function installBhavTopUpTrigger');
+  ok('wired: ...and the daily top-up clears every one of them',
+    /mi < BHAV_SEGMENTS_\.length/.test(tu) && /deleteProperty\(mkk\)/.test(tu));
+}
+
 
 console.log('\n' + '='.repeat(58));
 for (const f of fails) console.log('  FAIL ' + f);

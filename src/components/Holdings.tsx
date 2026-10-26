@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 're
 import { createPortal } from 'react-dom';
 import {
   Plus, Search, Edit2, Trash2, ArrowUpDown, RefreshCw, CheckCircle,
-  HelpCircle, AlertCircle, FileSpreadsheet, PlusCircle, Bookmark, DollarSign,
+  HelpCircle, AlertCircle, FileSpreadsheet, Sigma, PlusCircle, Bookmark, DollarSign,
   Briefcase, ShieldCheck, AlertTriangle, TrendingUp, Wallet, Sparkles, Key, Globe,
   ArrowLeft, ChevronLeft, Download, ExternalLink, X, Loader2, Save, Upload, StickyNote,
   ArrowUp, ArrowDown, Lock, FolderOpen, ArrowRightLeft, ChevronDown, MoreHorizontal,
@@ -13,7 +13,8 @@ import { gapi } from "gapi-script";
 import { persistGoogleToken, hasValidGoogleToken } from '../lib/googleAuth';
 import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedScrip } from '../lib/holdingsCalc';
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
-import { loadScripMaster, lookupScrip, normName, normNamePrivate, listedFromTs, isPeScrip, assetClassOf, peEntry, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
+import { generateFormulaView, FormulaViewResult } from '../lib/trxFormulaView';
+import { loadScripMaster, lookupScrip, normName, normNamePrivate, listedFromTs, isPeScrip, assetClassOf, peEntry, classOfEntryAsOf, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
 import { PRIVATE_EQUITIES_TAB, ASSET_CLASSES, ASSET_CLASS_IDS, AssetClassId } from '../lib/privateEquities';
 import { setPrivateEquityCmp } from '../lib/privateEquityWrite';
 import { loadScripPrices, invalidatePriceCache, ScripPrice, PriceSource } from '../lib/scripPrices';
@@ -839,6 +840,11 @@ export default function Holdings({
   // FY transaction-register generator (scrip-wise Excel Trx tab)
   const [isGeneratingTrx, setIsGeneratingTrx] = useState(false);
   const [trxStatus, setTrxStatus] = useState<{ pid?: string; result?: TrxRegisterResult; error?: string } | null>(null);
+  // The FORMULA VIEW is kept in its OWN state, never folded into `trxStatus`. The two buttons
+  // report different things — one wrote the filed tabs, one deliberately wrote none of them —
+  // and sharing a slot would let a derived-view run leave a message that reads as a register.
+  const [fvStatus, setFvStatus] = useState<{ pid?: string; result?: FormulaViewResult; error?: string } | null>(null);
+  const [isGeneratingFv, setIsGeneratingFv] = useState(false);
   const [selectedFy, setSelectedFy] = useState<number>(() => {
     const now = new Date();
     const cur = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;   // Indian FY starts 1-Apr
@@ -1184,6 +1190,39 @@ export default function Holdings({
       console.error("Trx register error:", err);
     } finally {
       setIsGeneratingTrx(false);
+      setActionPid(null);
+    }
+  };
+
+  /**
+   * Write the DERIVED VIEW of this FY's capital-gains tabs — `<tab> (Formula)`.
+   *
+   * A separate pass, not a flag on the register: the whole contract of this button is that the
+   * filed tabs are never opened. `generateFormulaView` runs the register in COLLECT mode, which
+   * computes every figure and still passes the charge-conservation guard, then returns before
+   * the first write. A register this app would REFUSE to write cannot be rendered here either.
+   *
+   * No scrip-review popup, deliberately: this run writes nothing a reviewer could correct, and
+   * raising the same dialog twice trains the owner to dismiss it.
+   */
+  const generateFormulaTabs = async (pid: string) => {
+    if (!hasValidGoogleToken()) {
+      toast.error("Google Sheets connection required. Please authorize with Google first.");
+      return;
+    }
+    setActionPid(pid);
+    setIsGeneratingFv(true);
+    setFvStatus(null);
+    try {
+      const spreadsheetId = sheetIdForId(pid);
+      const result = await generateFormulaView(spreadsheetId, selectedFy, portfolioById(pid)?.label);
+      setFvStatus({ pid, result });
+    } catch (err: any) {
+      const msg = err?.result?.error?.message || err?.message || "Unknown error";
+      setFvStatus({ pid, error: msg });
+      console.error("Formula view error:", err);
+    } finally {
+      setIsGeneratingFv(false);
       setActionPid(null);
     }
   };
@@ -3045,11 +3084,29 @@ export default function Holdings({
      *
      * This is the rule the Screener link below has always followed. The pills just weren't
      * held to it, so they asserted an identifier the app itself refused to build a URL from.
+     *
+     * BUT "unlisted" HERE IS A DATED QUESTION, AND IT WAS ASKED UNDATED UNTIL 06-Oct-2026.
+     * These three gated on `peInfo`, which is `peEntry` - a RAW `e.assetClass` read. The whole
+     * design of `Listed From` is that the Private Equities row STAYS FOREVER, so `assetClass`
+     * stays truthy forever and the gate never re-opened. Reported against
+     * `NATIONAL STOCK EXCHANGE OF INDIA Limited`: BSE `544937` sat correctly on the master row,
+     * the app read it, and then threw it away on the way to the screen - while the class badge
+     * two elements away correctly said EQ, because THAT path asks `classOfEntryAsOf`. One
+     * company, two answers, and the undated one won the part the owner was looking at.
+     *
+     * `peEntry` is deliberately NOT dated to fix this. "Does this company have a hand-maintained
+     * row carrying a valuation and a Drive folder?" is a true, undated fact, and it is the right
+     * question for the price fallback (which is checked LAST, so a real quote always wins) and
+     * for `driveHref` - a listed company's document folder is still its document folder. Dating
+     * `peEntry` would drop the Drive link, and would relabel a hand-entered valuation as `CMP`
+     * the moment the feed had nothing - which for a BSE-only scrip is always, since Yahoo no
+     * longer serves `.BO`. Only the EXCHANGE IDENTITY is a dated question, so only it moves.
      */
-    const nseSymbol = peInfo ? '' : (scripEntry?.nse || '');
-    const bseCode = peInfo ? '' : (scripEntry?.bse || '');
-    // Either correct or absent, never a 404-y guess - and never for an unlisted company.
-    const screenerHref = peInfo ? '' : screenerUrl(scripEntry?.nse, scripEntry?.bse);
+    const unlistedNow = classOfEntryAsOf(scripEntry, Date.now()) !== undefined;
+    const nseSymbol = unlistedNow ? '' : (scripEntry?.nse || '');
+    const bseCode = unlistedNow ? '' : (scripEntry?.bse || '');
+    // Either correct or absent, never a 404-y guess - and never for a company unlisted TODAY.
+    const screenerHref = unlistedNow ? '' : screenerUrl(scripEntry?.nse, scripEntry?.bse);
     const driveHref = peInfo?.driveLink || '';
     // NULL when this security's class has no decided holding-period rule (a mutual fund or a
     // bond).
@@ -3068,6 +3125,22 @@ export default function Holdings({
     const detailLastPx = isLocal ? undefined : (selectedStock as SheetHolding).lastTradePrice;
     const detailLastDt = isLocal ? undefined : (selectedStock as SheetHolding).lastTradeDate;
     const realDetailCmp = getRealCmp(isin, name, detailLastPx);
+    /**
+     * Did the figure beside the label come from the PRICE FEED, or from a fallback?
+     *
+     * The label must describe where the NUMBER came from, not what the COMPANY is - which is the
+     * panel's own stated rule ("the label says WHICH rather than implying a market"), and it had
+     * drifted off it. `peInfo` alone is the company, and a company that has listed keeps its
+     * Private Equities row forever, so a listed holding with a real fetched quote would have had
+     * that quote labelled `VALUATION`. Not reachable while the owner's only listed-from company
+     * is BSE-only (Yahoo no longer serves `.BO`, so there is no quote to mislabel), but it opens
+     * the moment an NSE-listed one keeps its row - which is exactly what `Listed From` asks for.
+     *
+     * `priceSourceMap` is indexed exactly like `priceMap`, so "the feed has a price for this
+     * holding" and "getRealCmp returned it" are the same question. Fallbacks are checked LAST in
+     * both resolvers, so a defined source means the feed won.
+     */
+    const cmpFromFeed = getCmpSource(isin, name) !== undefined;
     if (realDetailCmp !== undefined) defaultCmp = realDetailCmp;
     else if (priceRows.length > 0) defaultCmp = avgBuyPrice;
     const cmpPrice = customCmp !== null ? customCmp : defaultCmp;
@@ -3545,7 +3618,7 @@ export default function Holdings({
             <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl mt-1">
               <span
                 className="text-[10px] uppercase font-black text-slate-400"
-                title={peInfo
+                title={peInfo && !cmpFromFeed
                   ? (peInfo.peValuation
                       ? `Valuation from the ${PRIVATE_EQUITIES_TAB} tab${peInfo.peValuationDate ? `, as on ${formatDMY(peInfo.peValuationDate)}` : ''}`
                       : (detailLastPx ?? 0) > 0
@@ -3553,7 +3626,7 @@ export default function Holdings({
                         : 'No valuation entered and never traded — carried at cost')
                   : undefined}
               >
-                {peInfo
+                {peInfo && !cmpFromFeed
                   ? (peInfo.peValuation ? 'VALUATION' : (detailLastPx ?? 0) > 0 ? 'LAST TRADE' : 'AT COST')
                   : 'CMP'}
               </span>
@@ -4617,7 +4690,7 @@ export default function Holdings({
               const cg = capGainsSyncStatus?.pid === id ? capGainsSyncStatus : null;
               const rb = holdingRebuildStatus?.pid === id ? holdingRebuildStatus : null;
               const trx = trxStatus?.pid === id ? trxStatus : null;
-              const anyBusy = isLoadingSheet || isSyncingCapGains || isRebuildingHolding || isGeneratingTrx || !!downloadingFor;
+              const anyBusy = isLoadingSheet || isSyncingCapGains || isRebuildingHolding || isGeneratingTrx || isGeneratingFv || !!downloadingFor;
               const stop = (e: React.MouseEvent) => e.stopPropagation();
               return (
                 <div
@@ -4718,6 +4791,17 @@ export default function Holdings({
                     >
                       <FileSpreadsheet className={`w-3.5 h-3.5 ${isGeneratingTrx && actionPid === id ? 'animate-pulse' : ''}`} />
                     </button>
+                    {/* The DERIVED VIEW. Indigo, not violet: the theme repaints both to brass, but
+                        side by side on the same row they must not read as two halves of one
+                        action — this one writes no filed tab. */}
+                    <button
+                      onClick={() => generateFormulaTabs(id)} disabled={anyBusy}
+                      aria-label="Generate the formula view"
+                      title="Write a derived view beside each Capital Gains tab — '<tab> (Formula)' — showing the arithmetic as clickable formulas. The filed tabs are never touched."
+                      className="p-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-md transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Sigma className={`w-3.5 h-3.5 ${isGeneratingFv && actionPid === id ? 'animate-pulse' : ''}`} />
+                    </button>
                     <button
                       onClick={() => downloadHoldingCsv(id)} disabled={anyBusy}
                       aria-label="Download Holding tab as CSV" title="Download the current Holding tab as CSV"
@@ -4786,6 +4870,12 @@ export default function Holdings({
                         // been written — the same failure this tooltip already avoids for the
                         // per-class capital-gains tabs.
                         ...[trx.result.tabName, trx.result.intradayTabName],
+                        // The two single-period listed tabs. Named for the same reason the
+                        // three holding tabs are: a tooltip listing only the combined one
+                        // reads as though the split had not been written.
+                        ...(trx.result.periodTabs
+                          ? [trx.result.periodTabs.short, trx.result.periodTabs.long]
+                          : []),
                         ...(trx.result.holdingTabs
                           ? [trx.result.holdingTabs.equity, trx.result.holdingTabs.pe, trx.result.holdingTabs.combined]
                           : [trx.result.holdingTabName]),
@@ -4847,6 +4937,69 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                       </span>
                     ) : (
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={trx.error}>✗ Capital Gains failed</span>
+                    ))}
+                    {fvStatus && fvStatus.pid === id && (fvStatus.result ? (
+                      /* Names the TABS, not just a count. "3 tabs" beside a Capital Gains badge
+                         reads as part of the register; the suffix is what says it is not. And
+                         `formulaCells` is reported because 0 is a real answer — an FY with no
+                         sales has nothing to derive, which is not a failed run. */
+                      <span
+                        className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-1 rounded-lg"
+                        title={`Derived view written to: ${fvStatus.result.tabs.join(', ')}. The filed Capital Gains tabs were not touched.${
+                          fvStatus.result.acqSummed > 0
+                            ? ` ${fvStatus.result.acqSummed} ACQUISITION COST cell(s) span more than one lot and read as a SUM — one qty x rate term per lot FIFO consumed, e.g. =ROUND(3600*E69+4400*E70,2). The quantities are written out because the FIFO split is stated on no row; the rates are cell references.`
+                            : ''
+                        }${
+                          fvStatus.result.expenseRowsTotalled > 0
+                            ? ` ${fvStatus.result.expenseRowsTotalled} row(s) gained an EXPENSES total and an EXPENSES EX-STT companion — pure =SUM() of the charge cells already printed on the row, nothing computes or second-guesses a charge. Both are printed because under s.48 STT is NOT a deductible expense, so the total the tab foots to is not the total a tax reader needs. NOTHING subtracts either from a P/L. The expense footer's Total now sums the breakdown above it, and the cell beside it states on the sheet whether the two routes to total expenses agree.`
+                            : ''
+                        }${
+                          fvStatus.result.chargeAttempted > 0
+                            ? ` ${fvStatus.result.chargeDerived} of ${fvStatus.result.chargeAttempted} charge cells became =ROUND(rate x turnover, dp) because a known statutory rate reproduced the broker's OWN parsed figure exactly — ${Object.keys(fvStatus.result.chargeDerivedBy).map(k => `${fvStatus.result.chargeDerivedBy[k]} ${k}`).join(', ') || 'none'}. Nothing is computed: a rate that does not reproduce the figure is discarded and the parsed value stands. A LOW SHARE IS EXPECTED — STT is rounded to the nearest rupee by Rule 4 of the STT Rules and is allocated per trade off a rounded day-aggregate, so on any scrip with several fills in a day it cannot foot to a per-row rate. Brokerage and demat are never attempted: a plan has no statutory identity.`
+                            : ''
+                        }${
+                          fvStatus.result.acqAsValue > 0
+                            ? ` ${fvStatus.result.acqAsValue} ACQUISITION COST cell(s) kept the engine's exact value, broken down as: `
+                              + [
+                                  fvStatus.result.acqSpanned > 0 && `${fvStatus.result.acqSpanned} drawing on lots whose rate is on no cell of this page — a post-split lot carrying a rescaled cost, or an opening line averaging two same-day fills at different prices`,
+                                  fvStatus.result.acqRounding > 0 && `${fvStatus.result.acqRounding} where the closest rate was within a paise (arithmetic, not structure)`,
+                                  fvStatus.result.acqNoRate > 0 && `${fvStatus.result.acqNoRate} where the block offered no usable rate cell at all`,
+                                ].filter(Boolean).join('; ')
+                              + '. The figure is right in every case; only its working is not shown.'
+                            : ''
+                        }`}
+                      >
+                        ✓ Formula view · {fvStatus.result.tabs.length} tab{fvStatus.result.tabs.length === 1 ? '' : 's'}
+                        {' · '}{fvStatus.result.formulaCells} formula{fvStatus.result.formulaCells === 1 ? '' : 's'}
+                        {fvStatus.result.salesDerived === 0 && ' · no sales this FY'}
+                        {/* Sums are called out SEPARATELY from single-rate derivations. They are
+                            the rows that used to keep a bare value, so a reader who remembers
+                            that count needs to see where it went — and the formula in those
+                            cells looks different enough (literal quantities) to want naming. */}
+                        {fvStatus.result.acqSummed > 0 && ` · ${fvStatus.result.acqSummed} multi-lot sum${fvStatus.result.acqSummed === 1 ? '' : 's'}`}
+                        {/* Pure aggregation, so there is no "as values" half to report — unlike
+                            the acquisition counts, a row either carries charges or it does not. */}
+                        {fvStatus.result.expenseRowsTotalled > 0 && ` · ${fvStatus.result.expenseRowsTotalled} expense row${fvStatus.result.expenseRowsTotalled === 1 ? '' : 's'}`}
+                        {/* Reported as a SHARE of what was attempted, never as a bare count. A
+                            low share is the EXPECTED answer — STT is rounded to the rupee by law
+                            and allocated per trade off a day aggregate, so most STT cells can
+                            never reproduce a per-row rate. "41 derived" alone reads as a failure. */}
+                        {fvStatus.result.chargeAttempted > 0 &&
+                          ` · ${fvStatus.result.chargeDerived}/${fvStatus.result.chargeAttempted} charges derived`}
+                        {/* The BREAKDOWN, not just the count. Three reasons sit behind that one
+                            number and they have completely different answers — "spanned" cannot
+                            be fixed by any formula, "rounding" is arithmetic, "no rate" is a
+                            block with nothing to point at. Reporting the total alone is what
+                            turned this into two rounds of guesswork. */}
+                        {fvStatus.result.acqAsValue > 0 &&
+                          ` · ${fvStatus.result.acqAsValue} as values (${[
+                            fvStatus.result.acqSpanned > 0 && `${fvStatus.result.acqSpanned} multi-lot`,
+                            fvStatus.result.acqRounding > 0 && `${fvStatus.result.acqRounding} rounding`,
+                            fvStatus.result.acqNoRate > 0 && `${fvStatus.result.acqNoRate} no rate`,
+                          ].filter(Boolean).join(', ')})`}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={fvStatus.error}>✗ Formula view failed</span>
                     ))}
                     {scripReview && scripReview.pid === id && scripReview.unresolved.length > 0 && (
                       <button

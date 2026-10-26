@@ -389,5 +389,53 @@ ok('the mount read stamps the same clock',
     /res\.deferredTransfers\.filter\(d =>/.test(REP));
 }
 
+// ── 7 · a company that has LISTED still has an exchange identity ────────────────────────────
+//
+// Reported 06-Oct-2026 against `NATIONAL STOCK EXCHANGE OF INDIA Limited`: BSE `544937` sat
+// correctly on the scrip-master row, the app read it, and the detail page showed only the ISIN.
+// The class badge two elements away said EQ the whole time — because THAT path asks the dated
+// question and these three did not.
+{
+  const MASTER = strip('src/lib/scripMaster.ts');
+  // Anchored on CODE, never on a comment: `strip` removes comment lines, so a comment anchor
+  // yields indexOf -1 and `slice(-1)` quietly hands back the last character of the file — on
+  // which every positive assertion fails and every NEGATIVE one passes. Which is how this very
+  // block first ran: three loud failures hiding one silent false pass.
+  const detail = HOLD.slice(HOLD.indexOf('const displayIsin = isin ||'));
+
+  // THE DEFECT. `peInfo` is `peEntry`, a RAW `e.assetClass` read, and the whole design of
+  // `Listed From` is that the Private Equities row STAYS FOREVER — so that gate never re-opened.
+  ok('7 the exchange pills ask the DATED question, not "does it have a class at all"',
+    /const unlistedNow = classOfEntryAsOf\(scripEntry, Date\.now\(\)\) !== undefined;/.test(detail)
+    && /const nseSymbol = unlistedNow \?/.test(detail)
+    && /const bseCode = unlistedNow \?/.test(detail));
+  // The Screener link has always followed the same rule and must keep following it — a listed
+  // company with no link is the same wrong answer as a listed company with no ticker.
+  ok('7 ...and so does the Screener link', /const screenerHref = unlistedNow \?/.test(detail));
+  // Probed by reverting any one of them to `peInfo`, which is the exact shipped bug.
+  ok('7 ...none of the three still gates on peInfo',
+    !/const (nseSymbol|bseCode|screenerHref) = peInfo \?/.test(detail));
+
+  // `peEntry` is deliberately NOT dated, and that is load-bearing in the other direction.
+  // "Does this company have a hand-maintained row carrying a valuation and a Drive folder?" is a
+  // true UNDATED fact. Dating it would drop `driveHref` for every company that has since listed
+  // (its document folder is still its document folder), and would relabel a hand-entered
+  // valuation as `CMP` whenever the feed has nothing — a company that listed since the last pass,
+  // a refused TradingView scan, a scrip the resolver misses.
+  ok('7 peEntry stays undated, so the Drive link and the valuation fallback survive a listing',
+    /return e && e\.assetClass \? e : null;/.test(MASTER)
+    && /const driveHref = peInfo\?\.driveLink \|\| '';/.test(detail));
+
+  // THE LABEL DESCRIBES THE NUMBER, NOT THE COMPANY — the panel's own stated rule, which it had
+  // drifted off. With `peEntry` undated, a listed holding carrying a REAL fetched quote would
+  // have had that quote labelled `VALUATION`, and that is reachable on the very NEXT price pass:
+  // the daily run hands Yahoo's failures to `fetchTradingViewBatch_`, and `tvTicker_` turns
+  // `544937.BO` into `BSE:544937`. A BSE-only scrip is not unpriceable — Yahoo is the first of
+  // two feeds, which is the reasoning error this assertion exists to stop repeating.
+  ok('7 the price label follows the FEED, so a real quote is never called a valuation',
+    /const cmpFromFeed = getCmpSource\(isin, name\) !== undefined;/.test(detail)
+    && (detail.match(/peInfo && !cmpFromFeed/g) || []).length === 2);
+}
+
 console.log(`\n${'='.repeat(60)}\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

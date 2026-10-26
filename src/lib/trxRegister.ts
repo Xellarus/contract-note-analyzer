@@ -100,9 +100,18 @@ const daysBetween = (a: number, b: number) => Math.floor((b - a) / 86400000);
  * P/L reference has been re-pointed.
  */
 type PlKey = "intra" | "st" | "lt";
-type VariantId = "DELIVERY" | "INTRADAY";
+/**
+ * `SHORT` and `LONG` are the SINGLE-PERIOD listed tabs — the same delivery book as `DELIVERY`,
+ * split by holding period. Giving them their own variant is what makes the split safe: the
+ * layout is derived from `PL_OF`, so each gets ONE P/L column, and `plCol` then THROWS if a
+ * long-term sale ever reaches the short-term tab instead of writing it into a column that does
+ * not exist and losing the figure. Intraday cannot reach them for the same reason.
+ */
+type VariantId = "DELIVERY" | "INTRADAY" | "SHORT" | "LONG";
 const PL_LABEL: Record<PlKey, string> = { intra: "Intra-Day", st: "Short term", lt: "Long term" };
-const PL_OF: Record<VariantId, PlKey[]> = { DELIVERY: ["st", "lt"], INTRADAY: ["intra"] };
+const PL_OF: Record<VariantId, PlKey[]> = {
+  DELIVERY: ["st", "lt"], INTRADAY: ["intra"], SHORT: ["st"], LONG: ["lt"],
+};
 const BUCKET_PL: Record<"INTRA" | "ST" | "LT", PlKey> = { INTRA: "intra", ST: "st", LT: "lt" };
 
 const LEFT_KEYS = ["sno", "name", "oDate", "oQty", "oRate", "oAmt", "pDate", "pQty", "pRate", "pAmt", "sDate", "sQty", "sRate", "sAmt"] as const;
@@ -217,6 +226,19 @@ interface Trade {
 // A dated cost lot. purPrice = turnover/qty; inclPrice = Incl-STT/qty. Both bases
 // are kept so we can always recover the charge-free TURNOVER (see turnoverPrice).
 interface Lot { buyTs: number; qty: number; remaining: number; purPrice: number; inclPrice: number; charges: Charges; }
+/**
+ * ONE lot's contribution to ONE sale — the shares it gave up and the rate they cost.
+ *
+ * Only the FIFO consumption loop knows this. It appears NOWHERE on the printed page and cannot
+ * be recovered from it: a printed sale row is a tax BUCKET per date, `catOrder` prints ST above
+ * LT while FIFO consumes the older LT lots FIRST, the opening lines are already per-date
+ * weighted averages, and a SPLIT row restates rather than adds. Walking the rows to reinvent it
+ * is wrong in all three of those ways and silent in every one.
+ *
+ * `rate` is `purPrice` — the TURNOVER basis every gain in this app is computed on, not the
+ * charge-inclusive one — because the figure it has to reproduce is `turnover - pnl`.
+ */
+interface MatchedLot { qty: number; rate: number; buyTs: number; }
 interface LotSnap { ts: number; dateStr: string; qty: number; inclPrice: number; purPrice: number; charges: Charges; }
 
 // Charge-free TURNOVER per share for a HELD lot — the basis the OPENING / CLOSING
@@ -254,7 +276,7 @@ interface CorpNote {
 interface Block {
   key: string; name: string;
   purchases: { ts: number; qty: number; avgPrice: number; turnover: number; charges: Charges }[];
-  sales: { ts: number; qty: number; avgPrice: number; turnover: number; charges: Charges; category: "INTRA" | "ST" | "LT"; pnl: number }[];
+  sales: { ts: number; qty: number; avgPrice: number; turnover: number; charges: Charges; category: "INTRA" | "ST" | "LT"; pnl: number; matched?: MatchedLot[] }[];
   splits: { ts: number; qty: number; rate: number; amount: number }[];   // restated holding after a split (post-split qty/rate/total cost)
   corpNotes: CorpNote[];
   opening: LotSnap[];
@@ -262,12 +284,37 @@ interface Block {
   firstTs: number;
 }
 
+// `CgFormulaSource` lives in the PURE grid builder so that file imports nothing and can be
+// tested without stubbing a Sheets client. Re-exported here because the register is where a
+// caller naturally looks for it.
+export type { CgFormulaSource } from "./trxFormulaGrid";
+import type { CgFormulaSource } from "./trxFormulaGrid";
+
 export interface TrxRegisterResult {
+  /**
+   * TRUE when this run was asked only to COLLECT and stopped before writing anything.
+   *
+   * Every field below that names a tab this run did not write is empty, and that is the point:
+   * a collect run computes the capital-gains tabs and passes the charge-conservation guard, then
+   * returns before the first write. Without this marker the result reads as a finished register
+   * with a missing ITR schedule and no holding tabs — the exact shape of a run that failed
+   * halfway, which is the one thing a caller must never confuse it with.
+   */
+  collectedOnly?: true;
   /** The delivery (short/long-term) tab. Keeps the historic name and the legacy migration. */
   tabName: string;
   /** The speculative same-day tab. Always written, even with no round trips that year -
    *  skipping it would leave a previous run's figures standing under the same FY heading. */
   intradayTabName: string;
+  /**
+   * The two SINGLE-PERIOD listed tabs — the delivery book split by holding period.
+   *
+   * RESTATEMENTS of `tabName`, which is why they are absent from the charge-conservation sum:
+   * a block's purchase charges appear on both of them, so counting them would treble every
+   * listed figure and the register would refuse to write. Always written, even with no sales
+   * in that period, for the same reason the intraday tab is.
+   */
+  periodTabs: { short: string; long: string };
   /** The FY-end holding statement that carries EVERY class. Stays the headline name:
    *  a consumer that says "the holding tab" means the complete one. */
   holdingTabName: string;
@@ -360,6 +407,17 @@ export async function generateTrxRegister(
   spreadsheetId: string,
   fyStartYear: number,
   title?: string,
+  /**
+   * Pass an array to run in COLLECT mode: every figure is computed and the charge-conservation
+   * guard still runs, the capital-gains tabs are pushed into this array, and the function
+   * returns BEFORE the first write. Nothing on the spreadsheet is touched — which is the whole
+   * contract of the formula-view button, since the filed tabs must not be rewritten to produce
+   * a derived view of them.
+   *
+   * A sink rather than a return field so no existing call site changes, and the early return
+   * carries `collectedOnly: true` so it cannot be mistaken for a finished register.
+   */
+  collect?: CgFormulaSource[],
 ): Promise<TrxRegisterResult> {
   const fyStartTs = new Date(fyStartYear, 3, 1).getTime();          // 1-Apr, inclusive
   const fyEndExclTs = new Date(fyStartYear + 1, 3, 1).getTime();    // next 1-Apr, exclusive
@@ -915,26 +973,36 @@ export async function generateTrxRegister(
       const ltDays = ltDaysOrNull;
       const salePrice = t.qty > 0 && t.turnover > 0 ? t.turnover / t.qty : t.avgPrice;
       let left = t.qty, ltQty = 0, ltGain = 0, stQty = 0, stGain = 0;
+      // THE FIFO MATCH ITSELF, captured per BUCKET rather than per sale — a long-term parcel
+      // and a short-term parcel of one sale become two printed rows, so each needs the lots
+      // that actually paid for it. Spent by the formula view, which can then state a multi-lot
+      // acquisition cost as the sum it genuinely is instead of leaving a bare value.
+      const stLots: MatchedLot[] = [], ltLots: MatchedLot[] = [];
       for (const l of lots) {
         if (left <= 1e-9) break;
         if (l.remaining <= 1e-9) continue;
         const m = Math.min(l.remaining, left);
         const gain = r2(m * salePrice) - r2(m * l.purPrice);
-        if (daysBetween(l.buyTs, t.ts) >= ltDays) { ltQty += m; ltGain += gain; } else { stQty += m; stGain += gain; }
+        const hit: MatchedLot = { qty: m, rate: l.purPrice, buyTs: l.buyTs };
+        if (daysBetween(l.buyTs, t.ts) >= ltDays) { ltQty += m; ltGain += gain; ltLots.push(hit); }
+        else { stQty += m; stGain += gain; stLots.push(hit); }
         l.remaining -= m; left -= m;
       }
       if (inFY) {
         touch(t.key, t.ts);
         const b = block(t.key);
-        const pushSale = (category: "ST" | "LT", qty: number, pnl: number) => {
+        const pushSale = (category: "ST" | "LT", qty: number, pnl: number, matched: MatchedLot[]) => {
           if (qty <= 1e-9) return;
-          b.sales.push({ ts: t.ts, qty, avgPrice: salePrice, turnover: r2(salePrice * qty), charges: scaleCharges(t.charges, t.qty > 0 ? qty / t.qty : 0), category, pnl: r2(pnl) });
+          b.sales.push({ ts: t.ts, qty, avgPrice: salePrice, turnover: r2(salePrice * qty), charges: scaleCharges(t.charges, t.qty > 0 ? qty / t.qty : 0), category, pnl: r2(pnl), matched });
         };
-        pushSale("ST", stQty, stGain);
-        pushSale("LT", ltQty, ltGain);
+        pushSale("ST", stQty, stGain, stLots);
+        pushSale("LT", ltQty, ltGain, ltLots);
         // Sold more than held (no matching lot, e.g. missing opening basis) → show the
         // uncovered qty as ST with 0 P/L so the quantity still reconciles, not a phantom gain.
-        if (left > 1e-9) pushSale("ST", left, 0);
+        // An EMPTY match, not the other buckets' lots: there genuinely were none, and the sum
+        // formula refuses a match that does not cover the whole quantity — which is what stops
+        // this row claiming a cost it never had.
+        if (left > 1e-9) pushSale("ST", left, 0, []);
       }
     }
   }
@@ -982,14 +1050,127 @@ export async function generateTrxRegister(
     closingRanges: { start: number; end: number }[];
     grand: Charges; grandPnl: Partial<Record<PlKey, number>>;
     scrips: number; buyRows: number; sellRows: number;
+    /**
+     * What the FORMULA VIEW needs to rebuild this tab with its arithmetic exposed
+     * (`trxFormulaView.ts`). Recorded HERE, by the emitter, because only the emitter knows
+     * which row is which — inferring "this looks like a sale row" from the finished grid is
+     * guessing, and a guess that mis-identifies one row writes a formula over a figure that
+     * was never derived that way.
+     *
+     * `turnover` and `pnl` ride along because the matched purchase cost is `turnover - pnl`
+     * and nothing on the page carries it: a sale is matched FIFO against lots spread over the
+     * purchase rows above it (often several, sometimes the opening stock), so the purchase row
+     * BESIDE a sale is not the lot that was consumed. `=saleAmt - purchaseAmt` across adjacent
+     * rows would look like a derivation and be wrong.
+     */
+    derive: {
+      /**
+       * `acqCands` are the ACQUISITION RATE cells of this sale's OWN block — every opening
+       * date-line and every purchase line above it, in the order FIFO would consume them.
+       *
+       * The view writes `ACQUISITION COST = sale qty x acquisition rate` against the first one
+       * that reproduces the engine's own `turnover - pnl`, and leaves the value where none does.
+       * Scoped to the block because a rate from the scrip above would multiply out to a
+       * plausible figure belonging to a different company.
+       *
+       * `matched` is the FIFO match for THIS bucket — the lots that actually paid for it, with
+       * the shares taken from each. It is what lets a sale spanning two acquisitions be written
+       * as the sum it is (`=ROUND(3600*E69+4400*E70,2)`) instead of falling back to a bare
+       * value: the quantities exist nowhere on the page, and only this loop ever knew them.
+       * Empty on an UNCOVERED quantity (sold more than held), which is the honest statement and
+       * is what stops that row claiming a cost it never had.
+       */
+      saleRows: {
+        r: number; plCol: number; sAmtCol: number; sQtyCol: number;
+        turnover: number; pnl: number;
+        acqCands: { r: number; rateCol: number; ts?: number }[];
+        matched?: MatchedLot[];
+      }[];
+      /**
+       * Every cell that is a genuine QTY / RATE / AMOUNT triple, so the view can write
+       * `RATE = AMOUNT / QTY`.
+       *
+       * Recorded PER ROW rather than per column, because POSITION CANNOT TELL THESE APART.
+       * `aggRow`/`aggSubtotal` print CLOSING in the OPENING column family (C-F), and
+       * `restateCols` puts a split or corp-action restatement there too whenever the block has
+       * no in-year purchase - so four unrelated row kinds share C-F. One of them, the
+       * corp-action CONTRA line, deliberately writes an amount with NO qty and NO rate, and the
+       * `CLOSING NIL` row writes the TEXT "NIL" into the amount column. A formula applied by
+       * COLUMN would hit #DIV/0! on the first and #VALUE! on the second.
+       */
+      rateCells: { r: number; qtyCol: number; rateCol: number; amtCol: number }[];
+      /**
+       * PURCHASE rows, which carry a charge block exactly as sale rows do, with the column
+       * their TURNOVER sits in.
+       *
+       * Recorded rather than inferred. `rateCells` cannot tell a purchase from an opening
+       * date-line — `restateCols` puts a split or corp-action restatement in the same column
+       * family, so four unrelated row kinds share C–F — and "this looks like a purchase row"
+       * is exactly how a formula lands on a figure that was never derived that way.
+       */
+      purchaseRows: { r: number; amtCol: number }[];
+      grandTotalRow: number;
+      plColsUsed: number[];
+      chargeColsUsed: number[];
+      /** The charge columns BY NAME, because a rate belongs to a charge, not to a position. */
+      chargeCols: { brok: number; stt: number; gst: number; et: number; stamp: number; sebi: number; ipf: number; dmat: number };
+      /**
+       * The expense footer: the row repeating each charge total, the row carrying their sum,
+       * and the column that sum sits under (Brok, beneath the breakdown).
+       *
+       * Both are VALUES on the filed tab and they restate figures the GRAND TOTAL row above
+       * already carries — two independent statements of one set of numbers with nothing tying
+       * them. The twin ties them.
+       */
+      expenseRows: { breakdown: number; total: number; totalCol: number };
+      /** STT and stamp duty are both levied differently on a squared-off trade. */
+      isIntraday: boolean;
+      firstDataRow: number;
+      /** Column geometry, so the twin can repaint itself exactly as the filed tab is painted. */
+      paint: {
+        sno: number; name: number; oDate: number; pDate: number; sDate: number;
+        oQty: number; oRate: number; oAmt: number;
+        pQty: number; pRate: number; pAmt: number;
+        sQty: number; sRate: number; sAmt: number;
+        brok: number; ipf: number; firstPl: number; lastPl: number; width: number;
+      };
+    };
   }
-  const emitTab = (L: Layout, activeBlocks: Block[], caption: string, expenseLabel: string): Emission => {
+  const emitTab = (L: Layout, activeBlocks: Block[], caption: string, expenseLabel: string, notes: string[] = []): Emission => {
       const { COL, blankRow } = L;
       const active = activeBlocks
         .slice()
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));   // scrip-wise, alphabetical
 
       const out: any[][] = [];
+      // Collected for the formula view only. Nothing here changes a single cell of the filed
+      // tab — `out` is built exactly as it always was and these are notes about it.
+      const dSaleRows: {
+        r: number; plCol: number; sAmtCol: number; sQtyCol: number;
+        turnover: number; pnl: number;
+        acqCands: { r: number; rateCol: number; ts?: number }[];
+        matched?: MatchedLot[];
+      }[] = [];
+      // Charge-bearing rows that are NOT sales. Same note-it-at-the-push-site discipline as
+      // `dSaleRows`: only the emitter knows which row is which.
+      const dPurchaseRows: { r: number; amtCol: number }[] = [];
+      // The acquisition rate cells of the block being built, in FIFO order. RESET per block —
+      // a shared list would offer the previous scrip's rates to this scrip's sales, and one of
+      // them multiplying out to the right figure by coincidence is a formula pointing at
+      // another company's cost.
+      // `ts` is the DATE the row states, and it is what ties a consumed lot back to the row
+      // that supplied it. Rate alone would do for the arithmetic — two rows carrying the same
+      // rate multiply out identically — but it can point at the wrong company's date line when
+      // an unrelated row happens to share a rate, and a formula whose provenance is wrong is a
+      // worksheet that teaches the reader something untrue.
+      let blockAcq: { r: number; rateCol: number; ts?: number }[] = [];
+      const noteAcq = (r: number, rateCol: number, ts?: number) => { blockAcq.push({ r, rateCol, ts }); };
+      const dRateCells: { r: number; qtyCol: number; rateCol: number; amtCol: number }[] = [];
+      // Called at each PUSH site, never inside `aggRow`/`aggSubtotal` - those build a row and
+      // hand it back, so they cannot know the index it will land at.
+      const noteRate = (r: number, qn: number, rn: number, an: number) =>
+        { dRateCells.push({ r, qtyCol: qn, rateCol: rn, amtCol: an }); };
+      let dGrandTotalRow = -1;
       // title + group header + column header
       const titleRow = blankRow(); titleRow[COL.name] = caption; out.push(titleRow);
       const grp = blankRow();
@@ -997,6 +1178,11 @@ export async function generateTrxRegister(
       for (const pc of L.plCols) grp[pc.col] = pc.label;
       out.push(grp);
       out.push(L.headers);
+      // Full-width sentence rows, pushed HERE — before the first block, so every index recorded
+      // below (`dSaleRows`, `dRateCells`, `dGrandTotalRow`, `expStart`/`expEnd`) is already
+      // correct. SPLICING one in after the emission, the way the empty-tab notes below do,
+      // shifts all of those by a row while the paint still reads the recorded values.
+      for (const n of notes) { const nr = blankRow(); nr[COL.name] = n; out.push(nr); }
 
       const grand: Charges = { ...ZERO_CHARGES };
       // Seeded from the VARIANT, not with all three buckets: a bucket that cannot appear on
@@ -1061,6 +1247,7 @@ export async function generateTrxRegister(
     let sno = 0, buyRows = 0, sellRows = 0;
     for (const b of active) {
       sno++;
+      blockAcq = [];
       // Opening consolidated date-wise (one row per date, not per lot).
       const openAgg = consolidateByDate(b.opening);
       // Header row carries S.No + name — and the FIRST opening date-line, as in the source.
@@ -1070,10 +1257,17 @@ export async function generateTrxRegister(
         for (let c = COL.oDate; c <= COL.oAmt; c++) head[c] = l0[c];
       }
       out.push(head);
+      // ONLY when the head row actually carries an opening line. A scrip with no opening
+      // position has C-F empty here, and a formula over a blank qty is #DIV/0!.
+      if (openAgg.length) { noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt); noteAcq(out.length - 1, COL.oRate, openAgg[0].ts); }
       // Remaining opening date-lines. No subtotal row — the date-wise lines already
       // show the full opening position, so a summed total would be redundant.
       if (openAgg.length > 1) {
-        for (const a of openAgg.slice(1)) out.push(aggRow(a));
+        for (const a of openAgg.slice(1)) {
+          out.push(aggRow(a));
+          noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt);
+          noteAcq(out.length - 1, COL.oRate, a.ts);
+        }
       }
 
       // SPLIT lines — restated holding after each split (post-split qty, rescaled rate,
@@ -1085,6 +1279,10 @@ export async function generateTrxRegister(
         row[rc.d] = fmtDate(sp.ts); row[rc.q] = sp.qty;
         row[rc.r] = r6(sp.rate); row[rc.a] = r2(sp.amount);
         out.push(row);
+        // A RESTATEMENT IS AN ACQUISITION RATE. After a split the lots carry the rescaled
+        // `purPrice`, so a later sale costs `qty x the RESTATED rate` and no original opening
+        // rate can reproduce it — leave this out and every post-split sale falls back.
+        if (sp.qty > 0) { noteRate(out.length - 1, rc.q, rc.r, rc.a); noteAcq(out.length - 1, rc.r, sp.ts); }
       }
 
       // PURCHASES (chronological)
@@ -1095,6 +1293,13 @@ export async function generateTrxRegister(
         row[COL.pRate] = r6(p.avgPrice); row[COL.pAmt] = r2(p.turnover);
         chargeCells(row, cgCharges(b.key, p.charges));
         out.push(row);
+        noteRate(out.length - 1, COL.pQty, COL.pRate, COL.pAmt);
+        // AFTER the push, so `r` is this row's real index. A purchase carries the same nine-column
+        // charge block a sale does, and the formula view totals both.
+        dPurchaseRows.push({ r: out.length - 1, amtCol: COL.pAmt });
+        // An in-year purchase is an acquisition too, and FIFO reaches it after the opening —
+        // which is the order these are pushed in, so the candidate list is already correct.
+        noteAcq(out.length - 1, COL.pRate, p.ts);
       }
 
       // Corporate-action notes. Placed BETWEEN purchases and sales, not after them: a
@@ -1124,6 +1329,17 @@ export async function generateTrxRegister(
         if (cn.rate !== undefined) row[rc.r] = r6(cn.rate);
         row[rc.a] = r2(cn.amount || 0);
         out.push(row);
+        // A CONTRA line carries only a signed amount - no qty, no rate - and that is
+        // deliberate: writing zeros there would read as "0 shares at 0.00". No triple, no
+        // formula.
+        if (cn.qty !== undefined && cn.rate !== undefined && cn.qty > 0) {
+          noteRate(out.length - 1, rc.q, rc.r, rc.a);
+          // Both kinds are an acquisition rate for whatever is sold afterwards: a "purchase"
+          // line IS the acquisition (shares received in a merger/demerger), and a "holding"
+          // line restates the surviving position's cost, which is what FIFO then consumes.
+          // The CONTRA line is excluded by this same guard — it has no rate to point at.
+          noteAcq(out.length - 1, rc.r, cn.ts);
+        }
       }
 
       // SALES — one row per tax bucket per date; intra-day first, then short, then long.
@@ -1142,6 +1358,18 @@ export async function generateTrxRegister(
         grandPnl[bk]! += s.pnl;
         chargeCells(row, cgCharges(b.key, s.charges));
         out.push(row);
+        // AFTER the push, so `r` is this row's real index. Recorded for every sale, including
+        // a zero-P/L one (an uncovered quantity with no matching lot) — the formula view still
+        // has arithmetic to show there, and skipping it would leave a gap a reader would read
+        // as "this row was not checked".
+        // SNAPSHOT the candidates, never the live array: `blockAcq` is reset and refilled by
+        // the next scrip, so a shared reference would hand every sale on the tab the LAST
+        // block's acquisition rates.
+        dSaleRows.push({
+          r: out.length - 1, plCol: L.plCol(s.category), sAmtCol: COL.sAmt, sQtyCol: COL.sQty,
+          turnover: r2(s.turnover), pnl: s.pnl, acqCands: [...blockAcq], matched: s.matched,
+        });
+        noteRate(out.length - 1, COL.sQty, COL.sRate, COL.sAmt);
       }
 
       // CLOSING consolidated date-wise + subtotal (record the span so it shades green).
@@ -1149,12 +1377,22 @@ export async function generateTrxRegister(
       // overnight, so a "CLOSING NIL" line under every scrip is noise, not information.
       // The position itself is reported on the delivery tab, which keeps a scrip whose only
       // in-FY trade was intraday precisely so its opening and closing stay visible.
+      // DELIVERY only. The intraday tab has no closing because a same-day round trip holds
+      // nothing overnight; the SHORT and LONG tabs have none because a closing POSITION is not
+      // a holding-period fact — printing the real one under a section showing only one period's
+      // sales makes a filed page look like it does not add up, and invites someone to "fix" it.
+      // Those tabs say where the position lives instead. See the single-period block below.
       if (L.id === "DELIVERY") {
         const closeAgg = consolidateByDate(b.closing);
         const closeStart = out.length;
         if (closeAgg.length) {
-          closeAgg.forEach((a, i) => out.push(aggRow(a, i === 0 ? "CLOSING" : undefined)));
-          if (closeAgg.length > 1) out.push(aggSubtotal(closeAgg));
+          closeAgg.forEach((a, i) => {
+            out.push(aggRow(a, i === 0 ? "CLOSING" : undefined));
+            noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt);
+          });
+          // The subtotal's rate is LITERALLY `amt / q` (see aggSubtotal), so a formula there
+          // reproduces the code rather than approximating it.
+          if (closeAgg.length > 1) { out.push(aggSubtotal(closeAgg)); noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt); }
         } else {
           const row = blankRow(); row[COL.name] = "CLOSING"; row[COL.oAmt] = "NIL"; out.push(row);
         }
@@ -1171,6 +1409,7 @@ export async function generateTrxRegister(
     gt[COL.et] = r2(grand.et); gt[COL.stamp] = r2(grand.stamp); gt[COL.sebi] = r2(grand.sebi);
     gt[COL.ipf] = r2(grand.ipf); gt[COL.dmat] = r2(grand.dmat);
     out.push(gt);
+    dGrandTotalRow = out.length - 1;
 
     // Row after GRAND TOTAL — the lime P/L colour band stops here. The expense summary
     // below isn't part of the per-scrip P/L grid, so it shouldn't carry the P/L stripe.
@@ -1204,11 +1443,39 @@ export async function generateTrxRegister(
     out.push(blankRow());   // spacer under GRAND TOTAL
     const expStart = out.length;
     out.push(expenseRow(expenseLabel, grand));
+    const dExpBreakdownRow = out.length - 1;
     out.push(totalRow(grand));
+    const dExpTotalRow = out.length - 1;
     const expEnd = out.length;
 
     return {
       values: out, plBandEnd, expStart, expEnd, closingRanges,
+      derive: {
+        saleRows: dSaleRows,
+        rateCells: dRateCells,
+        purchaseRows: dPurchaseRows,
+        grandTotalRow: dGrandTotalRow,
+        plColsUsed: L.plCols.map(pc => pc.col),
+        // The eight charges actually written by `chargeCells`. `COL.exchClg` is deliberately
+        // NOT here: the layout has a ninth charge column and `Charges` carries no field for
+        // it ("exchClg not captured"), so a `=SUM()` down it would print a confident 0 under
+        // a headed column where today there is an honest blank.
+        chargeColsUsed: [COL.brok, COL.stt, COL.gst, COL.et, COL.stamp, COL.sebi, COL.ipf, COL.dmat],
+        chargeCols: {
+          brok: COL.brok, stt: COL.stt, gst: COL.gst, et: COL.et,
+          stamp: COL.stamp, sebi: COL.sebi, ipf: COL.ipf, dmat: COL.dmat,
+        },
+        expenseRows: { breakdown: dExpBreakdownRow, total: dExpTotalRow, totalCol: COL.brok },
+        isIntraday: L.id === "INTRADAY",
+        firstDataRow: 3,   // title, group header, column header
+        paint: {
+          sno: COL.sno, name: COL.name, oDate: COL.oDate, pDate: COL.pDate, sDate: COL.sDate,
+          oQty: COL.oQty, oRate: COL.oRate, oAmt: COL.oAmt,
+          pQty: COL.pQty, pRate: COL.pRate, pAmt: COL.pAmt,
+          sQty: COL.sQty, sRate: COL.sRate, sAmt: COL.sAmt,
+          brok: COL.brok, ipf: COL.ipf, firstPl: L.firstPl, lastPl: L.lastPl, width: L.WIDTH,
+        },
+      },
       grand, grandPnl, scrips: active.length, buyRows, sellRows,
     };
   };
@@ -1438,6 +1705,49 @@ export async function generateTrxRegister(
    * the caption differ. Reusing `emitTab` is safe because it accumulates into its own `grand`
    * per call; a shared accumulator would double the totals.
    */
+  /**
+   * THE SINGLE-PERIOD LISTED TABS — the same delivery book, split by holding period.
+   *
+   * LISTED ONLY (`listedActive`) and intraday is excluded twice over: it is a different block
+   * set entirely, and `plCol` would throw if an INTRA sale reached a tab with no INTRA column.
+   *
+   * THESE ARE RESTATEMENTS, NOT A NEW ACCOUNTING, and that is the load-bearing fact. They must
+   * stay OUT of `cgGrand`: every listed charge is already counted once on the main tab, and a
+   * block's PURCHASE rows appear on BOTH period tabs (a scrip with sales in both periods is
+   * acquired once), so adding them would treble the brokerage and the conservation guard would
+   * refuse to write the whole register. Same rule, same reason, as the transaction statements.
+   *
+   * Out of that guard means unguarded, so they get their own — `periodDrift` below.
+   */
+  const periodCg = ([
+    { id: "SHORT" as VariantId, cat: "ST" as const, word: "Short Term", other: "Long Term" },
+    { id: "LONG" as VariantId, cat: "LT" as const, word: "Long Term", other: "Short Term" },
+  ]).map(p => {
+    const L = makeLayout(p.id);
+    // CLONED, never mutated: `listedActive` is the same array the main tab, the per-class tabs
+    // and the holding statements are all built from, and a `sales` filtered in place would
+    // empty the second period tab and strip every closing position on the way past.
+    //
+    // `closing` is left ALONE rather than emptied. Emptying it here would be a second mechanism
+    // for a job the `L.id === "DELIVERY"` gate already does completely — and an unreachable
+    // safeguard is worse than none, as the discriminating name slot already taught this repo.
+    // One mechanism, and a probe that widens that gate is what proves it.
+    const blocks: Block[] = listedActive
+      .map(b => ({ ...b, sales: b.sales.filter(s => s.category === p.cat) }))
+      .filter(b => b.sales.length > 0);
+    const notes = blocks.length
+      // Stated ON the tab, because two overlapping expense totals on two filed pages is exactly
+      // the kind of difference nobody can debug six months later.
+      ? [`${p.word.toUpperCase()} sales only, from the listed delivery book. Opening stock and purchases are the WHOLE scrip's, so their charges also appear on the "${p.other}" tab — do not add the two expense totals together; the authoritative charge total is on "Capital Gains for ${fyLabel}".`,
+         `Closing stock is deliberately absent: a single-period section cannot foot to a position. The FY-end holding tabs are the authority on what is still held.`]
+      : [`No ${p.word.toLowerCase()} listed transactions in ${fyLabel}.`];
+    return {
+      tab: `${p.word} Capital Gains for ${fyLabel}`,
+      key: BUCKET_PL[p.cat], L,
+      em: emitTab(L, blocks, `${head}${p.word} Capital Gains for ${fyLabel}`, `${p.word} Expenses`, notes),
+    };
+  });
+
   const classCg: { id: AssetClassId; tab: string; em: Emission }[] = [];
   for (const id of ASSET_CLASS_IDS) {
     if (ASSET_CLASSES[id].ltDays === null) continue;      // nothing to compute
@@ -1507,6 +1817,36 @@ export async function generateTrxRegister(
     }
   }
 
+  // THE PARTITION CHECK — the single-period tabs' own guard, and they need one precisely
+  // because they are deliberately OUT of `cgGrand` above. Without this they would be the only
+  // capital-gains pages in the register that nothing verifies.
+  //
+  // It cannot check charges: a block's purchase rows appear on BOTH period tabs, so their
+  // charges legitimately do not sum to the main tab's. What it CAN check is the one thing the
+  // split can get wrong — whether it is a PARTITION. Every delivery sale row is short OR long
+  // (intraday is a different block set entirely), so the two tabs' sale-row counts must add to
+  // the main tab's, and each period's P/L must equal the figure already filed on it. A dropped
+  // block, an inverted category predicate and a double count all surface here.
+  {
+    const rows = periodCg.reduce((s, p) => s + p.em.sellRows, 0);
+    const bad: string[] = [];
+    if (rows !== delivery.sellRows) {
+      bad.push(`${rows} sale rows across the two period tabs against ${delivery.sellRows} on the main tab`);
+    }
+    for (const p of periodCg) {
+      const mine = p.em.grandPnl[p.key] || 0, filed = delivery.grandPnl[p.key] || 0;
+      if (Math.abs(mine - filed) > 0.01) {
+        bad.push(`"${p.tab}" totals ${fmtAmt(mine)} against ${fmtAmt(filed)} already filed on the main tab`);
+      }
+    }
+    if (bad.length) {
+      throw new Error(
+        "Register not written: the short/long split is not a partition of the listed delivery sales ("
+        + bad.join("; ") + "). This is a bug in the split, not in your data.",
+      );
+    }
+  }
+
   // Empty is a real answer and must still be written: a portfolio that had intraday last
   // run and none this one would otherwise keep the stale tab under the same FY heading.
   if (!intradayActive.length) {
@@ -1533,8 +1873,51 @@ export async function generateTrxRegister(
   // ONLY the delivery tab inherits the legacy names - it is the continuation of the old
   // single tab. Letting both consult the list would have the second write claim the sheet
   // the first just renamed.
+  // ── COLLECT MODE: every figure computed, the guard passed, nothing written ──
+  //
+  // Placed HERE and nowhere else. Earlier and the charge-conservation guard would not have run,
+  // so the formula view could render a grid the register itself would have refused to write.
+  // Later and the first filed tab is already gone.
+  if (collect) {
+    const src = (tab: string, em: Emission): CgFormulaSource =>
+      ({ tab, values: em.values, closingRanges: em.closingRanges, derive: em.derive,
+        plBandEnd: em.plBandEnd, expStart: em.expStart, expEnd: em.expEnd });
+    collect.push(src(tabName, delivery), src(intradayTabName, intraday));
+    for (const c of classCg) collect.push(src(c.tab, c.em));
+    return {
+      collectedOnly: true,
+      // Real: these tabs WERE computed, and their names are what the formula view twins.
+      tabName, intradayTabName, fyLabel,
+      // Real: these were computed above, even though a collect run writes nothing. They are
+      // NOT pushed to `collect` — the formula view twins the filed tabs, and a period tab is
+      // already a restatement of one it twins.
+      periodTabs: { short: periodCg[0].tab, long: periodCg[1].tab },
+      scrips: delivery.scrips + intraday.scrips + classCg.reduce((s, c) => s + c.em.scrips, 0),
+      buyRows: delivery.buyRows + intraday.buyRows + classCg.reduce((s, c) => s + c.em.buyRows, 0),
+      sellRows: delivery.sellRows + intraday.sellRows + classCg.reduce((s, c) => s + c.em.sellRows, 0),
+      unresolved: [...unresolvedMap.values()], master,
+      sttFlaggedInMaster: master.entries.filter((e) => e.sttRemoved).length,
+      sttSuppressed: [...sttOffByKey.entries()]
+        .filter(([, off]) => off)
+        .map(([k]) => nameByKey.get(k) || k)
+        .sort((a, b) => a.localeCompare(b)),
+      classTabs: classCg.map(c => ({ id: c.id, label: ASSET_CLASSES[c.id].label, cgTab: c.tab })),
+      // EMPTY, and deliberately so: a collect run returns before the holding tabs, the ITR
+      // schedule and the transaction statements are built at all. Reporting a zero here is not
+      // "nothing was held" - it is "this run never asked". `collectedOnly` is what tells the
+      // two apart, and it is why a bare zero on this result must never reach a badge.
+      holdingTabName: "", holdingTabs: { equity: "", pe: "", combined: "" },
+      itrUnlistedTab: "", itrCompanies: 0, itrMissingPan: [], itrUnfooted: [],
+      listedDuringFy: [], unclassified: [],
+    };
+  }
+
   await writeAndPaint(dL, tabName, [`${fyLabel} Transaction Ledger`, `${fyLabel} Trx`], delivery);
   await writeAndPaint(iL, intradayTabName, [], intraday);
+  // Written EVERY run, even with no sales in that period — exactly as the intraday and listed
+  // tabs are. A tab skipped because its period was empty keeps LAST year's figures under THIS
+  // year's heading, which is the one failure a reader cannot see.
+  for (const p of periodCg) await writeAndPaint(p.L, p.tab, [], p.em);
   // Per-class capital gains. Sequential, like the two above: these are writes to a shared
   // spreadsheet inside the app's heaviest operation, and Sheets rate-limits per document.
   for (const c of classCg) await writeAndPaint(dL, c.tab, [], c.em);
@@ -2152,6 +2535,7 @@ export async function generateTrxRegister(
 
   return {
     tabName, intradayTabName, holdingTabName, fyLabel,
+    periodTabs: { short: periodCg[0].tab, long: periodCg[1].tab },
     holdingTabs: { equity: equityHoldingTab, pe: peHoldingTab, combined: combinedHoldingTab },
     itrUnlistedTab, itrCompanies, itrMissingPan, itrUnfooted, listedDuringFy,
     classTabs: ASSET_CLASS_IDS

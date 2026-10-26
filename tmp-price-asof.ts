@@ -578,19 +578,30 @@ ok('J5d ...and it is EDITOR-ONLY, never a doGet route',
 // tab, so the run records how far back it reached.
 ok('J5e the backfill resumes from a recorded high-water mark',
   gs.includes("var BHAV_MARK_KEY_ = 'BHAV_BACKFILL_OLDEST';")
-  && gs.includes('var mark = props.getProperty(BHAV_MARK_KEY_);')
+  && gs.includes('var mark = props.getProperty(bhavMarkKey_(SEG.seg));')
   // The LOOP must start from it. Reading the mark and then walking from `to` anyway leaves every
   // line of this feature present and refetches the same days forever.
   && gs.includes('for (var d = new Date(startAt.getTime());'));
+// ONE MARK PER SEGMENT (24-Sep-2026). BSE has reached the bottom of the two-year range and NSE
+// starts from today, so a shared cursor would have each undo the other's progress — and would
+// have re-paid ~500 completed BSE fetches just to get the NSE pass moving. BSE deliberately keeps
+// the ORIGINAL unsuffixed key, which is what makes its completed backfill still count.
+ok('J5e2 ...one per segment, with BSE on the original key',
+  gs.includes('function bhavMarkKey_(segment)')
+  && gs.includes("return s === 'BSE' ? BHAV_MARK_KEY_ : BHAV_MARK_KEY_ + '_' + s;")
+  && gs.includes("var BHAV_SEGMENTS_ = ['BSE', 'NSE'];"));
 // Written AFTER the single write, or a run that died mid-fetch would be skipped rather than
-// repeated — and the whole point of fill-only is that repeating is free. Asserted as "exactly
-// once, and after": a stray second assignment before the write satisfied an ordering regex.
+// repeated — and the whole point of fill-only is that repeating is free. Asserted as "recorded in
+// the loop, applied after the write": a stray assignment inside the loop satisfied an ordering
+// regex, and now that there are two segments the write must still happen exactly once, after both.
 ok('J5f ...advanced only after the write lands',
   (() => {
-    const setAt = gs.indexOf('props.setProperty(BHAV_MARK_KEY_, firstDone);');
+    const recordAt = gs.indexOf('marksToSet[bhavMarkKey_(SEG.seg)] = firstDone;');
     const writeAt = gs.indexOf('writePriceHistory_(cols, byDate, false, null, true);');
-    const once = gs.split('props.setProperty(BHAV_MARK_KEY_').length - 1;
-    return setAt > 0 && writeAt > 0 && setAt > writeAt && once === 1;
+    const applyAt = gs.indexOf('props.setProperty(mkey, marksToSet[mkey]);');
+    const writes = gs.split('writePriceHistory_(cols, byDate, false, null, true)').length - 1;
+    const sets = gs.split('props.setProperty(mkey').length - 1;
+    return recordAt > 0 && writeAt > recordAt && applyAt > writeAt && writes === 1 && sets === 1;
   })());
 ok('J5g ...and it is a HINT — fill-only means a wrong mark costs fetches, not correctness',
   gs.includes('function resetBhavBackfillMark()')
@@ -629,9 +640,15 @@ ok('J5m ...covering several sessions so a missed run heals itself',
   gs.includes('while (weekdays < 3 && back < 10)'));
 // The backfill's mark points at the OLDEST date reached walking backwards; the top-up walks the
 // newest few. Letting them share it would make each undo the other's progress.
+// EVERY segment's mark, not just BSE's: leaving NSE's in place would make the top-up resume from
+// the bottom of the NSE backfill and cover dates two years old instead of yesterday's.
 ok('J5n ...and it does not disturb the backfill’s resume mark',
-  gs.includes('PropertiesService.getScriptProperties().deleteProperty(BHAV_MARK_KEY_);')
-  && gs.includes('if (saved) PropertiesService.getScriptProperties().setProperty(BHAV_MARK_KEY_, saved);'));
+  (() => {
+    const tu = gs.slice(gs.indexOf('function dailyBhavTopUp'), gs.indexOf('function installBhavTopUpTrigger'));
+    return /for \(var mi = 0; mi < BHAV_SEGMENTS_\.length; mi\+\+\)/.test(tu)
+      && tu.includes('pp.deleteProperty(mkk);')
+      && tu.includes('if (saved.hasOwnProperty(mk2) && saved[mk2]) pp.setProperty(mk2, saved[mk2]);');
+  })());
 // The NSE file is a DIFFERENT shape — keyed on a SYMBOL string, not a numeric SC_CODE — so its
 // parser must be written against the real columns.
 ok('J5o the NSE header is probed, not assumed',
@@ -655,13 +672,17 @@ ok('J5r ...and the note SAYS it when the source is mostly refusing',
 // The mark would otherwise step past days that were never really read, and fill-only would then
 // never revisit them — the one way this design could lose data rather than just time.
 ok('J5s ...and the resume mark does not advance over a refused run',
-  gs.includes('if (firstDone && !(refused > 0 && refused >= fetched / 2)) props.setProperty(BHAV_MARK_KEY_, firstDone);'));
+  gs.includes('if (!(refused > 0 && refused >= fetched / 2)) {')
+  // The guard must WRAP the apply loop, not merely sit near it — a guard present with the write
+  // outside it is the shape that reads as protection and provides none.
+  && gs.indexOf('if (!(refused > 0 && refused >= fetched / 2)) {')
+     < gs.indexOf('props.setProperty(mkey, marksToSet[mkey]);'));
 
 ok('J6 the route is wired and the unknown-probe guard knows about it',
   gs.includes("e.parameter.probe === 'bse'")
   && gs.includes("['hist', 'bse', 'tv', 'nse'].indexOf(String(e.parameter.probe)) < 0"));
 ok('J7 ...and the deploy marker moved with the file',
-  gs.includes("RESOLVER_VERSION_ = '2026-09-24 bse history probe'"));
+  gs.includes("RESOLVER_VERSION_ = '2026-09-24 nse bhavcopy wired + block-deal guard'"));
 // A trailing underscore makes a function PRIVATE in Apps Script, so it never appears in the
 // editor's Run dropdown and is reachable only through a DEPLOYMENT — the one step that had not
 // happened on three consecutive attempts, each of which then answered about the old code.

@@ -253,6 +253,113 @@ export async function run() {
   // two are partial by construction and naming one of them here would narrow it.
   eq('A: result names the holding tab', resA.holdingTabName, 'Holding Combined as on 31st March 2026');
 
+  // ── FIXTURE A, the SINGLE-PERIOD LISTED TABS ──────────────────────────────
+  // ALPHA is long-term (opening 2023, sold in-FY) and BETA short-term (bought and sold in-FY),
+  // so the split is DISJOINT by construction: each tab must carry exactly one of them, and a
+  // fixture where both scrips landed in one period could not tell a working split from a
+  // broken one.
+  const ST_TAB = `Short Term Capital Gains for ${FY_LABEL}`;
+  const LT_TAB = `Long Term Capital Gains for ${FY_LABEL}`;
+  const aSt = written(ST_TAB), aLt = written(LT_TAB);
+  ok('A: the short-term tab was written', !!aSt);
+  ok('A: the long-term tab was written', !!aLt);
+  eq('A: the result names both', `${resA.periodTabs?.short}|${resA.periodTabs?.long}`, `${ST_TAB}|${LT_TAB}`);
+
+  if (a && aSt && aLt) {
+    const flatOf = (t: any[][]) => t.map(r => r.join('|'));
+    const fSt = flatOf(aSt), fLt = flatOf(aLt), fA = flatOf(a);
+    ok('A: short-term carries BETA', fSt.some(r => r.includes('BETA MOTORS LIMITED')));
+    ok('A: ...and NOT the long-term scrip', !fSt.some(r => r.includes('ALPHA INDUSTRIES LIMITED')),
+      'a long-term block on the short-term tab is a mis-routed sale');
+    ok('A: long-term carries ALPHA', fLt.some(r => r.includes('ALPHA INDUSTRIES LIMITED')));
+    ok('A: ...and NOT the short-term scrip', !fLt.some(r => r.includes('BETA MOTORS LIMITED')));
+
+    // ONE P/L column each, which is the whole safety argument: `plCol` then THROWS if a sale
+    // of the other period is ever routed here, instead of writing it into a column that does
+    // not exist and losing the figure.
+    eq('A: the short-term tab has its own P/L column',
+      aSt[1].filter((c: any) => `${c}`.trim() === 'Short term').length, 1);
+    ok('A: ...and no long-term column', !aSt[1].some((c: any) => `${c}`.trim() === 'Long term'));
+    ok('A: the long-term tab has no short-term column',
+      !aLt[1].some((c: any) => `${c}`.trim() === 'Short term'));
+    eq('A: so a period tab is one column narrower than the main one', a[2].length - aSt[2].length, 1);
+    eq('A: and its charge block still ends at IPF', aSt[2][aSt[2].length - 1], 'IPF');
+
+    // CLOSING is deliberately absent. A closing POSITION is not a holding-period fact, and
+    // printing the real one under a section showing one period's sales makes a filed page look
+    // like it does not add up.
+    ok('A: no closing section on the short-term tab', !fSt.some(r => r.includes('CLOSING')));
+    ok('A: ...nor on the long-term tab', !fLt.some(r => r.includes('CLOSING')));
+    ok('A: while the main tab keeps its own', fA.some(r => r.includes('CLOSING')),
+      'the period tabs clone their blocks; mutating them would strip the main tab too');
+
+    // THE OVERLAP IS STATED ON THE TAB. A block's purchase charges appear on BOTH period tabs,
+    // so the two expense totals must never be added — which is exactly the kind of difference
+    // between two filed pages that nobody can debug six months later.
+    ok('A: the short-term tab discloses the shared purchase charges',
+      fSt.some(r => r.includes('do not add the two expense totals together')));
+    ok('A: ...and says where the position lives',
+      fSt.some(r => r.includes('holding tabs are the authority')));
+
+    // THE PARTITION, asserted on the FIGURE: each period's P/L must equal what is already
+    // filed for that period on the main tab.
+    const plAt = (t: any[][], label: string) => {
+      const c = t[1].findIndex((x: any) => `${x}`.trim() === label);
+      const gt = t.find(r => r[1] === 'GRAND TOTAL');
+      return c >= 0 && gt ? Number(gt[c]) || 0 : NaN;
+    };
+    near('A: short-term P/L ties to the main tab', plAt(aSt, 'Short term'), plAt(a, 'Short term'));
+    near('A: long-term P/L ties to the main tab', plAt(aLt, 'Long term'), plAt(a, 'Long term'));
+    ok('A: ...and neither side is nil', Math.abs(plAt(a, 'Short term')) > 0 && Math.abs(plAt(a, 'Long term')) > 0,
+      'a fixture with an empty period would satisfy the tie trivially');
+
+    // The expense footer the format already carries, labelled for the period it covers.
+    ok('A: the short-term tab keeps its expense footer', fSt.some(r => r.includes('Short Term Expenses')));
+    ok('A: the long-term tab keeps its expense footer', fLt.some(r => r.includes('Long Term Expenses')));
+  }
+
+  // The note rows must be PUSHED before the first block, never spliced in after the emission:
+  // every index the formula view and the PAINT read (`expStart`, `expEnd`, `grandTotalRow`) is
+  // recorded as the rows go out, so a splice shifts the colour bands a row off the values they
+  // describe. Asserted over source because the written grid looks identical either way.
+  {
+    const nfs = await import('node:fs');
+    const reg = nfs.readFileSync('src/lib/trxRegister.ts', 'utf8')
+      .replace(/(^|[^*])\/\*[\s\S]*?\*\//g, '$1').replace(/^\s*\/\/.*$/gm, '');
+    const notesAt = reg.indexOf('for (const n of notes)');
+    const blocksAt = reg.indexOf('for (const b of active)');
+    ok('A: note rows are emitted before the first block', notesAt > 0 && blocksAt > 0 && notesAt < blocksAt);
+
+    // THE PERIOD TABS MUST STAY OUT OF THE CHARGE-CONSERVATION SUM. A block's purchase charges
+    // appear on BOTH of them, so counting them trebles every listed figure, the guard sees
+    // drift and NO REGISTER WRITES AT ALL. Same rule, same reason, as the transaction
+    // statements. Asserted over source because the symptom is a total failure to write, which
+    // no assertion about a written tab can reach.
+    const cgSum = reg.slice(reg.indexOf('const cgGrand ='), reg.indexOf('const cgGrand =') + 240);
+    ok('A: the period tabs stay OUT of the charge-conservation sum',
+      cgSum.length > 40 && !cgSum.includes('periodCg'));
+
+    // And the partition check must count the PERIOD tabs' sale rows rather than restating the
+    // main tab's — a guard that compares a number to itself passes forever, and with correct
+    // input nothing else can tell the difference.
+    ok('A: the partition check counts the period tabs, not the main tab',
+      /const rows = periodCg\.reduce\(\(s, p\) => s \+ p\.em\.sellRows, 0\);/.test(reg));
+  }
+
+  // ── FIXTURE A2 — an EMPTY period is still written ─────────────────────────
+  // Skipping it keeps LAST year's figures standing under THIS year's heading, which is the one
+  // failure a reader of the tab cannot see. Same rule the intraday and listed tabs follow.
+  install([TE_HEADER,
+    te([2025, 7, 1], 'BETA MOTORS LIMITED', 'INE002A01018', 'Buy', 500, 200),
+    te([2025, 9, 15], 'BETA MOTORS LIMITED', 'INE002A01018', 'Sell', 200, 250)], [OPENING_A[0]]);
+  await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+  const emptyLt = written(LT_TAB);
+  ok('A2: the long-term tab is written with no long-term sales', !!emptyLt);
+  ok('A2: ...and says so rather than showing bare headers',
+    (emptyLt || []).some(r => r.join('|').includes(`No long term listed transactions in ${FY_LABEL}`)));
+  ok('A2: ...and carries no scrip block', !(emptyLt || []).some(r => r.join('|').includes('BETA MOTORS LIMITED')));
+  ok('A2: while the short-term tab has the block', (written(ST_TAB) || []).some(r => r.join('|').includes('BETA MOTORS LIMITED')));
+
   // ── FIXTURE B ─────────────────────────────────────────────────────────────
   install(FIXTURE_B, OPENING_B);
   await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
