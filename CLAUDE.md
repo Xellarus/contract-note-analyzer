@@ -40,7 +40,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `npx tsx tmp-shortcuts.ts` | Keyboard shortcuts: registry invariants, the typing/modifier guards driven through the real handler, and source checks that the App `run` switch and the `?` overlay match the registry, plus that `q` calls `goBack()` and never `history.back()` (44) |
 | `npx tsx tmp-rownav.ts` | Row/list navigation: the key mapping and its clamping, the keys it must NOT claim (**Tab above all** — claiming it would trap the user in the table), and per-consumer wiring checks incl. the one-hook-one-`containerRef` invariant (51) |
 | `npx tsx tmp-itr.ts` | The ITR **unlisted equity shares** schedule builder — layout, the row rule, blank-vs-zero in all four places, the per-row footing identity, acquisition grouping, the TOTAL row's column set, and the diagnostics. Most fixtures are REAL companies and REAL figures out of the owner's own filed FY2024-25 return, so it checks against a filed page rather than against its own idea of the answer (117) |
-| `npx tsx tmp-formula-view.ts` | The **formula twin** of each capital-gains tab, driving the pure builder directly - which cells become formulas and which must not, the paint mirrored from the filed tab with every ROW index shifted by the banner and no COLUMN index shifted, and that collect mode returns after the charge-conservation guard but before the first filed write. `ACQUISITION COST` is checked hard, because P/L reads `=SALE AMT - ACQUISITION COST` and a wrong cost moves a tax figure: every candidate acquisition rate is TRIED and only one reproducing the engine’s own `turnover - pnl` may be written, so the fixture is built with a sale whose cost comes from the SECOND opening line - a one-candidate fixture would prove nothing. Blank and textual rate cells are refused (they multiply to 0, stating a NIL cost) while a genuine ZERO-cost line still derives. A sale spanning SEVERAL lots is driven from the owner's real Anawil block, where the right and wrong answers are lakhs apart, and the SUM path is checked for footing to the sale quantity, mapping each lot to the row carrying ITS date, merging same-line terms, normalising float noise out of the quantities, and refusing a rate that is not the lot's own **even when the total agrees** — that last case is the only one where the tolerance is load-bearing, and without it a probe removing the tolerance came back SILENT. The emitter’s half - the per-block reset and the SNAPSHOT of the candidate list, that a SPLIT or corporate-action RESTATEMENT is a candidate while the CONTRA line is not, and that the FIFO match is captured PER BUCKET at `purPrice` - is asserted over comment-stripped SOURCE. Each fallback is BUCKETED (multi-lot / rounding / no rate) so the count is never an undifferentiated number. The EXPENSE pass is driven directly as a write LIST, which is the only way to assert the thing that matters most about it - that **no write targets the breakdown row**, because pointing it at the GRAND TOTAL row turns the cross-foot into a tautology that reads "ties" forever. Its fixture's charge columns are deliberately NON-CONTIGUOUS (the real layout leaves `exchClg` unwritten between SEBI and IPF) and a second case drives a REORDERED `chargeColsUsed`, because STT sits at index 1 in production so a positional read would test green everywhere while being one reorder from subtracting brokerage. The STATUTORY RATE path is driven both through the grid and as a write LIST, over a fixture whose charges really do obey the identities and whose sale deliberately carries the BSE exchange rate so a LATER candidate must be reached. Five of its probes came back SILENT first — side, segment, the GST base order, the plain-decimal rate and the no-turnover guard were all untested, because the ordinary fixture never reached them; each now has a case built on a COINCIDENCE (an intraday BUY whose STT equals the intraday sell rate, a delivery SELL whose STT equals it too) where the right and wrong answers are disjoint (194). All 59 probes fire, across three sweeps |
+| `npx tsx tmp-formula-view.ts` | The **formula twin** of each capital-gains tab, driving the pure builder directly - which cells become formulas and which must not, the paint mirrored from the filed tab with every ROW index shifted by the banner and no COLUMN index shifted, and that collect mode returns after the charge-conservation guard but before the first filed write. `ACQUISITION COST` is checked hard, because P/L reads `=SALE AMT - ACQUISITION COST` and a wrong cost moves a tax figure: every candidate acquisition rate is TRIED and only one reproducing the engine’s own `turnover - pnl` may be written, so the fixture is built with a sale whose cost comes from the SECOND opening line - a one-candidate fixture would prove nothing. Blank and textual rate cells are refused (they multiply to 0, stating a NIL cost) while a genuine ZERO-cost line still derives. A sale spanning SEVERAL lots is driven from the owner's real Anawil block, where the right and wrong answers are lakhs apart, and the SUM path is checked for footing to the sale quantity, mapping each lot to the row carrying ITS date, merging same-line terms, normalising float noise out of the quantities, and refusing a rate that is not the lot's own **even when the total agrees** — that last case is the only one where the tolerance is load-bearing, and without it a probe removing the tolerance came back SILENT. The emitter’s half - the per-block reset and the SNAPSHOT of the candidate list, that a SPLIT or corporate-action RESTATEMENT is a candidate while the CONTRA line is not, and that the FIFO match is captured PER BUCKET at `purPrice` - is asserted over comment-stripped SOURCE. Each fallback is BUCKETED (multi-lot / rounding / no rate) so the count is never an undifferentiated number. The EXPENSE pass is driven directly as a write LIST, which is the only way to assert the thing that matters most about it - that **no write targets the breakdown row**, because pointing it at the GRAND TOTAL row turns the cross-foot into a tautology that reads "ties" forever. Its fixture's charge columns are deliberately NON-CONTIGUOUS (the real layout leaves `exchClg` unwritten between SEBI and IPF) and a second case drives a REORDERED `chargeColsUsed`, because STT sits at index 1 in production so a positional read would test green everywhere while being one reorder from subtracting brokerage. The STATUTORY RATE path is driven both through the grid and as a write LIST, over a fixture whose charges really do obey the identities and whose sale deliberately carries the BSE exchange rate so a LATER candidate must be reached. Five of its probes came back SILENT first — side, segment, the GST base order, the plain-decimal rate and the no-turnover guard were all untested, because the ordinary fixture never reached them; each now has a case built on a COINCIDENCE (an intraday BUY whose STT equals the intraday sell rate, a delivery SELL whose STT equals it too) where the right and wrong answers are disjoint, and a GST figure only the WITHDRAWN two-halves shape could produce must NOT derive. WHY a charge kept its value is bucketed too (allocated / no rate / no turnover), because the two have opposite answers: a paise off a known rate is a figure the parser ALLOCATED from the note total and nothing can be done, while a charge near no rate is a gap in `CHARGE_RATES`. Both arms of that threshold have a case where the right and wrong answers are disjoint - 4 paise on a ₹1 SEBI fee is 4% (the relative arm alone calls it a missing rate) and ₹1 on a ₹30.70 exchange charge is 3.3% (the floor alone calls it drift, which is how a wrong RATE hides). One assertion pins `rows.length === values.length + BANNER_ROWS`, which is the only thing tying the banner the grid PUSHES to the constant the paint SHIFTS BY (209). All 70 probes fire, across four sweeps |
 | `npx tsx tmp-date-input.ts` | **Native input affordances that alter a figure behind the author's back** — nothing else in the repo can see any of it. Controlled `<input type="date">`: the lifecycle of `dateInputValue` (above all, that a HALF-TYPED date renders empty), the SIX-DIGIT-YEAR guard, and a source sweep over comment-stripped source asserting that no date input falls back to a non-empty `value`, that every one of them carries a `max` and an `isDateInputSane` guard, and that a zero price or amount is saveable but warned about. Section F covers `<input type="number">`: that BOTH halves of the spinner removal are in `index.css` (webkit pseudo-element and Firefox `appearance`), that the rule is UNLAYERED, that no component re-declares it as an arbitrary variant, and the whole wheel guard — passive, blur-not-preventDefault, focused-element-only, and zero `onBlur` on any number input (50) |
 | `npx tsx tmp-price-asof.ts` | **Pricing a PAST position** — `priceAsOf` driven directly over a hand-built grid whose 31-March is deliberately a holiday: the session lookup, the bounded carry at exactly its boundary, a date before the grid (unpriced, never the grid's first close) and one after it (clamps, correctly), and `null`-never-0. Plus a source sweep over comment-stripped source for the wiring `tsc` cannot see — that the report prices at its OWN date and never `Date.now()`, that unlisted is tested with `classOfEntryAsOf` rather than a raw `assetClass` read, that no cell takes a zero fallback, that `computeHoldingsAsOf` still does NOT read the price grid, and that every reason a cell is blank is disclosed, that the SCREEN renders the same disclosure the file carries, that the gap-filling backfill MERGES rather than rebuilding, and that the display-only transfer marker reaches no engine (82). All 44 probes fire |
 | `node tmp-gs-refcheck.mjs` | **Does every helper the `.gs` calls actually exist in it.** `node --check` validates SYNTAX only, so a patch that deletes a declaration while leaving its callers passes cleanly and throws `ReferenceError` on the live sheet — where the symptom is a probe returning nothing, a paste-deploy-run round trip away. Exactly what happened twice on 24-Sep-2026: a range replacement took `BSE_HEADERS_` out with the function above it, and a second took both editor-runnable wrappers. Scans TOP-LEVEL declarations only, which is the real Apps Script global scope |
@@ -2250,9 +2250,90 @@ re-checked — the verifiers corrected the *caveats*, not a single rate or date)
 | STT, ETF unit | 0.001% sell | a hundredth of the share rate; listed so an ETF is not missed by 100× |
 | Stamp duty | 0.015% delivery / 0.003% intraday, **BUY only** | collected from the buyer, s.9A(1)(a); a sale row never derives one |
 | SEBI turnover fee | ₹10/crore each side | unchanged since 2019 |
-| Exchange charges | NSE ₹307/cr (Oct-24), ₹306.99 (Mar-26), ₹325 (before); BSE ₹375/cr A-B, ₹275/cr M | **the row does not say which exchange** |
+| Exchange charges | NSE **₹297/cr** (Oct-24, IPFT billed separately) or ₹307/cr (the two merged), ₹306.99 (Mar-26), ₹325 (before); BSE ₹375/cr A-B, ₹275/cr M | **the row does not say which exchange** |
 | NSE IPFT | ₹10/crore, then ₹0.01/crore from Mar-2026 | BSE levies none as a note line |
-| GST | 18% of a **charge base**, never of turnover | base = brokerage + ETC + SEBI (+ clearing); STT and stamp duty sit OUTSIDE it |
+| GST | 18% of a **charge base**, never of turnover | base = brokerage + ETC + SEBI (+ clearing); STT and stamp duty sit OUTSIDE it. **ONE shape** — a second was tried and withdrawn, see below |
+
+**THE INCONSISTENCY DOWN A COLUMN IS THE DATA, NOT THE BUILDER** (26-Oct-2026, reported as *"when
+it came to ET charges, formula filled cells were inconsistent — a few had formulas and a few
+didn't. GST also has same issue. And even in some entries gst, et, ipf and sebi charges weren't
+formulated as well"*). Three separate causes, and the third is the one worth internalising.
+
+1. **A GENUINELY MISSING RATE — the only one that was a bug.** From 01-Oct-2024 NSE bills
+   **₹2.97 per lakh = ₹297/crore** with IPFT as its OWN line; the table carried only the ₹307
+   COMBINED figure, which is right only where a broker merges the two. So no NSE row could derive
+   between Oct-2024 and Feb-2026 — half of FY2024-25 and the whole of FY2025-26 — while BSE rows
+   at ₹375 derived normally. Inconsistency split by **exchange**. ₹297 is now the FIRST candidate
+   and ₹307 stays after it; this ADDS a candidate rather than replacing one, and the suite pins
+   both.
+2. **GST — A SECOND SHAPE WAS TRIED AND WITHDRAWN THE NEXT DAY, and the withdrawal is the lesson.**
+   The reasoning was sound: an intra-state note levies CGST and SGST at **9% each**, every parser
+   allocates those two totals SEPARATELY with each rounded to paise, and the ledger's single
+   `IGST` column receives their sum — so the broker's figure is `round(9%) + round(9%)` where a
+   single `round(18%)` rounds once. `=2*ROUND(0.09*(base),2)` was added beside
+   `=ROUND(0.18*(base),2)`.
+
+   **It is gone, on one measured fact: those two shapes NEVER differ by more than a single paise**
+   (400,000 bases checked; the worst case is exactly 0.01). So the second could only ever rescue a
+   row EXACTLY ONE PAISE off the first — which is the signature of an ALLOCATED charge, cause (3)
+   below and the dominant cause of every miss on the tab. It was **the one-paise tolerance this
+   design refuses, wearing a formula's clothes**, and nothing on the tab can tell the two readings
+   apart.
+
+   It showed itself the way these things do — the owner saw `=2*ROUND(0.09*(Q75+T75+W75),2)`
+   sitting directly beneath `=ROUND(0.18*(Q74+T74+W74),2)` and called it *"an odd ball"*. Two
+   adjacent rows of one block, almost certainly one broker, described as billing two different
+   ways. **Intra-state billing is a property of the BROKER**, constant across a note and across
+   the book; it cannot be true of row 75 and false of row 74, so deciding it per row off a
+   one-paise difference is a coin flip dressed as a determination. This is the ACQUISITION COST
+   rule from another side: a formula that reaches the right total by the wrong route teaches the
+   reader something untrue, and is refused **even when the total agrees**. If a note is ever
+   confirmed to bill CGST+SGST the shape goes back as a per-TAB decision, never a per-cell one.
+3. **NO PARSER COMPUTES A PER-TRADE CHARGE — every one of them ALLOCATES**, and this is why most
+   cells cannot derive and never will. `allocate(summary.etc, ratios)` and its siblings take the
+   note's one PRINTED TOTAL, pro-rate it across that note's trades, round each share to paise, and
+   push the whole residual onto **one row — the same row for every charge**, since they share an
+   index. So a note's last row commonly has GST, ET, IPF **and** SEBI all missing together, which
+   is exactly the third symptom reported. The rest are a paise-level coin flip. Two more layers
+   sit on top, both register-side: `addCharges` SUMS a date's fills into one printed row, and
+   `scaleCharges` SPLITS one sale's charges across its short- and long-term rows by quantity
+   fraction, unrounded. **The SUM ties at every level and the individual cells cannot.**
+
+**A TOLERANCE WAS REFUSED TWICE — once head-on, once in disguise — and that is the whole safety
+argument.** An allocated figure genuinely
+is not `rate × this row's turnover`; writing that formula would put a number on the page the
+filed tab does not hold, in the column the EXPENSES total foots to. The parsers were not touched
+either — the owner's standing constraint from 23-Oct-2026 (*"dont make the change in parser"*)
+still holds, and allocation is anchored on the note's printed total, which is correct.
+
+**So the answer is to SAY which kind of miss each cell was**, the same treatment `acqSpanned` /
+`acqRounding` / `acqNoRate` already gets, and for the same reason — this file already records
+that guessing between those buckets cost two rounds:
+
+- **`chargeNearMiss`** — a known rate is clearly the right one and the figure is a paise or two
+  off it. ALLOCATED, expected, nothing to fix. Normally the large bucket.
+- **`chargeNoRate`** — no known rate is anywhere near. **The only actionable bucket**, and fixable
+  in one place: `CHARGE_RATES`. This is what the ₹297 gap would have looked like on the badge.
+- **`chargeNoTurnover`** — the row carries a charge but no positive turnover, so nothing was even
+  attempted. Counted ONLY where the row really carries a charge; a blank row is an ordinary blank
+  and listing those trains the owner to ignore the number.
+- **`chargeMissBy`** names the charge each miss came from, so *"ET is inconsistent"* is a fact on
+  the badge rather than something to be noticed by eye on a tab.
+
+**The threshold is RELATIVE with an absolute FLOOR** (`max(5 paise, 1%)`) and both arms are
+load-bearing, each with its own probe. 4 paise on a ₹1.00 SEBI fee is 4%, so the relative arm
+alone calls it a missing rate — and this book is full of charges that small. A rupee on a ₹30.70
+exchange charge is 3.3%, so the floor alone calls it drift — which is precisely how a wrong RATE
+hides. It measures the CLOSEST candidate, never the first, for the same reason `acquisitionMiss`
+does.
+
+**And the tab says it too**, in a third banner line: a charge cell shows its rate only where that
+rate reproduces the broker's own figure, so one column deriving on some rows and not others is
+EXPECTED. **`BANNER_ROWS` moved 3 → 4 with it**, and that constant is what the paint shifts every
+band by — add a line without moving it and every colour band sits a row off the values it
+describes, which reads as a rendering quirk rather than a bug.
+`rows.length === values.length + BANNER_ROWS` is the one assertion tying the two together, and the
+suite's own banner offsets were switched from a hardcoded `3` to the constant.
 
 - **STT MOSTLY CANNOT DERIVE, AND THAT IS THE CORRECT ANSWER.** Rule 4 of the STT Rules 2004
   rounds it to the **nearest rupee** — which is this repo's documented Share India 20-paise
@@ -2285,11 +2366,13 @@ re-checked — the verifiers corrected the *caveats*, not a single rate or date)
 - **Candidate ORDER is load-bearing and the first is never taken on faith.** The suite's sale row
   carries the BSE exchange rate, so NSE's is tried and rejected first.
 
-`npx tsx tmp-formula-view.ts` (58 → 99 → 138 → 166 → **194**) drives the pure builder directly — a
-synthetic fixture is sharper here than a real tab, the same reason `tmp-recon-run.mjs` does, and
-the multi-lot fixture is the owner's real block to the rupee. All 59 probes fire, across three
-sweeps (acquisition 29, expenses 14, rates 16). **Five of the rate probes were SILENT on their
-first run** and each named a real untested path; the fixtures that reach them are listed above.
+`npx tsx tmp-formula-view.ts` (58 → 99 → 138 → 166 → 194 → **212**) drives the pure builder
+directly — a synthetic fixture is sharper here than a real tab, the same reason `tmp-recon-run.mjs`
+does, and the multi-lot fixture is the owner's real block to the rupee. All 70 probes fire, across
+four sweeps (acquisition 29, expenses 14, rates 16, misses-and-banner 11, the last of which puts
+the withdrawn GST shape BACK and confirms the tab refuses it). **Five of the rate
+probes were SILENT on their first run** and each named a real untested path; the fixtures that
+reach them are listed above.
 
 **A fixture cast to `as any` hid an entire feature behind a green suite** (found on the way here).
 When `matched` was briefly a required field on `saleRows`, the fixture simply did not have it —

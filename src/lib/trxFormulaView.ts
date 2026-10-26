@@ -146,6 +146,24 @@ export interface FormulaViewResult {
   chargeDerived: number;
   chargeAttempted: number;
   chargeDerivedBy: Record<string, number>;
+  /**
+   * WHY the rest kept their value, which is the half that tells you whether to act.
+   *
+   * `chargeNearMiss` - a known rate is clearly the right one and the figure is a paise or two
+   * off it, because the broker ALLOCATED the note's total across its trades rather than
+   * computing each row. Expected, and nothing can be done: the formula would state a number the
+   * filed tab does not hold. This is normally the large bucket.
+   * `chargeNoRate` - no known rate is anywhere near, so the rate table is missing one (or it is
+   * brokerage/demat, which are never attempted). The ONLY actionable bucket, and fixable in one
+   * place - `CHARGE_RATES` in `trxFormulaGrid.ts`.
+   * `chargeNoTurnover` - the row carries charges but no positive turnover to apply a rate to.
+   * `chargeMissBy` - which charge each miss came from, so "ET is inconsistent" is a fact on the
+   * badge rather than something that has to be noticed by eye on the tab.
+   */
+  chargeNearMiss: number;
+  chargeNoRate: number;
+  chargeNoTurnover: number;
+  chargeMissBy: Record<string, number>;
   /** Did the colour bands land? Values are written either way. */
   painted: boolean;
 }
@@ -174,7 +192,9 @@ export async function generateFormulaView(
   const tabs: string[] = [];
   let formulaCells = 0, salesDerived = 0, acqDerived = 0, acqSummed = 0, acqAsValue = 0, expenseRowsTotalled = 0;
   let chargeDerived = 0, chargeAttempted = 0;
+  let chargeNearMiss = 0, chargeNoRate = 0, chargeNoTurnover = 0;
   const chargeDerivedBy: Record<string, number> = {};
+  const chargeMissBy: Record<string, number> = {};
   let acqSpanned = 0, acqRounding = 0, acqNoRate = 0;
 
   const titles = collected.map(c => c.tab + FORMULA_TAB_SUFFIX);
@@ -202,7 +222,8 @@ export async function generateFormulaView(
     const { rows, formulaCells: n, acqDerived: ad, acqSummed: asu, acqAsValue: av,
             acqSpanned: asp, acqRounding: aro, acqNoRate: anr,
             expenseRowsTotalled: ert, chargeDerived: cd, chargeAttempted: ca,
-            chargeDerivedBy: cdb } = buildFormulaGrid(src);
+            chargeDerivedBy: cdb, chargeNearMiss: cnm, chargeNoRate: cnr,
+            chargeNoTurnover: cnt, chargeMissBy: cmb } = buildFormulaGrid(src);
     // A:Z is narrower than the twin (the added column can land at Z+1), so clear by the grid's
     // own width rather than a constant - a stale column from a previous, wider run would
     // otherwise sit beside live figures.
@@ -222,6 +243,8 @@ export async function generateFormulaView(
     acqDerived += ad; acqSummed += asu; acqAsValue += av; expenseRowsTotalled += ert;
     chargeDerived += cd; chargeAttempted += ca;
     for (const k of Object.keys(cdb)) chargeDerivedBy[k] = (chargeDerivedBy[k] || 0) + cdb[k];
+    chargeNearMiss += cnm; chargeNoRate += cnr; chargeNoTurnover += cnt;
+    for (const k of Object.keys(cmb)) chargeMissBy[k] = (chargeMissBy[k] || 0) + cmb[k];
     acqSpanned += asp; acqRounding += aro; acqNoRate += anr;
 
     const sheetId = idByTitle.get(tab.trim().toLowerCase());
@@ -245,5 +268,6 @@ export async function generateFormulaView(
 
   return { tabs, formulaCells, fyLabel: res.fyLabel, salesDerived, acqDerived, acqSummed,
            acqAsValue, acqSpanned, acqRounding, acqNoRate, expenseRowsTotalled,
-           chargeDerived, chargeAttempted, chargeDerivedBy, painted };
+           chargeDerived, chargeAttempted, chargeDerivedBy,
+           chargeNearMiss, chargeNoRate, chargeNoTurnover, chargeMissBy, painted };
 }

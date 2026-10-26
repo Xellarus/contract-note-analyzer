@@ -286,22 +286,22 @@ console.log("\n-- the added column -----------------------------------------");
   // APPENDED, never inserted. Every index in `derive` was recorded against the FILED layout, so
   // inserting mid-grid would shift them all and re-point every formula one column over - a grid
   // that still looks right and reads the wrong cell.
-  eq("ACQUISITION COST is appended at the original width", rows[2 + 3][WIDTH], "ACQUISITION COST");
-  eq("...so the P/L column is untouched in the header", rows[2 + 3][9], "SHORT");
-  eq("...and so is the charge header", rows[2 + 3][11], "BROK");
+  eq("ACQUISITION COST is appended at the original width", rows[2 + BANNER_ROWS][WIDTH], "ACQUISITION COST");
+  eq("...so the P/L column is untouched in the header", rows[2 + BANNER_ROWS][9], "SHORT");
+  eq("...and so is the charge header", rows[2 + BANNER_ROWS][11], "BROK");
 }
 
 console.log("\n-- the per-sale gain ----------------------------------------");
 {
   const { rows, formulaCells } = buildFormulaGrid(src() as any);
-  const B = 3;
+  const B = BANNER_ROWS;
   // ACQUISITION COST = sale qty x the rate it was acquired at, both of them cells on this tab.
   // G10 is the ST sale's own quantity; D7 is the FIRST opening line's rate.
-  eq("acquisition cost is qty x the acquisition rate (ST)", rows[6 + B][WIDTH], "=ROUND(G10*D7,2)");
+  eq("acquisition cost is qty x the acquisition rate (ST)", rows[6 + B][WIDTH], "=ROUND(G11*D8,2)");
   // THE ONE THAT MATTERS: this sale's cost comes from the SECOND opening line, so the builder
   // must have tried the first, found it did not reproduce the engine, and moved on.
   eq("...and the SECOND candidate is reached when the first does not fit (LT)",
-     rows[7 + B][WIDTH], "=ROUND(G11*D8,2)");
+     rows[7 + B][WIDTH], "=ROUND(G12*D9,2)");
   // THE VERIFIER MUST MULTIPLY BY WHAT THE CELL EVALUATES TO, NOT BY WHAT IT PRINTS. D7 becomes
   // `=F7/D7` further down this same builder, so Sheets multiplies by 250.0000003 — and at 20,000
   // shares that is a PAISE away from the printed 250. These two lines are the fixture proving the
@@ -314,9 +314,9 @@ console.log("\n-- the per-sale gain ----------------------------------------");
   // Both inputs on the SAME row. The filed layout cannot express this: FIFO matches a sale
   // against lots spread over the purchase rows above, so the purchase row BESIDE a sale is not
   // the lot it consumed and `=saleAmt - purchaseAmt` across adjacent rows would be wrong.
-  eq("the ST gain is a formula over its own row", rows[6 + B][9], "=I10-N10");
-  eq("the LT gain is a formula over its own row", rows[7 + B][10], "=I11-N11");
-  ok("the row refs account for the banner", /10$/.test(rows[6 + B][9]) && /11$/.test(rows[7 + B][10]));
+  eq("the ST gain is a formula over its own row", rows[6 + B][9], "=I11-N11");
+  eq("the LT gain is a formula over its own row", rows[7 + B][10], "=I12-N12");
+  ok("the row refs account for the banner", /11$/.test(rows[6 + B][9]) && /12$/.test(rows[7 + B][10]));
   // 4 rates + 2 gains + 2 acquisition costs + 2 P/L totals + 2 charge totals + the acquisition
   // column total + 2 expense column totals + 2 rows x (EXPENSES, EX-STT) + the footer Total,
   // its ex-STT companion and the cross-foot
@@ -378,7 +378,7 @@ console.log("\n-- a refused derivation keeps the VALUE, and is COUNTED ------");
   S.derive.saleRows[0].pnl = 18000;        // engine cost 28,000 — neither 250 nor 64.291613 x 100
   S.derive.saleRows[1].acqCands = [];      // and one with nothing to point at
   const { rows, acqDerived, acqAsValue } = buildFormulaGrid(S);
-  const B = 3;
+  const B = BANNER_ROWS;
   eq("a refused row keeps the engine's exact value (ST)", rows[6 + B][WIDTH], 9182000);
   eq("a row with no candidates keeps it too (LT)", rows[7 + B][WIDTH], 3214.58);
   eq("nothing was derived", acqDerived, 0);
@@ -386,7 +386,7 @@ console.log("\n-- a refused derivation keeps the VALUE, and is COUNTED ------");
   // derived is the failure this count exists to prevent.
   eq("...and both fallbacks are counted", acqAsValue, 2);
   // The P/L formula is written either way — it reads the ACQUISITION COST cell, whatever is in it.
-  eq("the gain still reads its own row", rows[6 + B][9], "=I10-N10");
+  eq("the gain still reads its own row", rows[6 + B][9], "=I11-N11");
 }
 
 console.log("\n-- a fallback SAYS WHICH KIND of fallback it is -------------");
@@ -485,17 +485,17 @@ console.log("\n-- a derived run reports itself ------------------------------");
 console.log("\n-- A SALE SPANNING LOTS IS A SUM, NOT A FALLBACK -------------");
 {
   const { rows, acqDerived, acqSummed, acqAsValue, acqSpanned } = buildFormulaGrid(srcSpan() as any);
-  const B = 3;
+  const B = BANNER_ROWS;
   // One term per lot. The QUANTITIES are literals because 3,600 and 4,400 are stated on no row —
   // the sale row says 8,000 and the purchase rows say 40,000 and 20,000 — while every RATE is a
   // cell, so it is referenced. D7 is the 12-Aug line, D8 the 11-Sep one.
-  eq("a two-lot sale reads as the sum it is", rows[5 + B][WIDTH], "=ROUND(3600*D7+4400*D8,2)");
+  eq("a two-lot sale reads as the sum it is", rows[5 + B][WIDTH], "=ROUND(3600*D8+4400*D9,2)");
   eq("...and it is counted as a sum, not a derivation", acqSummed, 1);
   eq("...so no single rate was credited", acqDerived, 0);
   eq("...and nothing fell back", acqAsValue, 0);
   eq("...so the multi-lot bucket is empty", acqSpanned, 0);
   // The P/L still reads its own row, whatever shape the cost cell took.
-  eq("the gain reads the summed cost", rows[5 + B][9], "=I9-N9");
+  eq("the gain reads the summed cost", rows[5 + B][9], "=I10-N10");
 
   // THE SUM MUST MULTIPLY BY WHAT THE RATE CELL EVALUATES TO, not by what it prints. Every rate
   // cell on the twin becomes `=AMOUNT/QTY`, so Sheets uses the full-precision quotient — the
@@ -507,7 +507,7 @@ console.log("\n-- A SALE SPANNING LOTS IS A SUM, NOT A FALLBACK -------------");
   live.derive.saleRows[0].pnl = 867601.19;
   live.derive.saleRows[0].matched[0].rate = 380.5780025;
   const b3 = buildFormulaGrid(live);
-  eq("the sum multiplies by the LIVE rate, not the printed one", b3.rows[5 + B][WIDTH], "=ROUND(3600*D7+4400*D8,2)");
+  eq("the sum multiplies by the LIVE rate, not the printed one", b3.rows[5 + B][WIDTH], "=ROUND(3600*D8+4400*D9,2)");
   eq("...and really did derive at the paise the engine reported", b3.acqSummed, 1);
 
   // WITHOUT the match the very same block has to fall back — which is what proves the sum is
@@ -611,7 +611,7 @@ console.log("\n-- the sum is VERIFIED, and refuses rather than guesses ------");
 console.log("\n-- THE EXPENSE SIDE SHOWS ITS OWN WORKING --------------------");
 {
   const { rows } = buildFormulaGrid(srcCharged() as any);
-  const B = 3;
+  const B = BANNER_ROWS;
   const EXP = W2 + 1, DED = W2 + 2;   // appended AFTER acquisition cost, never between
   eq("EXPENSES is appended past ACQUISITION COST", rows[2 + B][EXP], "EXPENSES");
   eq("...and the ex-STT companion past that", rows[2 + B][DED], "EXPENSES EX-STT");
@@ -619,19 +619,19 @@ console.log("\n-- THE EXPENSE SIDE SHOWS ITS OWN WORKING --------------------");
 
   // NON-CONTIGUOUS. The real layout leaves `COL.exchClg` unwritten between SEBI and IPF, so a
   // `first:last` range would total a headed column carrying nothing.
-  eq("a PURCHASE row totals its charge cells", rows[4 + B][EXP], "=SUM(O8,Q8)");
-  eq("a SALE row totals its charge cells too", rows[5 + B][EXP], "=SUM(O9,Q9)");
+  eq("a PURCHASE row totals its charge cells", rows[4 + B][EXP], "=SUM(O9,Q9)");
+  eq("a SALE row totals its charge cells too", rows[5 + B][EXP], "=SUM(O10,Q10)");
   // Subtracted from the cell beside it, so the two can differ by EXACTLY the STT cell and by
   // nothing else. Re-summing seven columns here invites a second definition that could drift.
-  eq("ex-STT is the total MINUS the STT cell", rows[5 + B][DED], "=S9-Q9");
-  eq("...on the purchase row as well", rows[4 + B][DED], "=S8-Q8");
+  eq("ex-STT is the total MINUS the STT cell", rows[5 + B][DED], "=S10-Q10");
+  eq("...on the purchase row as well", rows[4 + B][DED], "=S9-Q9");
   // A row with no charge block is left alone — `=SUM()` over blanks prints a confident 0.00
   // under a heading, which reads as "this row cost nothing" rather than "this row has no charges".
   ok("an opening date-line gets no expense total", typeof rows[3 + B][EXP] !== "string");
 
   // The footer `Total` is today a bare number with no stated relationship to the figures above.
-  eq("the footer Total sums the breakdown", rows[8 + B][14], "=SUM(O11,Q11)");
-  eq("...and its ex-STT companion", rows[8 + B][DED], "=O12-Q11");
+  eq("the footer Total sums the breakdown", rows[8 + B][14], "=SUM(O12,Q12)");
+  eq("...and its ex-STT companion", rows[8 + B][DED], "=O13-Q12");
 
   // THE BREAKDOWN ROW MUST STAY VALUES. This is the whole reason the cross-foot means anything:
   // point it at the GRAND TOTAL row and both sides reduce to one set of cells, so the check
@@ -641,11 +641,11 @@ console.log("\n-- THE EXPENSE SIDE SHOWS ITS OWN WORKING --------------------");
 
   // The cross-foot, stated ON the sheet, naming the difference rather than just failing.
   eq("the cross-foot compares the two routes to one total", rows[8 + B][EXP],
-     '=IF(ROUND(O12-S10,2)=0,"ties to the rows above","DIFFERS by "&TEXT(ROUND(O12-S10,2),"0.00"))');
+     '=IF(ROUND(O13-S11,2)=0,"ties to the rows above","DIFFERS by "&TEXT(ROUND(O13-S11,2),"0.00"))');
 
   // Both halves must reach the GRAND TOTAL row or the cross-foot has nothing to read.
-  eq("the EXPENSES column is totalled", rows[6 + B][EXP], "=SUM(S7:S9)");
-  eq("...and the ex-STT column", rows[6 + B][DED], "=SUM(T7:T9)");
+  eq("the EXPENSES column is totalled", rows[6 + B][EXP], "=SUM(S8:S10)");
+  eq("...and the ex-STT column", rows[6 + B][DED], "=SUM(T8:T10)");
 
   // NOTHING NETS EXPENSES AGAINST A GAIN. s.48, and gains here are charge-free turnover. The
   // columns sit beside a P/L column, which already invites the misreading; a reference would
@@ -698,24 +698,24 @@ console.log("\n-- the expense pass is DRIVEN DIRECTLY -----------------------");
 console.log("\n-- A STATUTORY RATE IS A CANDIDATE, NEVER AN ASSERTION -------");
 {
   const { rows, chargeDerived, chargeDerivedBy } = buildFormulaGrid(srcRates() as any);
-  const B = 3;
+  const B = BANNER_ROWS;
   // Purchase row r3 -> sheet row 7; its turnover is in column I.
-  eq("delivery STT on a BUY is 0.1% of turnover", rows[3 + B][15], "=ROUND(0.001*I7,2)");
-  eq("stamp duty on a BUY is 0.015%", rows[3 + B][18], "=ROUND(0.00015*I7,2)");
-  eq("the SEBI turnover fee is Rs 10 per crore", rows[3 + B][19], "=ROUND(0.000001*I7,2)");
-  eq("the NSE exchange charge is Rs 307 per crore", rows[3 + B][17], "=ROUND(0.0000307*I7,2)");
+  eq("delivery STT on a BUY is 0.1% of turnover", rows[3 + B][15], "=ROUND(0.001*I8,2)");
+  eq("stamp duty on a BUY is 0.015%", rows[3 + B][18], "=ROUND(0.00015*I8,2)");
+  eq("the SEBI turnover fee is Rs 10 per crore", rows[3 + B][19], "=ROUND(0.000001*I8,2)");
+  eq("the NSE exchange charge is Rs 307 per crore", rows[3 + B][17], "=ROUND(0.0000307*I8,2)");
   // GST is 18% of a CHARGE BASE, never of turnover, and STT and stamp duty sit OUTSIDE it.
-  eq("GST is 18% of brokerage + ETC + SEBI", rows[3 + B][16], "=ROUND(0.18*(O7+R7+T7),2)");
+  eq("GST is 18% of brokerage + ETC + SEBI", rows[3 + B][16], "=ROUND(0.18*(O8+R8+T8),2)");
   // BROKERAGE has no statutory identity — a plan is whatever it is, and a formula there would be
   // numerology that happened to foot.
   eq("brokerage is never attempted", rows[3 + B][14], 500);
 
   // Sale row r4 -> sheet row 8, turnover in column M.
-  eq("delivery STT on a SELL is 0.1% too", rows[4 + B][15], "=ROUND(0.001*M8,2)");
+  eq("delivery STT on a SELL is 0.1% too", rows[4 + B][15], "=ROUND(0.001*M9,2)");
   // THE FIRST CANDIDATE IS NEVER TAKEN ON FAITH. NSE's Rs 307/crore gives 61.40 here; the figure
   // is the BSE A/B rate, so a later candidate has to be reached — and the row does not record
   // which exchange it traded on, which is exactly why every rate is offered and verified.
-  eq("a LATER exchange-charge candidate is reached", rows[4 + B][17], "=ROUND(0.0000375*M8,2)");
+  eq("a LATER exchange-charge candidate is reached", rows[4 + B][17], "=ROUND(0.0000375*M9,2)");
   // There is no sell-side stamp duty on an exchange trade (collected from the buyer, s.9A(1)(a)),
   // and the cell is BLANK — turning it into 0.00 would assert a levy that does not exist.
   ok("a blank charge cell is never written", !String(rows[4 + B][18]).startsWith("="));
@@ -735,7 +735,7 @@ console.log("\n-- A STATUTORY RATE IS A CANDIDATE, NEVER AN ASSERTION -------");
   rupee.values[4][12] = 804;          // turnover 804 -> 0.1% = 0.804
   rupee.values[4][15] = 1;            // ...settled to the rupee
   rupee.derive.saleRows[0].turnover = 804;
-  eq("a rupee-settled STT derives with ROUND(...,0)", buildFormulaGrid(rupee).rows[4 + B][15], "=ROUND(0.001*M8,0)");
+  eq("a rupee-settled STT derives with ROUND(...,0)", buildFormulaGrid(rupee).rows[4 + B][15], "=ROUND(0.001*M9,0)");
 
   // AND A CHARGE NO RATE REPRODUCES KEEPS ITS VALUE. On a scrip with several fills in one day the
   // per-trade STT is an ALLOCATION off a rounded day-aggregate (which is why `allocateStt` exists),
@@ -812,6 +812,125 @@ console.log("\n-- the rate table is DATA, and it is tried in order ----------");
   noTurnover.values[4][15] = 0;
   ok("a row with no turnover is skipped entirely",
      !chargeIdentityFormulas(noTurnover, ref).writes.some(w => w.r === 4));
+
+  // ── THE RATE THAT WAS MISSING ────────────────────────────────────────────────────────────
+  //
+  // Reported 26-Oct-2026 as "when it came to ET charges, formula filled cells were inconsistent
+  // - a few had formulas and a few didn't". From 01-Oct-2024 NSE bills Rs 2.97 per LAKH =
+  // Rs 297/crore with IPFT as its OWN line; the table carried only the Rs 307 COMBINED figure,
+  // which is right only where a broker merges the two. So every NSE row between Oct-2024 and
+  // Feb-2026 - half of FY2024-25 and the whole of FY2025-26 - could never derive, while BSE
+  // rows at Rs 375 derived normally. Inconsistency split by EXCHANGE, not by anything random.
+  const nse297 = srcRates() as any;
+  nse297.values[3][17] = 29.7;         // Rs 297/crore of 10,00,000
+  nse297.values[3][16] = "";           // GST reads ET; blank it so only ET is in question here
+  const n297 = chargeIdentityFormulas(nse297, ref);
+  const etW = n297.writes.find(w => w.r === 3 && w.c === 17);
+  eq("the standalone NSE Rs 297/crore rate derives", etW && etW.f, "=ROUND(0.0000297*I7,2)");
+  // The shape that makes it RIGHT rather than a coincidence: a note printing the two lines
+  // separately derives BOTH, ET at 297 and IPFT at its own Rs 10/crore.
+  ok("...with IPFT deriving separately on the same row",
+     n297.writes.some(w => w.r === 3 && w.c === 21));
+  // The combined figure must still derive - this ADDS a candidate, it does not replace one.
+  const combined = srcRates() as any;
+  combined.values[3][16] = "";
+  const cmbW = chargeIdentityFormulas(combined, ref).writes.find(w => w.r === 3 && w.c === 17);
+  eq("...and the Rs 307 combined rate still does too", cmbW && cmbW.f, "=ROUND(0.0000307*I7,2)");
+
+  // ────────────────────────────────────────── GST HAS ONE SHAPE, AND THE SECOND WAS WITHDRAWN ──────────────────────────────────────────
+  //
+  // Base = brokerage 500 + ETC 30.70 + SEBI 1 = 531.70. One 18% levy rounds ONCE to 95.71; CGST
+  // and SGST at 9% each, rounded on their own, give 47.85 + 47.85 = 95.70. That second shape was
+  // offered for one day and withdrawn on a MEASURED fact: the two never differ by more than a
+  // single paise (400,000 bases checked, worst case exactly 0.01), so it could only ever rescue
+  // a row EXACTLY ONE PAISE off - which is the signature of an ALLOCATED charge, not of a
+  // different levy. Reported by the owner as an odd ball sitting directly beneath its neighbour
+  // on one block of one broker, which is the tell: intra-state billing is a property of the
+  // BROKER and cannot be true of row 75 and false of row 74.
+  //
+  // So 95.70 keeps its value and is called what it is.
+  const splitGst = srcRates() as any;
+  splitGst.values[3][16] = 95.7;
+  const sgR = chargeIdentityFormulas(splitGst, ref);
+  ok("a GST figure only two 9% halves could produce is NOT derived",
+     !sgR.writes.some(w => w.r === 3 && w.c === 16));
+  eq("...it is bucketed as allocation drift instead", [sgR.nearMiss, sgR.noRate].join("/"), "1/0");
+  eq("...and the bucket names GST", sgR.missBy.gst, 1);
+  // The surviving shape must still derive where it genuinely reproduces the figure, or this is a
+  // removal that quietly took the whole identity with it.
+  const oneGst = chargeIdentityFormulas(srcRates() as any, ref).writes.find(w => w.r === 3 && w.c === 16);
+  eq("...while a single 18% levy still derives",
+     oneGst && oneGst.f, "=ROUND(0.18*(O7+R7+T7),2)");
+
+  // ── WHICH KIND OF MISS ───────────────────────────────────────────────────────────────────
+  //
+  // "41 of 300 derived" is an undifferentiated number and the two reasons behind it have
+  // OPPOSITE answers: a charge a paise off a known rate was ALLOCATED by the parser from the
+  // note's one printed total and nothing can be done, while a charge nowhere near any rate means
+  // the table above is missing one. Guessing between those cost two rounds on ACQUISITION COST.
+  // GST is blanked throughout so the bucket under test is the only thing that can move.
+  const bucketSrc = () => {
+    const x = srcRates() as any;
+    x.values[3][16] = ""; x.values[4][16] = "";
+    return x;
+  };
+  eq("the fixture derives everything before it is broken", chargeIdentityFormulas(bucketSrc(), ref).nearMiss, 0);
+
+  const paise = bucketSrc();
+  paise.values[3][19] = 1.04;          // SEBI at Rs 10/crore is exactly 1.00
+  const pb = chargeIdentityFormulas(paise, ref);
+  eq("4 paise off a known rate is ALLOCATED, not a missing rate", [pb.nearMiss, pb.noRate].join("/"), "1/0");
+  eq("...and the bucket names the charge it came from", pb.missBy.sebi, 1);
+
+  const wrong = bucketSrc();
+  wrong.values[3][19] = 1.2;           // 20% out - no rate in the table is anywhere near
+  const wb = chargeIdentityFormulas(wrong, ref);
+  eq("a charge nowhere near any rate is NO RATE", [wb.nearMiss, wb.noRate].join("/"), "0/1");
+
+  // THE THRESHOLD IS RELATIVE WITH AN ABSOLUTE FLOOR, and both arms are load-bearing. 4 paise on
+  // a Rs 1.00 SEBI fee is 4% - the relative arm alone would call it a missing rate, and the FY26
+  // register is full of charges that small. A rupee on a Rs 30.70 exchange charge is 3.3% - the
+  // floor alone would call it allocation drift, which is exactly how a wrong RATE hides.
+  const bigGap = bucketSrc();
+  bigGap.values[3][17] = 31.7;         // Rs 1.00 off; nearest candidate is Rs 307/crore = 30.70
+  const bg = chargeIdentityFormulas(bigGap, ref);
+  eq("a rupee off a Rs 30.70 charge is a RATE mismatch, not drift", [bg.nearMiss, bg.noRate].join("/"), "0/1");
+  const smallGap = bucketSrc();
+  smallGap.values[3][17] = 30.75;      // 5 paise off - inside the floor
+  const sg2 = chargeIdentityFormulas(smallGap, ref);
+  eq("...while 5 paise off the same charge is drift", [sg2.nearMiss, sg2.noRate].join("/"), "1/0");
+
+  // A CHARGED row with no turnover is counted rather than vanishing: it is the one shape where
+  // nothing was even attempted, so it would otherwise be invisible in every count on the badge.
+  const ntRow = bucketSrc();
+  ntRow.values[4][12] = "";
+  eq("a charged row with no turnover is counted", chargeIdentityFormulas(ntRow, ref).noTurnover, 1);
+  // ...and the crying-wolf control. A blank row carrying no charge at all is an ordinary blank,
+  // and listing those trains the owner to ignore the number - how every diagnostic here dies.
+  const bare = bucketSrc();
+  bare.values[4][12] = "";
+  for (const c of [14, 15, 16, 17, 18, 19, 21]) bare.values[4][c] = "";
+  eq("...but a blank row carrying no charge is not", chargeIdentityFormulas(bare, ref).noTurnover, 0);
+}
+
+console.log("\n-- the banner and the paint cannot drift ---------------------");
+{
+  // BANNER_ROWS is what the PAINT shifts every band by, and the grid is what pushes the lines.
+  // Add a banner line without moving the constant and every colour band sits a row off the
+  // values it describes - which reads as a rendering quirk rather than a bug, and the written
+  // grid looks identical either way. This is the ONE assertion that ties the two together.
+  const s0 = src() as any;
+  const { rows } = buildFormulaGrid(s0);
+  eq("the grid is exactly BANNER_ROWS taller than the tab it twins",
+     rows.length, s0.values.length + BANNER_ROWS);
+  eq("...so the first filed row lands at BANNER_ROWS",
+     JSON.stringify(rows[BANNER_ROWS]), JSON.stringify(s0.values[0]));
+
+  // The withdrawn GST shape must not creep back onto a written grid. Asserted over the WHOLE
+  // grid rather than one cell, because what made it wrong was that it appeared on SOME rows and
+  // not others - a per-cell check would pass on whichever row happened to be sampled.
+  const grid = JSON.stringify(buildFormulaGrid(srcRates() as any).rows);
+  ok("no cell anywhere states GST as two 9% halves", !/0\.09/.test(grid));
 }
 
 console.log("\n-- the EMITTER's half of the match ---------------------------");
@@ -852,11 +971,11 @@ console.log("\n-- the EMITTER's half of the match ---------------------------");
 console.log("\n-- RATE = AMOUNT / QTY --------------------------------------");
 {
   const { rows } = buildFormulaGrid(src() as any);
-  const B = 3;
+  const B = BANNER_ROWS;
   // The direction is the codebase's own: AMOUNT is authoritative, RATE derived from it.
-  eq("the head row's opening rate", rows[3 + B][3], "=E7/C7");
-  eq("a further opening date-line", rows[4 + B][3], "=E8/C8");
-  eq("a sale's rate", rows[6 + B][7], "=I10/G10");
+  eq("the head row's opening rate", rows[3 + B][3], "=E8/C8");
+  eq("a further opening date-line", rows[4 + B][3], "=E9/C9");
+  eq("a sale's rate", rows[6 + B][7], "=I11/G11");
   // THE TWO ROWS THAT MUST NOT GET ONE. A corp-action CONTRA line carries a signed amount with
   // no qty and no rate (writing zeros there would read as "0 shares at 0.00"); the CLOSING NIL
   // row carries the TEXT "NIL" in the amount column. By COLUMN these look identical to the rows
@@ -870,7 +989,7 @@ console.log("\n-- RATE = AMOUNT / QTY --------------------------------------");
 console.log("\n-- charges stay values --------------------------------------");
 {
   const { rows } = buildFormulaGrid(src() as any);
-  const B = 3;
+  const B = BANNER_ROWS;
   // PARSED from contract notes - there is no arithmetic behind them to reveal, and inventing one
   // would fabricate a derivation.
   eq("a per-row brokerage is untouched", rows[6 + B][11], 9.1);
@@ -883,12 +1002,12 @@ console.log("\n-- charges stay values --------------------------------------");
 console.log("\n-- the grand total ------------------------------------------");
 {
   const { rows } = buildFormulaGrid(src() as any);
-  const B = 3;
-  eq("ST total sums its own column over the data rows", rows[9 + B][9], "=SUM(J7:J12)");
-  eq("LT total sums its own column", rows[9 + B][10], "=SUM(K7:K12)");
-  eq("brokerage total sums its own column", rows[9 + B][11], "=SUM(L7:L12)");
-  eq("STT total sums its own column", rows[9 + B][12], "=SUM(M7:M12)");
-  eq("matched cost totals too", rows[9 + B][WIDTH], "=SUM(N7:N12)");
+  const B = BANNER_ROWS;
+  eq("ST total sums its own column over the data rows", rows[9 + B][9], "=SUM(J8:J13)");
+  eq("LT total sums its own column", rows[9 + B][10], "=SUM(K8:K13)");
+  eq("brokerage total sums its own column", rows[9 + B][11], "=SUM(L8:L13)");
+  eq("STT total sums its own column", rows[9 + B][12], "=SUM(M8:M13)");
+  eq("matched cost totals too", rows[9 + B][WIDTH], "=SUM(N8:N13)");
   const all = rows.flat().filter(c => typeof c === "string" && c.startsWith("="));
   // Phrased over WHERE the formula sits and WHAT it reads, not over the characters in it. The
   // first version asked whether a P/L *reference* appeared beside a charge *reference*, which a
@@ -933,7 +1052,7 @@ console.log("\n-- the guard behind the emitter -----------------------------");
   const B = BANNER_ROWS;
   eq("a blank qty yields no formula, even if the emitter offers the row", rows[5 + B][3], "");
   eq("...and a TEXT amount yields none either", rows[8 + B][3], "");
-  eq("...while the genuine rows are unaffected", rows[3 + B][3], "=E7/C7");
+  eq("...while the genuine rows are unaffected", rows[3 + B][3], "=E8/C8");
 }
 
 console.log("\n-- the emitter's own exclusions -----------------------------");

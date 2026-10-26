@@ -78,8 +78,15 @@ export interface CgFormulaSource {
   expEnd: number;
 }
 
-/** Rows the twin prepends above the original grid. Every recorded index shifts by this. */
-export const BANNER_ROWS = 3;
+/**
+ * Rows the twin prepends above the original grid. Every recorded index shifts by this.
+ *
+ * It MUST equal the number of rows `buildFormulaGrid` pushes before the first `src.values` row.
+ * The paint derives every band from it, so a banner line added without moving this number puts
+ * every colour band one row off the values it describes - which reads as a rendering quirk
+ * rather than a bug. Title, the s.48 note, the allocation note, then a spacer.
+ */
+export const BANNER_ROWS = 4;
 
 export const FORMULA_TAB_SUFFIX = " (Formula)";
 
@@ -432,6 +439,14 @@ export const CHARGE_RATES: Record<string, RateCandidate[]> = {
   // SIX live rates and the row does not record WHICH EXCHANGE it traded on, which is exactly the
   // shape the verification exists for: all of them are offered and the figure decides.
   et: [
+    // FIRST, because it is what NSE actually bills for most of this book's window and the
+    // combined figure below is only right when a broker merges the two lines into one. From
+    // 01-Oct-2024 the cash-market charge is Rs 2.97 per LAKH = Rs 297/crore, with IPFT levied
+    // SEPARATELY at Rs 10/crore - and `ipf` already carries that rate, so a note printing both
+    // lines derives both. Its absence meant no NSE row could derive at all between Oct-2024 and
+    // Feb-2026 while BSE rows at Rs 375 derived normally, which is what "a few have formulas and
+    // a few do not" looks like when it is split by EXCHANGE.
+    { rate: 0.0000297, side: "BOTH", segment: "BOTH", dp: 2, why: "NSE Rs 297/crore (from 01-Oct-2024, IPFT billed separately)" },
     { rate: 0.0000307, side: "BOTH", segment: "BOTH", dp: 2, why: "NSE Rs 307/crore (from 01-Oct-2024, incl. IPFT)" },
     { rate: 0.0000375, side: "BOTH", segment: "BOTH", dp: 2, why: "BSE groups A/B Rs 375/crore" },
     { rate: 0.0000325, side: "BOTH", segment: "BOTH", dp: 2, why: "NSE Rs 325/crore (before 01-Oct-2024)" },
@@ -448,6 +463,32 @@ export const CHARGE_RATES: Record<string, RateCandidate[]> = {
 
 /** GST is 18% of a CHARGE BASE, never of turnover. STT and stamp duty sit OUTSIDE it. */
 export const GST_RATE = 0.18;
+/**
+ * A SECOND GST SHAPE WAS TRIED AND WITHDRAWN - `2*ROUND(0.09*(base),2)`, 26-Oct-2026.
+ *
+ * The reasoning was sound and the arithmetic was real: an INTRA-STATE note levies CGST and SGST
+ * at 9% EACH, every parser allocates those two totals SEPARATELY with each rounded to paise, and
+ * the ledger's single `IGST` column receives their sum - so the broker's figure is
+ * `round(9%) + round(9%)` where a single `round(18%)` rounds once.
+ *
+ * It was withdrawn on ONE measured fact: `ROUND(18%*b)` and `2*ROUND(9%*b)` NEVER differ by more
+ * than a single paise (checked over 400,000 bases; the worst case is exactly 0.01). So that shape
+ * can only ever rescue a row that is EXACTLY ONE PAISE off this one - which is the signature of
+ * an ALLOCATED charge, the dominant cause of every miss on this tab. In practice it was the
+ * one-paise tolerance this whole design refuses, wearing a formula's clothes, and nothing on the
+ * tab can tell the two readings apart.
+ *
+ * It showed itself the way such things do. The owner saw `=2*ROUND(0.09*(Q75+T75+W75),2)` sitting
+ * directly beneath `=ROUND(0.18*(Q74+T74+W74),2)` and flagged it as an odd ball: two adjacent
+ * rows of one block, almost certainly one broker, described as billing two different ways. That
+ * is the ACQUISITION COST rule seen from another side - a formula that reaches the right total by
+ * the wrong route teaches the reader something untrue, and is refused EVEN WHEN THE TOTAL AGREES.
+ *
+ * Intra-state billing is a property of the BROKER, constant across a note and across the book -
+ * never a per-row question. Deciding it per row from a one-paise difference is a coin flip
+ * dressed as a determination. If a note is ever confirmed to bill CGST+SGST, the shape goes back
+ * as a per-TAB decision, not a per-cell one.
+ */
 /**
  * Which charges form that base, most-likely composition first.
  *
@@ -487,32 +528,80 @@ const roundTo = (n: number, dp: 0 | 2): number =>
  *     that nothing was recorded.
  *   • attempt BROKERAGE or DMAT. A brokerage plan has no statutory identity and a demat charge is
  *     flat per scrip per day; a formula there would be numerology that happened to foot.
- *   • reproduce a per-trade STT that was ALLOCATED rather than computed. `allocateStt` anchors on
- *     the note's printed total and pro-rates, and the exchange itself rounds a day-aggregate per
- *     client, per scrip, per side — so on a scrip with several fills in one day the SUM ties and
- *     the individual rows do not. Those simply keep their value, which is correct.
+ *   • reproduce a charge that was ALLOCATED rather than computed, which is MOST of them and is
+ *     why a column derives inconsistently. No parser here computes a per-trade charge: each one
+ *     takes the note's PRINTED TOTAL and pro-rates it across the note's trades
+ *     (`allocate(summary.etc, ratios)` and its siblings), rounding each share to paise and
+ *     pushing the whole residual onto ONE row — the same row for every charge, since they share
+ *     an index. So a note's last row commonly has GST, ET, IPF and SEBI all missing together,
+ *     and the rest are a paise-level coin flip. Two more layers sit on top: the register SUMS a
+ *     date's fills into one printed row, and SPLITS one sale's charges across its short- and
+ *     long-term rows by quantity fraction. The SUM ties at every level and the individual cells
+ *     cannot. Those keep their value, which is the only correct answer — a tolerance here would
+ *     put a number on the page that the filed tab does not hold.
+ *
+ * What it CANNOT do is stay silent about which of those happened, so every miss is bucketed:
+ * `nearMiss` (a known rate is clearly the right one and the figure was allocated — expected,
+ * nothing to fix) against `noRate` (no known rate is anywhere near — a gap in the table above,
+ * and the only bucket worth acting on).
  */
 export function chargeIdentityFormulas(
   src: CgFormulaSource,
   ref: (r: number, c: number) => string,
-): { writes: CellWrite[]; derived: Record<string, number>; attempted: number } {
+): {
+  writes: CellWrite[]; derived: Record<string, number>; attempted: number;
+  nearMiss: number; noRate: number; noTurnover: number; missBy: Record<string, number>;
+} {
   const writes: CellWrite[] = [];
   const derived: Record<string, number> = {};
+  const missBy: Record<string, number> = {};
+  let nearMiss = 0, noRate = 0, noTurnover = 0;
   const d = src.derive;
   const cc = d.chargeCols;
-  if (!cc) return { writes, derived, attempted: 0 };
+  if (!cc) return { writes, derived, attempted: 0, nearMiss, noRate, noTurnover, missBy };
   const segment = d.isIntraday ? "INTRADAY" : "DELIVERY";
   const rows: { r: number; amtCol: number; side: "BUY" | "SELL" }[] = [
     ...(d.purchaseRows || []).map(p => ({ r: p.r, amtCol: p.amtCol, side: "BUY" as const })),
     ...(d.saleRows || []).map(s => ({ r: s.r, amtCol: s.sAmtCol, side: "SELL" as const })),
   ].sort((a, b) => a.r - b.r);
+  const triedKeys = [...Object.keys(CHARGE_RATES), "gst"];
+
+  /**
+   * SAY WHICH KIND OF MISS IT WAS — the same discipline as `acqSpanned` / `acqRounding`.
+   *
+   * "N of M derived" is an undifferentiated number and the two reasons behind it have opposite
+   * answers. A charge that is a paise or two off a known rate was ALLOCATED rather than computed:
+   * every parser here pro-rates the note's printed total across its trades, so the figure on the
+   * row is a share of a rounded total and no per-row rate can reproduce it. Nothing is wrong and
+   * nothing can be done. A charge nowhere near any known rate is the opposite — a rate this table
+   * does not carry, or a plan with no statutory identity — and that IS actionable, in one place.
+   *
+   * The threshold is RELATIVE with an absolute floor, because allocation drift scales with
+   * nothing while a wrong rate scales with the charge: Rs 297/crore against Rs 307/crore is 3.4%
+   * out, which must read as a rate mismatch however small the trade.
+   */
+  const bucket = (key: string, parsed: number, best: number | null) => {
+    missBy[key] = (missBy[key] || 0) + 1;
+    if (best !== null && best <= Math.max(0.05, Math.abs(parsed) * 0.01)) nearMiss++;
+    else noRate++;
+  };
 
   let attempted = 0;
   for (const row of rows) {
     const vals = src.values[row.r];
     if (!vals) continue;
     const turnover = vals[row.amtCol];
-    if (typeof turnover !== "number" || !isFinite(turnover) || turnover <= 0) continue;
+    if (typeof turnover !== "number" || !isFinite(turnover) || turnover <= 0) {
+      // Counted only where the row CARRIES a charge. A row with no turnover and no charges is an
+      // ordinary blank, and listing those trains the reader to ignore the count — which is how
+      // every crying-wolf diagnostic in this app has died.
+      const carries = triedKeys.some(k => {
+        const c = (cc as any)[k];
+        return typeof c === "number" && c >= 0 && typeof vals[c] === "number";
+      });
+      if (carries) noTurnover++;
+      continue;
+    }
 
     for (const key of Object.keys(CHARGE_RATES)) {
       const col = (cc as any)[key];
@@ -522,17 +611,28 @@ export function chargeIdentityFormulas(
       // is a STRING, and a charge of genuinely 0 is a fact worth deriving.
       if (typeof parsed !== "number" || !isFinite(parsed)) continue;
       attempted++;
+      let hit = false;
+      // The CLOSEST candidate, not the first — a table whose first entry happens to be far off
+      // would otherwise report "no rate" for what is really a paise of allocation drift, and
+      // send the next reader down the wrong branch.
+      let best: number | null = null;
       for (const cand of CHARGE_RATES[key]) {
         if (cand.side !== "BOTH" && cand.side !== row.side) continue;
         if (cand.segment !== "BOTH" && cand.segment !== segment) continue;
-        if (roundTo(cand.rate * turnover, cand.dp) !== r2(parsed)) continue;
-        writes.push({
-          r: row.r, c: col,
-          f: `=ROUND(${plainDecimal(cand.rate)}*${ref(row.r, row.amtCol)},${cand.dp})`,
-        });
-        derived[key] = (derived[key] || 0) + 1;
-        break;
+        const got = roundTo(cand.rate * turnover, cand.dp);
+        if (got === r2(parsed)) {
+          writes.push({
+            r: row.r, c: col,
+            f: `=ROUND(${plainDecimal(cand.rate)}*${ref(row.r, row.amtCol)},${cand.dp})`,
+          });
+          derived[key] = (derived[key] || 0) + 1;
+          hit = true;
+          break;
+        }
+        const miss = Math.abs(got - r2(parsed));
+        if (best === null || miss < best) best = miss;
       }
+      if (!hit) bucket(key, parsed, best);
     }
 
     // GST last, because its base names the other charge cells — several of which may have just
@@ -542,21 +642,31 @@ export function chargeIdentityFormulas(
     const gstVal = typeof gstCol === "number" && gstCol >= 0 ? vals[gstCol] : undefined;
     if (typeof gstVal === "number" && isFinite(gstVal)) {
       attempted++;
+      let hit = false;
+      let best: number | null = null;
       for (const base of GST_BASES) {
         const colsOf = base.map(k => (cc as any)[k]).filter(c => typeof c === "number" && c >= 0);
         if (colsOf.length !== base.length) continue;
         const sum = colsOf.reduce((s, c) => s + (typeof vals[c] === "number" ? vals[c] : 0), 0);
-        if (r2(GST_RATE * sum) !== r2(gstVal)) continue;
-        writes.push({
-          r: row.r, c: gstCol,
-          f: `=ROUND(${GST_RATE}*(${colsOf.map(c => ref(row.r, c)).join("+")}),2)`,
-        });
-        derived.gst = (derived.gst || 0) + 1;
-        break;
+        const a1 = colsOf.map(c => ref(row.r, c)).join("+");
+        // ONE shape, deliberately. See the note above `chargeIdentityFormulas`' rate table: the
+        // two-halves form was tried and withdrawn because it can only ever rescue a row a single
+        // paise off this one, which is indistinguishable from the allocation drift that explains
+        // most misses here. A GST cell a paise out keeps its value and is bucketed ALLOCATED.
+        const got = r2(GST_RATE * sum);
+        if (got === r2(gstVal)) {
+          writes.push({ r: row.r, c: gstCol, f: `=ROUND(${GST_RATE}*(${a1}),2)` });
+          derived.gst = (derived.gst || 0) + 1;
+          hit = true;
+          break;
+        }
+        const miss = Math.abs(got - r2(gstVal));
+        if (best === null || miss < best) best = miss;
       }
+      if (!hit) bucket("gst", gstVal, best);
     }
   }
-  return { writes, derived, attempted };
+  return { writes, derived, attempted, nearMiss, noRate, noTurnover, missBy };
 }
 
 /**
@@ -564,7 +674,7 @@ export function chargeIdentityFormulas(
  *
  * Pure: no `gapi`, so the part that decides what a cell says is testable without a browser.
  */
-export function buildFormulaGrid(src: CgFormulaSource): { rows: any[][]; formulaCells: number; acqDerived: number; acqSummed: number; acqAsValue: number; acqSpanned: number; acqRounding: number; acqNoRate: number; expenseRowsTotalled: number; chargeDerived: number; chargeAttempted: number; chargeDerivedBy: Record<string, number> } {
+export function buildFormulaGrid(src: CgFormulaSource): { rows: any[][]; formulaCells: number; acqDerived: number; acqSummed: number; acqAsValue: number; acqSpanned: number; acqRounding: number; acqNoRate: number; expenseRowsTotalled: number; chargeDerived: number; chargeAttempted: number; chargeDerivedBy: Record<string, number>; chargeNearMiss: number; chargeNoRate: number; chargeNoTurnover: number; chargeMissBy: Record<string, number> } {
   const width = Math.max(0, ...src.values.map(r => r.length));
   // APPENDED, never inserted. Every index in `derive` was recorded against the filed layout, and
   // those indices are the only thing tying a formula to the right cell — inserting a column
@@ -584,6 +694,7 @@ export function buildFormulaGrid(src: CgFormulaSource): { rows: any[][]; formula
   const rows: any[][] = [
     [`DERIVED VIEW of "${src.tab}" — formulas show the arithmetic this app performed.`],
     ["The authoritative figures are on the tab this twins. Charges are PARSED from contract notes and are NOT deducted from any gain (s.48) — the EXPENSES columns total them, nothing subtracts them from a P/L. The expense breakdown row is left as the engine's own figure so the cross-foot beneath it is a real check."],
+    ["A charge cell shows its rate only where that rate reproduces the broker's OWN figure to the paise, so one column deriving on some rows and not others is EXPECTED, not a fault: the note prints one total per charge and it is pro-rated across the trades on it, so most rows carry a share of a rounded figure rather than a figure computed from their own turnover. The totals tie; the individual cells cannot. Where no formula is shown, the parsed value stands."],
     [],
   ];
   for (const r of src.values) rows.push([...r]);
@@ -715,6 +826,10 @@ export function buildFormulaGrid(src: CgFormulaSource): { rows: any[][]; formula
   const chargeDerived = ident.writes.length;
   const chargeAttempted = ident.attempted;
   const chargeDerivedBy = ident.derived;
+  const chargeNearMiss = ident.nearMiss;
+  const chargeNoRate = ident.noRate;
+  const chargeNoTurnover = ident.noTurnover;
+  const chargeMissBy = ident.missBy;
 
   // ── GRAND TOTAL ───────────────────────────────────────────────────────────────────────────
   const gt = src.derive.grandTotalRow;
@@ -740,7 +855,8 @@ export function buildFormulaGrid(src: CgFormulaSource): { rows: any[][]; formula
   // itself. Same rule as the ninth charge column: do not formula-ise what you cannot locate.
 
   return { rows, formulaCells, acqDerived, acqSummed, acqAsValue, acqSpanned, acqRounding, acqNoRate,
-           expenseRowsTotalled, chargeDerived, chargeAttempted, chargeDerivedBy };
+           expenseRowsTotalled, chargeDerived, chargeAttempted, chargeDerivedBy,
+           chargeNearMiss, chargeNoRate, chargeNoTurnover, chargeMissBy };
 }
 
 /**

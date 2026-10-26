@@ -4955,7 +4955,18 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                             : ''
                         }${
                           fvStatus.result.chargeAttempted > 0
-                            ? ` ${fvStatus.result.chargeDerived} of ${fvStatus.result.chargeAttempted} charge cells became =ROUND(rate x turnover, dp) because a known statutory rate reproduced the broker's OWN parsed figure exactly — ${Object.keys(fvStatus.result.chargeDerivedBy).map(k => `${fvStatus.result.chargeDerivedBy[k]} ${k}`).join(', ') || 'none'}. Nothing is computed: a rate that does not reproduce the figure is discarded and the parsed value stands. A LOW SHARE IS EXPECTED — STT is rounded to the nearest rupee by Rule 4 of the STT Rules and is allocated per trade off a rounded day-aggregate, so on any scrip with several fills in a day it cannot foot to a per-row rate. Brokerage and demat are never attempted: a plan has no statutory identity.`
+                            ? ` ${fvStatus.result.chargeDerived} of ${fvStatus.result.chargeAttempted} charge cells became =ROUND(rate x turnover, dp) because a known statutory rate reproduced the broker's OWN parsed figure exactly — ${Object.keys(fvStatus.result.chargeDerivedBy).map(k => `${fvStatus.result.chargeDerivedBy[k]} ${k}`).join(', ') || 'none'}. Nothing is computed: a rate that does not reproduce the figure is discarded and the parsed value stands. A LOW SHARE IS EXPECTED — STT is rounded to the nearest rupee by Rule 4 of the STT Rules and is allocated per trade off a rounded day-aggregate, so on any scrip with several fills in a day it cannot foot to a per-row rate. Brokerage and demat are never attempted: a plan has no statutory identity.${
+                                (() => {
+                                  const r = fvStatus.result!;
+                                  const why = [
+                                    r.chargeNearMiss > 0 && `${r.chargeNearMiss} sit a paise or two off a known rate because the broker ALLOCATED the note's one printed total across its trades instead of computing each row — expected, and a formula there would state a figure this tab does not hold`,
+                                    r.chargeNoRate > 0 && `${r.chargeNoRate} match no known rate at all, which is the only actionable bucket: a rate missing from CHARGE_RATES`,
+                                    r.chargeNoTurnover > 0 && `${r.chargeNoTurnover} on rows carrying a charge but no positive turnover`,
+                                  ].filter(Boolean).join('; ');
+                                  const kinds = Object.keys(r.chargeMissBy).map(k => `${r.chargeMissBy[k]} ${k}`).join(', ');
+                                  return why ? ` Of the rest: ${why}${kinds ? ` (by charge: ${kinds})` : ''}.` : '';
+                                })()
+                              }`
                             : ''
                         }${
                           fvStatus.result.acqAsValue > 0
@@ -4985,7 +4996,17 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                             and allocated per trade off a day aggregate, so most STT cells can
                             never reproduce a per-row rate. "41 derived" alone reads as a failure. */}
                         {fvStatus.result.chargeAttempted > 0 &&
-                          ` · ${fvStatus.result.chargeDerived}/${fvStatus.result.chargeAttempted} charges derived`}
+                          ` · ${fvStatus.result.chargeDerived}/${fvStatus.result.chargeAttempted} charges derived${
+                            [
+                              fvStatus.result.chargeNearMiss > 0 && `${fvStatus.result.chargeNearMiss} allocated`,
+                              fvStatus.result.chargeNoRate > 0 && `${fvStatus.result.chargeNoRate} no rate`,
+                            ].filter(Boolean).length
+                              ? ` (${[
+                                  fvStatus.result.chargeNearMiss > 0 && `${fvStatus.result.chargeNearMiss} allocated`,
+                                  fvStatus.result.chargeNoRate > 0 && `${fvStatus.result.chargeNoRate} no rate`,
+                                ].filter(Boolean).join(', ')})`
+                              : ''
+                          }`}
                         {/* The BREAKDOWN, not just the count. Three reasons sit behind that one
                             number and they have completely different answers — "spanned" cannot
                             be fixed by any formula, "rounding" is arithmetic, "no rate" is a
