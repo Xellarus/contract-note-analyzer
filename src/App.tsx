@@ -84,31 +84,45 @@ const NUVAMA_VARIANTS = [
   },
 ];
 
+/**
+ * One figure off a contract note's own summary.
+ *
+ * EVERY CARD IS GOLD EXCEPT THE ALERT (owner request 03-Nov-2026: *"can you change the black
+ * font to golden font"*). The ordinary cards used to be `text-slate-500` over `text-slate-900`
+ * while nine of the twelve ALSO passed `labelStyle={{ color: '#000000' }}` - a hardcoded inline
+ * black. An inline colour is the one thing `index.css` can never repaint, so in dark mode those
+ * labels were pure black on a near-black card: present, unreadable, and invisible to
+ * `theme-check`, which scans `className`. The prop went with them; it had no other caller, and
+ * a prop whose only purpose is injecting an unthemeable colour re-creates this the next time.
+ *
+ * Indigo IS the brass accent before remapping, so `text-indigo-600` and `text-indigo-900` both
+ * resolve to one gold (#e0b45e dark, #8a6a1e light) - which is already what the three
+ * `highlight` cards use. The ordinary cards now take the same ink and keep their plain
+ * background, so the highlight trio still reads as the headline figures by their tint alone.
+ *
+ * `alertState` stays ROSE in both halves. It is the STT mismatch warning, and a warning painted
+ * in the same colour as every ordinary figure is a warning nobody sees.
+ */
 const SummaryCard = ({
   label,
   value,
-  highlight = false, 
-  alertState = false, 
-  labelStyle = {}, 
-  minFractionDigits = 2, 
-  maxFractionDigits = 2 
-}: { 
-  label: string, 
-  value: number, 
-  highlight?: boolean, 
-  alertState?: boolean, 
-  labelStyle?: React.CSSProperties, 
-  minFractionDigits?: number, 
-  maxFractionDigits?: number 
+  highlight = false,
+  alertState = false,
+  minFractionDigits = 2,
+  maxFractionDigits = 2
+}: {
+  label: string,
+  value: number,
+  highlight?: boolean,
+  alertState?: boolean,
+  minFractionDigits?: number,
+  maxFractionDigits?: number
 }) => (
   <div className={`p-4 rounded-xl border transition-all ${alertState ? 'bg-rose-50 border-rose-200' : highlight ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'} shadow-sm`}>
-    <p 
-      style={labelStyle}
-      className={`text-xs font-semibold uppercase tracking-wider ${alertState ? 'text-rose-600' : highlight ? 'text-indigo-600' : 'text-slate-500'}`}
-    >
+    <p className={`text-xs font-semibold uppercase tracking-wider ${alertState ? 'text-rose-600' : 'text-indigo-600'}`}>
       {label}
     </p>
-    <p className={`text-lg font-bold mt-1 font-mono ${alertState ? 'text-rose-900' : highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
+    <p className={`text-lg font-bold mt-1 font-mono ${alertState ? 'text-rose-900' : 'text-indigo-900'}`}>
       {value.toLocaleString('en-IN', { minimumFractionDigits: minFractionDigits, maximumFractionDigits: maxFractionDigits })}
     </p>
   </div>
@@ -3275,21 +3289,21 @@ export default function App() {
                   <SummaryCard label="Pay In/Out Obligation" value={calculatedTotals.obligation} highlight minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   <SummaryCard label="Net Settlement (Incl STT)" value={calculatedTotals.netSettlementInclSTT} highlight minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   <SummaryCard label="Net Settlement (Excl STT)" value={calculatedTotals.netSettlementExclSTT} highlight minFractionDigits={2} maxFractionDigits={priceDecimals} />
-                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
-                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} labelStyle={{ borderColor: '#ffffff', color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
-                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
-                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Brokerage" value={calculatedTotals.brokerage} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Total STT" value={calculatedTotals.stt} alertState={data.reconciliation && data.reconciliation.isSttMismatch} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Stamp Duty" value={calculatedTotals.stampDuty} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="Exchange Charges" value={calculatedTotals.etc} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   {data?.brokerName === 'integrated' ? (
-                    <SummaryCard label="Total GST" value={calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                    <SummaryCard label="Total GST" value={calculatedTotals.gst} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   ) : (
-                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                    <SummaryCard label="IGST" value={calculatedTotals.igst || calculatedTotals.gst} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   )}
-                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                  <SummaryCard label="SEBI Turnover Fees" value={calculatedTotals.sebiFees} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                    <SummaryCard label="IPF Charges" value={calculatedTotals.ipf} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   )}
                   {data?.brokerName === 'integrated' && (
-                    <SummaryCard label="Demat Charges" value={calculatedTotals.dmat} labelStyle={{ color: '#000000' }} minFractionDigits={2} maxFractionDigits={priceDecimals} />
+                    <SummaryCard label="Demat Charges" value={calculatedTotals.dmat} minFractionDigits={2} maxFractionDigits={priceDecimals} />
                   )}
                 </div>
 

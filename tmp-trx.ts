@@ -2416,29 +2416,78 @@ export async function run() {
       reportSheetIdFor('s713', 2026), '1W3XgGm8-vJksXeOg0EA2Gq7yNOdrfAkTk7ZJ5ShzRaA');
     eq('S4: ...and FY25-26 for the SAME account does not', reportSheetIdFor('s713', 2025), sheetIdForId('s713'));
     eq('S4: ...nor FY27-28', reportSheetIdFor('s713', 2027), sheetIdForId('s713'));
-    // The "different account" control is OADR97 - Share India, and the SAME PERSON as S713.
-    // It was T059 until 03-Nov-2026, when T059 gained a redirect of its own; picking another
-    // Saket Agarwal account keeps the control sharp, because it proves the key is the ACCOUNT
-    // and not the holder. Any account that later gains an entry must move this control again.
-    eq('S4: ...and FY26-27 for a DIFFERENT account does not',
-      reportSheetIdFor('oadr97', 2026), sheetIdForId('oadr97'));
-    ok('S4: no destination is reported where none exists', !reportDestinationFor('oadr97', 2026));
-    ok('S4: ...and one is where it does', !!reportDestinationFor('s713', 2026));
+    // THE "DIFFERENT ACCOUNT" CONTROL HAS RUN OUT, and that is a fact about the book rather
+    // than a gap here. It was T059; then OADR97 when T059 gained a redirect of its own; by the
+    // end of 03-Nov-2026 EVERY portfolio is redirected for FY26-27, so no real account is left
+    // to play that part for this year. Deleting the assertion and saying nothing is how a
+    // suite quietly stops testing a scope, so the situation is ASSERTED instead - and the
+    // assertion doubles as the guard for the next portfolio ADDED, which would otherwise write
+    // its FY26-27 reports into its own ledger while every sibling went elsewhere.
+    const redirected26 = PORTFOLIOS.filter(p => !!reportDestinationFor(p.id, 2026)).length;
+    ok(`S4: every portfolio is redirected for FY26-27 (${redirected26}/${PORTFOLIOS.length})`
+      + ' - the account-scope control has run out',
+      redirected26 === PORTFOLIOS.length,
+      'a NEW portfolio with no entry writes this FY reports into its own ledger while every '
+      + 'sibling goes elsewhere - decide whether it should have one too');
+    eq('S4: ...and not one of them is redirected for FY25-26',
+      PORTFOLIOS.filter(p => !!reportDestinationFor(p.id, 2025)).length, 0);
+    // The ACCOUNT scope is therefore carried by the unknown-id case further down, and the YEAR
+    // scope by the per-account loop, which asserts FY25-26 on every one of the twelve.
+    ok('S4: a destination is reported where one exists', !!reportDestinationFor('s713', 2026));
+    ok('S4: ...and none where it does not', !reportDestinationFor('s713', 2025));
 
-    // The four added 03-Nov-2026. Each is asserted against its OWN workbook id, so a pair of
-    // entries swapped between two accounts - which resolves, writes, and looks entirely
-    // ordinary - fails here rather than on a filed page.
+    // The eleven added 03-Nov-2026 - four Integrated, then Axis, Nuvama, Zerodha and the four
+    // Share India accounts. Each is asserted against its OWN workbook id, so a pair of entries
+    // swapped between two accounts - which resolves, writes, and looks entirely ordinary -
+    // fails here rather than on a filed page.
     for (const [pid, dest] of [
-      ['t059',  '12v7dp0j9c6XIMMLBDWijLZpBHdH1yHVibe1fNAGy638'],
-      ['s1404', '1HPtBzHEFLJ872APSfjLHXBwd8-5J6sfGN3ru8KXJLkE'],
-      ['g058',  '1Sc5w91euToJDu7SfbkVDZuikhSVtnoRiqqNjx-1tFSs'],
-      ['c087',  '1W7G6WJ3x_NsvdsXYMub2K_lWZ57gPUp3F5iQND91Ke4'],
+      ['t059',     '12v7dp0j9c6XIMMLBDWijLZpBHdH1yHVibe1fNAGy638'],
+      ['s1404',    '1HPtBzHEFLJ872APSfjLHXBwd8-5J6sfGN3ru8KXJLkE'],
+      ['g058',     '1Sc5w91euToJDu7SfbkVDZuikhSVtnoRiqqNjx-1tFSs'],
+      ['c087',     '1W7G6WJ3x_NsvdsXYMub2K_lWZ57gPUp3F5iQND91Ke4'],
+      ['6150725',  '104OpdiU9CfKOheLsfDwtOZ9pLlLyH7gSBoYgeWtStag'],
+      ['60072941', '1uyVY29doNMWGRr8zJgjxOmwPtS_ylc8IDaw2BpUUIkE'],
+      ['njw724',   '1naGQUhzOfxIqLDzIzoiXVtYaDT26fgYUm1cZCqrqVqU'],
+      ['oaem94',   '1ii9gl36foutt62Xq6QUfCRMLBRZQSYRb159nsCo26TY'],
+      ['oadr97',   '1TFeLI-Fo6a4vtObseBhjCYRKcg_cTDo7-cChIQ9c9f4'],
+      ['cs1106',   '1tdA_36Tta_EcrOJ_G0LWQiD1L-N_cVrteBZ8X1lvdwM'],
+      ['oaeu09',   '1Q-Nyt1lL-Nmqk1WYQ4y-o5SpeXpfATgAF_VDd4UjKjQ'],
     ] as [string, string][]) {
       eq(`S4: ${pid.toUpperCase()} FY26-27 resolves to its own report workbook`,
         reportSheetIdFor(pid, 2026), dest);
       eq(`S4: ...and ${pid.toUpperCase()} FY25-26 still writes to its ledger`,
         reportSheetIdFor(pid, 2025), sheetIdForId(pid));
     }
+    // PER HOLDER, NOT ONLY PER WORKBOOK. Three people own more than one account - Saket
+    // Agarwal THREE (S713 Integrated, OADR97 Share India, 6150725 Axis), Gunjan Agarwal and
+    // Aditya Agarwal two each - and as of 03-Nov-2026 every one of those is redirected. On the
+    // table that reads as a repeated NAME with nothing beside it saying the workbooks must
+    // differ, which is the easiest wrong paste to make here and the hardest to see.
+    //
+    // The general distinctness check below would catch a shared workbook too. This one is kept
+    // beside it because it names the PERSON in the failure, which is what a reader scanning
+    // the table actually has in front of them - and because it is what catches a registry
+    // keyed on the HOLDER rather than the account, where every one of a person's accounts
+    // resolves to one book and the per-id loop alone would not say why.
+    {
+      const byHolder = new Map<string, string[]>();
+      for (const p of PORTFOLIOS) {
+        const d = reportDestinationFor(p.id, 2026);
+        if (d) byHolder.set(p.label, (byHolder.get(p.label) || []).concat(d.sheetId));
+      }
+      let pairs = 0;
+      for (const [holder, books] of byHolder) {
+        if (books.length < 2) continue;
+        pairs++;
+        ok(`S4: ${holder} holds ${books.length} redirected accounts, with a workbook each`,
+          new Set(books).size === books.length,
+          'one person two books is fine; one book two accounts overwrites a filed year');
+      }
+      // ...and the check must have something to check, or it passes forever the day the
+      // grouping stops grouping anything.
+      ok('S4: ...and there really are multi-account holders to check', pairs >= 3);
+    }
+
     // An unknown id must fall back rather than resolve to something. It returns '' because
     // `sheetIdForId` does, which is what every other caller already handles.
     eq('S4: an unknown portfolio resolves to nothing, never to a redirect',
@@ -2459,7 +2508,8 @@ export async function run() {
     // two accounts pointing at one book do not collide loudly - the second run OVERWRITES the
     // first's `Capital Gains for FY26-27` in place and one client's filed figures are simply
     // gone, with both runs reporting success. Self-evident with one entry; it stopped being so
-    // at five, which is why it is pinned now rather than then.
+    // at five, and at seven - two of which are one person - it is the thing most likely to go
+    // wrong here.
     {
       const seen = new Map<string, string>();
       for (const d of REPORT_DESTINATIONS) {

@@ -175,7 +175,7 @@ export const REPORT_DESTINATIONS: ReportDestination[] = [
   // The other four Integrated accounts, same arrangement, same year (owner request
   // 03-Nov-2026, one workbook link supplied per account). Each ledger stays where it is.
   //
-  // EVERY DESTINATION IS A DIFFERENT WORKBOOK, and with five entries that stopped being
+  // EVERY DESTINATION IS A DIFFERENT WORKBOOK, and with twelve entries that stopped being
   // self-evident. Two accounts sharing one would not fail or warn: the tab names carry the FY
   // but not the account, so the second run would overwrite the first's `Capital Gains for
   // FY26-27` in place and one client's filed figures would simply be gone. Asserted over the
@@ -199,6 +199,62 @@ export const REPORT_DESTINATIONS: ReportDestination[] = [
     portfolioId: 'c087', fyStartYear: 2026,
     sheetId: '1W7G6WJ3x_NsvdsXYMub2K_lWZ57gPUp3F5iQND91Ke4',
     note: 'Owner request 03-Nov-2026: FY26-27 reports for Integrated / Chaitanya Agarwal / C087.',
+  },
+  // AND SEVEN ACCOUNTS ON OTHER BROKERS, same day, one workbook link each. Nothing in the
+  // mechanism is broker-aware - `reportDestinationFor` keys on the portfolio id and the FY
+  // alone, and both call sites pass `pid` straight through - so these needed no code, only the
+  // two rows. Worth saying out loud because the five above are all Integrated and a reader
+  // could easily take that for a rule.
+  //
+  // EVERY HOLDER WITH MORE THAN ONE ACCOUNT NOW HAS MORE THAN ONE REDIRECT, which is the
+  // shape the distinctness rule above is written for and which only became real on
+  // 03-Nov-2026: Saket Agarwal holds THREE (S713 Integrated, OADR97 Share India, 6150725
+  // Axis), Gunjan Agarwal and Aditya Agarwal two each. On this table those read as a repeated
+  // NAME with nothing beside it saying the workbooks must differ - the easiest wrong paste to
+  // make here and the hardest to see, because both runs report success and the second
+  // overwrites the first's filed figures in place. `tmp-trx.ts` asserts it per HOLDER as well
+  // as per workbook, so the failure names the person rather than a pair of ids.
+  {
+    portfolioId: '6150725', fyStartYear: 2026,
+    sheetId: '104OpdiU9CfKOheLsfDwtOZ9pLlLyH7gSBoYgeWtStag',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Axis / Saket Agarwal / 6150725.',
+  },
+  {
+    portfolioId: '60072941', fyStartYear: 2026,
+    sheetId: '1uyVY29doNMWGRr8zJgjxOmwPtS_ylc8IDaw2BpUUIkE',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Nuvama / Uma Agarwal / 60072941.',
+  },
+  {
+    portfolioId: 'njw724', fyStartYear: 2026,
+    sheetId: '1naGQUhzOfxIqLDzIzoiXVtYaDT26fgYUm1cZCqrqVqU',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Zerodha / Aditya Agarwal / NJW724.',
+  },
+  // The four Share India accounts complete the set: as of 03-Nov-2026 EVERY portfolio is
+  // redirected for FY26-27, which makes the redirect the NORM for this year rather than an
+  // exception. Two consequences worth knowing. The suite no longer has a real account to use
+  // as its "not redirected" control for this year, so it asserts the exhaustiveness outright
+  // instead of leaving a deleted assertion behind. And a portfolio ADDED later with no entry
+  // of its own would quietly write its FY26-27 reports into its own ledger while every one of
+  // its siblings went elsewhere - which the same assertion is what catches.
+  {
+    portfolioId: 'oaem94', fyStartYear: 2026,
+    sheetId: '1ii9gl36foutt62Xq6QUfCRMLBRZQSYRb159nsCo26TY',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Share India / Gunjan Agarwal / OAEM94.',
+  },
+  {
+    portfolioId: 'oadr97', fyStartYear: 2026,
+    sheetId: '1TFeLI-Fo6a4vtObseBhjCYRKcg_cTDo7-cChIQ9c9f4',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Share India / Saket Agarwal / OADR97.',
+  },
+  {
+    portfolioId: 'cs1106', fyStartYear: 2026,
+    sheetId: '1tdA_36Tta_EcrOJ_G0LWQiD1L-N_cVrteBZ8X1lvdwM',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Share India / Shree Balaji Investments / CS1106.',
+  },
+  {
+    portfolioId: 'oaeu09', fyStartYear: 2026,
+    sheetId: '1Q-Nyt1lL-Nmqk1WYQ4y-o5SpeXpfATgAF_VDd4UjKjQ',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Share India / Aditya Agarwal / OAEU09.',
   },
 ];
 
