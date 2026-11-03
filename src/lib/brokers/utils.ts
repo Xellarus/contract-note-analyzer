@@ -39,10 +39,42 @@ export const ISIN_RE = /IN[A-Z0-9]{9}[0-9]/i;
  *  or "" if none. Tolerates a stray space pdf.js can inject inside the code. */
 export const extractIsin = (s: string | null | undefined): string => {
   const str = (s || "").toString();
-  const direct = str.match(ISIN_RE);
-  if (direct) return direct[0].toUpperCase();
-  const stripped = str.replace(/\s+/g, "").match(ISIN_RE);
-  return stripped ? stripped[0].toUpperCase() : "";
+  const direct = firstValidIsin(str);
+  if (direct) return direct.toUpperCase();
+  const stripped = firstValidIsin(str.replace(/\s+/g, ""));
+  return stripped ? stripped.toUpperCase() : "";
+};
+
+/**
+ * Does the 12th character check out? ISO 6166: letters become 10..35, then a Luhn checksum.
+ *
+ * The SHAPE alone cannot tell an ISIN from a name: the F&O contract `BAJFINANCE25AUG2026` contains
+ * `INANCE25AUG2` — "IN", nine alphanumerics, a digit — which was taken as its ISIN and then cut
+ * out of the name, leaving `BAJF 026` (03-Nov-2026). Every real ISIN passes this; a fragment of a
+ * name passes about one time in ten, and then only if it also has the shape.
+ */
+export const isinCheckDigitOk = (isin: string): boolean => {
+  const s = isin.toUpperCase();
+  if (!/^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(s)) return false;
+  const digits = s.slice(0, 11).split("").map(c => (/[0-9]/.test(c) ? c : String(c.charCodeAt(0) - 55))).join("");
+  let sum = 0;
+  for (let i = digits.length - 1, dbl = true; i >= 0; i--, dbl = !dbl) {
+    let d = Number(digits[i]) * (dbl ? 2 : 1);
+    if (d > 9) d -= 9;
+    sum += d;
+  }
+  return (10 - (sum % 10)) % 10 === Number(s[11]);
+};
+
+/** Every ISIN-shaped run in `s`, overlapping ones included, and return the first that validates. */
+const firstValidIsin = (s: string): string => {
+  const re = new RegExp(ISIN_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) {
+    if (isinCheckDigitOk(m[0])) return m[0];
+    re.lastIndex = m.index + 1;
+  }
+  return "";
 };
 
 /** True when `s` (trimmed) is EXACTLY an ISIN — for legend/summary cells whose
@@ -53,11 +85,16 @@ export const isIsin = (s: string | null | undefined): boolean =>
 /** Strip an ISIN (with any surrounding "-", "(", ")" and spaces) out of a security
  *  name: "Genus Power Infrastructures Lt-(INE955D01029)" → "Genus Power
  *  Infrastructures Lt". Returns the name unchanged when it carries no ISIN. */
-export const stripIsin = (name: string | null | undefined): string =>
-  (name || "").toString()
-    .replace(new RegExp(`\\s*-?\\s*\\(?\\s*${ISIN_RE.source}\\s*\\)?`, "i"), " ")
+export const stripIsin = (name: string | null | undefined): string => {
+  const str = (name || "").toString();
+  // Strip only a code that VALIDATES — see `isinCheckDigitOk` for the name it used to cut apart.
+  const isin = firstValidIsin(str);
+  if (!isin) return str.replace(/\s+/g, " ").trim();
+  return str
+    .replace(new RegExp(`\\s*-?\\s*\\(?\\s*${isin}\\s*\\)?`, "i"), " ")
     .replace(/\s+/g, " ")
     .trim();
+};
 
 /**
  * Is this security an F&O CONTRACT rather than a share? NFO/BFO trades are never imported.
@@ -76,7 +113,9 @@ const MON = "(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)";
 const CONTRACT_RE = new RegExp(`^[A-Z][A-Z0-9&-]*?\\d{2}${MON}\\d{2}(?:\\d{2})?(?:\\d+(?:\\.\\d+)?)?(?:CE|PE|FUT)?$`);
 export function isDerivativeContract(name: string | null | undefined): boolean {
   const s = (name || "").trim().toUpperCase().replace(/\s+(CE|PE|FUT)$/, "$1");
-  return CONTRACT_RE.test(s) || /\b(OPT|FUT)(IDX|STK|CUR|IRD|IVX)\b/.test(s);
+  // Any WORD, not the whole name: an F&O summary prints a position as "BF APLAPOLLO25AUG2026" /
+  // "CF ..." (brought / carried forward), and the prefix defeated a whole-name match.
+  return s.split(/\s+/).some(w => CONTRACT_RE.test(w)) || /\b(OPT|FUT)(IDX|STK|CUR|IRD|IVX)\b/.test(s);
 }
 
 /**

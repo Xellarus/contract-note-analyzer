@@ -20,7 +20,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { ShareIndiaBrokerStrategy, isDerivativeContract, derivativeSttInAnnexure } from './src/lib/brokers/shareindia';
-import { dropDerivativeTrades } from './src/lib/brokers/utils';
+import { dropDerivativeTrades, extractIsin, stripIsin, isinCheckDigitOk } from './src/lib/brokers/utils';
 
 const ROOT = process.env.SI_ROOT || '.';
 let pass = 0, fail = 0;
@@ -48,6 +48,36 @@ for (const s of ['Sambhv Steel Tubes Limited', 'Venus Pipes & Tubes Limited', 'N
                  'Rel Etf Lquid Bees', 'Manbro Industries Limited', 'SENSEX ETF', 'Scrip Summary',
                  'SGBJUN28', 'ABC12XYZ2026', '']) {
   ok(`not a contract: "${s}"`, !isDerivativeContract(s));
+}
+
+// F&O-summary positions carry a BF / CF (brought / carried forward) prefix — the third shape,
+// 03-Nov-2026. A whole-name match missed every one.
+for (const s of ['BF APLAPOLLO25AUG2026', 'CF APLAPOLLO25AUG2026', 'BF ASHOKLEY25AUG2026',
+                 'CF ASHOKLEY25AUG2026', 'BF BAJFINANCE25AUG2026']) {
+  ok(`BF/CF position: ${s}`, isDerivativeContract(s));
+}
+
+// ── A1. an ISIN must VALIDATE, not merely have the shape ────────────────────────────────────
+// `BAJFINANCE25AUG2026` contains `INANCE25AUG2`, which has the ISIN shape; it was taken as the
+// ISIN and cut out of the name, leaving "BAJF 026", which no contract test can recognise.
+ok('no ISIN inside BAJFINANCE25AUG2026', extractIsin('BF BAJFINANCE25AUG2026') === '', extractIsin('BF BAJFINANCE25AUG2026'));
+ok('the name survives stripIsin intact', stripIsin('BF BAJFINANCE25AUG2026') === 'BF BAJFINANCE25AUG2026',
+  stripIsin('BF BAJFINANCE25AUG2026'));
+ok('...and is then recognised as a contract', isDerivativeContract(stripIsin('BF BAJFINANCE25AUG2026')));
+// The real shapes must still work: glued, bracketed, stray space, and a fake before the real one.
+ok('glued Name-(ISIN)', extractIsin('Limited-(INE348N01034)') === 'INE348N01034');
+ok('glued strip', stripIsin('Manbro Industries Limited-(INE348N01034)') === 'Manbro Industries Limited');
+ok('stray space inside the code', extractIsin('Genus Power INE955 D01029') === 'INE955D01029');
+ok('fake-shaped run before the real ISIN', extractIsin('BAJFINANCE25AUG2026 INE296A01032') === 'INE296A01032');
+// ...and stripping removes the REAL one, not the first thing shaped like one.
+ok('strip removes the real ISIN, not the fake', stripIsin('BAJFINANCE25AUG2026 INE296A01032') === 'BAJFINANCE25AUG2026',
+  stripIsin('BAJFINANCE25AUG2026 INE296A01032'));
+// Every real ISIN must pass the checksum — one false rejection here un-resolves a real scrip.
+{
+  const seed: any[] = JSON.parse(readFileSync(`${ROOT}/src/data/scripSeed.json`, 'utf8'));
+  const isins = seed.map(e => e.i).filter((i: string) => /^IN[A-Z0-9]{9}[0-9]$/.test(i || ''));
+  const bad = isins.filter((i: string) => !isinCheckDigitOk(i));
+  ok(`check digit passes all ${isins.length} seed ISINs`, isins.length > 2000 && bad.length === 0, bad.slice(0, 5).join(', '));
 }
 
 // ── A2. the broker-independent net in processFile ───────────────────────────────────────────
