@@ -20,6 +20,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { ShareIndiaBrokerStrategy, isDerivativeContract, derivativeSttInAnnexure } from './src/lib/brokers/shareindia';
+import { dropDerivativeTrades } from './src/lib/brokers/utils';
 
 const ROOT = process.env.SI_ROOT || '.';
 let pass = 0, fail = 0;
@@ -35,10 +36,34 @@ for (const s of ['NIFTY03NOV202621550PE', 'SENSEX29OCT202674600CE', 'NIFTY25NOV2
                  'BANKNIFTY26NOV202651000.5CE', 'NIFTY(OPTIDX-21550-03-11-2026)', 'RELIANCE(FUTSTK-27-11-2026)']) {
   ok(`contract: ${s}`, isDerivativeContract(s));
 }
-// ETFs named after an index are SHARES, and must never be caught by the contract test.
-for (const s of ['Sambhv Steel Tubes Limited', 'NIFTYBEES', 'BANKBEES', 'Rel Etf Lquid Bees',
-                 'Manbro Industries Limited', 'SENSEX ETF', 'Scrip Summary', '']) {
+// FUTURES with no strike and no "FUT" — the exact names that reached the confirm-company popup on
+// 03-Nov-2026 as "matched by name" after the first fix, which demanded a CE|PE|FUT ending.
+for (const s of ['ULTRACEMCO25AUG2026', 'ULTRACEMCO28JUL2026', 'COFORGE25AUG2026', 'ETERNAL25AUG2026',
+                 'HDFCBANK25AUG2026', 'M&M25AUG2026', 'BAJAJ-AUTO25AUG2026', 'NIFTY25NOV2026 FUT']) {
+  ok(`future: ${s}`, isDerivativeContract(s));
+}
+// ETFs named after an index are SHARES, and must never be caught by the contract test; nor may
+// a name whose "month" is not a month.
+for (const s of ['Sambhv Steel Tubes Limited', 'Venus Pipes & Tubes Limited', 'NIFTYBEES', 'BANKBEES',
+                 'Rel Etf Lquid Bees', 'Manbro Industries Limited', 'SENSEX ETF', 'Scrip Summary',
+                 'SGBJUN28', 'ABC12XYZ2026', '']) {
   ok(`not a contract: "${s}"`, !isDerivativeContract(s));
+}
+
+// ── A2. the broker-independent net in processFile ───────────────────────────────────────────
+{
+  const mk = (securityName: string) => ({ securityName } as any);
+  const trades = [mk('Venus Pipes & Tubes Limited'), mk('ULTRACEMCO25AUG2026'), mk('HDFCBANK25AUG2026')];
+  const dropped = dropDerivativeTrades(trades);
+  ok('net: drops the futures', dropped.length === 2, `${dropped.length}`);
+  ok('net: keeps the share, in the SAME array', trades.length === 1 && trades[0].securityName === 'Venus Pipes & Tubes Limited');
+
+  // processFile is gapi/File-driven and not executable here, so its wiring is asserted on SOURCE.
+  const src = readFileSync(`${ROOT}/src/lib/parsers.ts`, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+  ok('processFile applies the net', /dropDerivativeTrades\(res\.trades\)/.test(src));
+  ok('processFile re-runs reconciliation after dropping', /res\.reconciliation\s*=\s*calculateReconciliation/.test(src));
+  // The F&O message was SWALLOWED: the catch re-threw only "FnO", so the user got a silent null.
+  ok('processFile re-throws the F&O message', /includes\("F&O"\)/.test(src));
 }
 
 // ── B. the real notes ───────────────────────────────────────────────────────────────────────

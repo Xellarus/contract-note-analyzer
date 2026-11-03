@@ -9,7 +9,8 @@ import {
   getUCC,
   calculateReconciliation,
   extractIsin,
-  stripIsin
+  stripIsin,
+  isDerivativeContract
 } from './utils';
 
 /**
@@ -34,23 +35,9 @@ export function looksLikeDerivativesNote(text: string): boolean {
     || /\bderivatives?\s+segment\b/i.test(text);
 }
 
-/**
- * Is this security an F&O CONTRACT rather than a share? NFO/BFO trades are not imported.
- *
- * Until 17-Sep-2026 they were kept out by accident: `finalizeContractNote` dropped every row
- * without an ISIN, and a contract row has none. That gate was removed so wrapped equity rows
- * would import, and every option on a mixed CM + FO note came in with it — 145 of 146 trades on
- * CS1106 29-10-2026. Exclusion is now stated, by the contract's own shape:
- *
- *   NIFTY03NOV202621550PE  /  SENSEX29OCT202674600CE   trade rows: underlying, DDMMMYYYY,
- *                                                       strike, CE|PE (futures end FUT)
- *   NIFTY(OPTIDX-21550-03-11-2026)                      the Annexure II STT statement
- */
-export function isDerivativeContract(name: string): boolean {
-  const s = (name || "").trim().toUpperCase();
-  return /^[A-Z][A-Z0-9&-]*\d{2}[A-Z]{3}\d{2,4}(\d+(\.\d+)?)?(CE|PE|FUT)$/.test(s)
-    || /\b(OPT|FUT)(IDX|STK|CUR|IRD)\b/.test(s);
-}
+// The contract test is shared by every broker (`processFile` applies it as a net); Share India
+// also applies it itself, BEFORE allocating the note's charges. Re-exported for tmp-si-nfo.ts.
+export { isDerivativeContract };
 
 /**
  * STT on the derivative rows of the Annexure II STT statement. That statement's `Total STT` is

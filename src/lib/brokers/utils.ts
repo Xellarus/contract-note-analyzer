@@ -59,6 +59,42 @@ export const stripIsin = (name: string | null | undefined): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+/**
+ * Is this security an F&O CONTRACT rather than a share? NFO/BFO trades are never imported.
+ *
+ *   NIFTY03NOV202621550PE     option: underlying, DDMMMYYYY expiry, strike, CE|PE
+ *   ULTRACEMCO25AUG2026       FUTURE: underlying + expiry and NOTHING else — no strike, no "FUT".
+ *   NIFTY25NOV2026FUT         a future that does carry the suffix
+ *   NIFTY(OPTIDX-21550-...)   the Share India STT annexure's spelling
+ *
+ * The bare-future shape is the one that got through on 03-Nov-2026 (UltraTech, Coforge, Eternal,
+ * HDFC Bank reaching the confirm-company popup as "matched by name"). The month must be a REAL
+ * month, which is what keeps an ordinary scrip name from matching: no share is named
+ * "<word><dd><MON><yyyy>". Index ETFs (NIFTYBEES) carry no expiry and never match.
+ */
+const MON = "(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)";
+const CONTRACT_RE = new RegExp(`^[A-Z][A-Z0-9&-]*?\\d{2}${MON}\\d{2}(?:\\d{2})?(?:\\d+(?:\\.\\d+)?)?(?:CE|PE|FUT)?$`);
+export function isDerivativeContract(name: string | null | undefined): boolean {
+  const s = (name || "").trim().toUpperCase().replace(/\s+(CE|PE|FUT)$/, "$1");
+  return CONTRACT_RE.test(s) || /\b(OPT|FUT)(IDX|STK|CUR|IRD|IVX)\b/.test(s);
+}
+
+/**
+ * The broker-independent net: no parser's result may carry an F&O contract out of
+ * `processFile`. Share India already removes them itself, before allocating charges; for any
+ * other broker the charges already pro-rated onto a contract go with it, and the reconciliation
+ * says so rather than this hiding it. Returns the contracts it removed.
+ */
+export function dropDerivativeTrades(trades: Trade[]): Trade[] {
+  const dropped = trades.filter(t => isDerivativeContract(t.securityName));
+  if (dropped.length) {
+    const keep = trades.filter(t => !isDerivativeContract(t.securityName));
+    trades.length = 0;
+    trades.push(...keep);
+  }
+  return dropped;
+}
+
 export const isFootnoteOrDisclaimer = (text: string | null): boolean => {
   if (!text) return false;
   const l = text.toLowerCase();

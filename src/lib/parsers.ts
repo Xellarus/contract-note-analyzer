@@ -1,5 +1,5 @@
 import { ContractNoteResult, ReconciliationStatus, Summary, Trade } from '../types';
-import { extractTextFromPDF, calculateReconciliation } from './brokers/utils';
+import { extractTextFromPDF, calculateReconciliation, dropDerivativeTrades } from './brokers/utils';
 import { getBroker, detectBroker } from './brokers/registry';
 import { BrokerId } from './brokers/types';
 
@@ -47,6 +47,18 @@ export const processFile = async (
       else res = null;
     }
 
+    // NFO/BFO contracts are never imported, whichever broker produced the note. A note that
+    // was NOTHING but contracts says so, rather than reaching the confirm popup empty.
+    if (res && res.trades.length > 0) {
+      const dropped = dropDerivativeTrades(res.trades);
+      if (dropped.length) {
+        if (res.trades.length === 0) {
+          throw new Error("This contract note only has F&O transactions, which this app does not import.");
+        }
+        res.reconciliation = calculateReconciliation(res.summary, res.trades);
+      }
+    }
+
     // Fall back to the portfolio code in the filename when the content had none.
     if (res && !res.ucc) {
       const fileUcc = uccFromFilename(file.name);
@@ -54,7 +66,7 @@ export const processFile = async (
     }
     return res;
   } catch (e: any) {
-    if (e.message === "PDF_PASSWORD_REQUIRED" || (e.message && (e.message.startsWith("Invalid Contract Note") || e.message.includes("FnO")))) {
+    if (e.message === "PDF_PASSWORD_REQUIRED" || (e.message && (e.message.startsWith("Invalid Contract Note") || e.message.includes("FnO") || e.message.includes("F&O")))) {
       throw e;
     }
     console.error("Error processing file:", e);
