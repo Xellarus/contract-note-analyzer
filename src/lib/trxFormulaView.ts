@@ -1,7 +1,7 @@
 import { gapi } from "gapi-script";
 import { ensureSheetTabs } from "./sheetTabs";
 import { generateTrxRegister } from "./trxRegister";
-import { CgFormulaSource, FORMULA_TAB_SUFFIX, buildFormulaGrid, BANNER_ROWS, buildPaintRequests } from "./trxFormulaGrid";
+import { CgFormulaSource, FORMULA_TAB_SUFFIX, buildFormulaGrid, BANNER_ROWS, buildPaintRequests, NoRateHint, mergeNoRateHints } from "./trxFormulaGrid";
 
 export { FORMULA_TAB_SUFFIX, buildFormulaGrid, colA1, buildPaintRequests, BANNER_ROWS } from "./trxFormulaGrid";
 export type { CgFormulaSource } from "./trxFormulaGrid";
@@ -85,6 +85,15 @@ async function withBackoff<T>(fn: () => Promise<T>, tries = 4): Promise<T> {
 export interface FormulaViewResult {
   /** The tabs written, in the order written. */
   tabs: string[];
+  /**
+   * The spreadsheet the twins were written to — taken from the register, never re-resolved,
+   * so a twin cannot land anywhere but beside the tab it twins.
+   *
+   * Always set, including when it IS the account's own sheet: absent-on-no-redirect cannot
+   * distinguish "no override" from "the override did not match", and those read the same from
+   * the UI while meaning opposite things.
+   */
+  reportSheetId: string;
   /** Per tab: how many cells became formulas. 0 on a tab with no sales is correct, not a failure. */
   formulaCells: number;
   fyLabel: string;
@@ -163,7 +172,39 @@ export interface FormulaViewResult {
   chargeNearMiss: number;
   chargeNoRate: number;
   chargeNoTurnover: number;
+  /**
+   * Charges UNDER A RUPEE that matched nothing - where allocation noise and a wrong rate are the
+   * same observation and no test could have told them apart.
+   *
+   * Split out of `chargeNoRate` on 26-Oct-2026, because that number read 455 on the owner's book
+   * while the implied rates behind it were nonsense (SEBI asking Rs 3,087/crore against a
+   * statutory Rs 10) - a sub-rupee charge divided by its turnover produces exactly that. Counting
+   * them as fixable pointed at the wrong work; a rate sheet cannot touch them.
+   */
+  chargeTooSmall: number;
+  /**
+   * Exchange levies that matched nothing ON AN OFF-MARKET TAB (Private Equity, AIF) - where no
+   * exchange was involved, so no statutory identity could ever have applied.
+   *
+   * Split out on 26-Oct-2026 after the twin was found trying NSE and BSE exchange rates against
+   * private-equity rows and binning every one as a missing rate. They are still ATTEMPTED, since
+   * a company that listed mid-year keeps its whole year on the unlisted tab and its post-listing
+   * exchange charges genuinely should derive; only the MISS is reported differently.
+   */
+  chargeOffMarket: number;
   chargeMissBy: Record<string, number>;
+  /**
+   * The rates the data is ASKING FOR - recovered by division from the cells that matched no
+   * candidate, grouped and counted, commonest first.
+   *
+   * This is what turns `chargeNoRate` from a count into a shopping list: a charge that
+   * reproduces no known rate still knows what rate it WAS, and "375.00 per crore x 112" names
+   * the BSE A/B exchange charge without anyone having to guess. Quoted per CRORE because that is
+   * the unit every exchange circular uses; GST is quoted as a PERCENTAGE of the base that was
+   * tried, so a figure above 18% means the note's base holds something this ledger does not
+   * carry.
+   */
+  chargeNoRateHints: NoRateHint[];
   /** Did the colour bands land? Values are written either way. */
   painted: boolean;
 }
@@ -176,12 +217,23 @@ export interface FormulaViewResult {
  * here either — a derived view of figures that failed their own guard is the worst of both.
  */
 export async function generateFormulaView(
-  spreadsheetId: string,
+  /** The account's DATABASE, for the collect run to read the ledger from. Renamed from
+   *  `spreadsheetId` on 29-Oct-2026 so every use below had to be re-pointed under `tsc`. */
+  sourceSpreadsheetId: string,
   fyStartYear: number,
   title?: string,
+  /** Where the twins are written. Defaults to the source; resolved by the caller through
+   *  `reportSheetIdFor`. */
+  destSpreadsheetId?: string,
 ): Promise<FormulaViewResult> {
   const collected: CgFormulaSource[] = [];
-  const res = await generateTrxRegister(spreadsheetId, fyStartYear, title, collected);
+  const res = await generateTrxRegister(sourceSpreadsheetId, fyStartYear, title, collected, destSpreadsheetId);
+  // A TWIN MUST LAND BESIDE THE TAB IT TWINS, and the register is the authority on where that
+  // is - not this function's own argument. Taking `res.reportSheetId` rather than re-resolving
+  // the destination means the two cannot disagree: a twin written into the account's own sheet
+  // while the filed tab went elsewhere is a formula page with nothing to be a formula page OF,
+  // and `<tab> (Formula)` sitting alone reads as though the register had failed.
+  const dstId = res.reportSheetId || sourceSpreadsheetId;
   if (!res.collectedOnly) {
     // Unreachable while the sink is passed, and asserted rather than assumed: a future edit that
     // drops the early return would silently REWRITE every filed tab from a button whose whole
@@ -192,13 +244,14 @@ export async function generateFormulaView(
   const tabs: string[] = [];
   let formulaCells = 0, salesDerived = 0, acqDerived = 0, acqSummed = 0, acqAsValue = 0, expenseRowsTotalled = 0;
   let chargeDerived = 0, chargeAttempted = 0;
-  let chargeNearMiss = 0, chargeNoRate = 0, chargeNoTurnover = 0;
+  let chargeNearMiss = 0, chargeNoRate = 0, chargeNoTurnover = 0, chargeTooSmall = 0, chargeOffMarket = 0;
   const chargeDerivedBy: Record<string, number> = {};
   const chargeMissBy: Record<string, number> = {};
+  const hintLists: NoRateHint[][] = [];
   let acqSpanned = 0, acqRounding = 0, acqNoRate = 0;
 
   const titles = collected.map(c => c.tab + FORMULA_TAB_SUFFIX);
-  if (titles.length) await withBackoff(() => ensureSheetTabs(spreadsheetId, titles));
+  if (titles.length) await withBackoff(() => ensureSheetTabs(dstId, titles));
 
   // ONE metadata read for every twin, not one per tab. A `batchUpdate` request carries its own
   // `sheetId`, so N paints never need N `spreadsheets.get` calls - and this runs inside the
@@ -206,7 +259,7 @@ export async function generateFormulaView(
   const idByTitle = new Map<string, number>();
   try {
     const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
-      spreadsheetId, fields: "sheets.properties(sheetId,title)",
+      spreadsheetId: dstId, fields: "sheets.properties(sheetId,title)",
     }));
     for (const sh of (meta?.result?.sheets || [])) {
       const t = (sh.properties?.title || "").toString().trim().toLowerCase();
@@ -223,19 +276,20 @@ export async function generateFormulaView(
             acqSpanned: asp, acqRounding: aro, acqNoRate: anr,
             expenseRowsTotalled: ert, chargeDerived: cd, chargeAttempted: ca,
             chargeDerivedBy: cdb, chargeNearMiss: cnm, chargeNoRate: cnr,
-            chargeNoTurnover: cnt, chargeMissBy: cmb } = buildFormulaGrid(src);
+            chargeNoTurnover: cnt, chargeTooSmall: cts, chargeOffMarket: cof, chargeMissBy: cmb,
+            chargeNoRateHints: cnh } = buildFormulaGrid(src);
     // A:Z is narrower than the twin (the added column can land at Z+1), so clear by the grid's
     // own width rather than a constant - a stale column from a previous, wider run would
     // otherwise sit beside live figures.
     await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({
-      spreadsheetId, range: `${tab}!A:AZ`,
+      spreadsheetId: dstId, range: `${tab}!A:AZ`,
     }));
     await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
       // USER_ENTERED is REQUIRED for a formula to evaluate, and safe here only because
       // `fmtDate` writes dd.mm.yyyy with DOTS. Slashed dd/mm/yyyy would be reparsed as US
       // mm-dd for every day <= 12 - which is why the ITR schedule is written RAW and is
       // deliberately not twinned by this view.
-      spreadsheetId, range: `${tab}!A1`, valueInputOption: "USER_ENTERED", resource: { values: rows },
+      spreadsheetId: dstId, range: `${tab}!A1`, valueInputOption: "USER_ENTERED", resource: { values: rows },
     }));
     tabs.push(tab);
     formulaCells += n;
@@ -243,8 +297,13 @@ export async function generateFormulaView(
     acqDerived += ad; acqSummed += asu; acqAsValue += av; expenseRowsTotalled += ert;
     chargeDerived += cd; chargeAttempted += ca;
     for (const k of Object.keys(cdb)) chargeDerivedBy[k] = (chargeDerivedBy[k] || 0) + cdb[k];
-    chargeNearMiss += cnm; chargeNoRate += cnr; chargeNoTurnover += cnt;
+    chargeNearMiss += cnm; chargeNoRate += cnr; chargeNoTurnover += cnt; chargeTooSmall += cts;
+    chargeOffMarket += cof;
     for (const k of Object.keys(cmb)) chargeMissBy[k] = (chargeMissBy[k] || 0) + cmb[k];
+    // MERGED across tabs through the SHARED rule, never taken from one. The same missing rate
+    // appears on the delivery tab and on both single-period tabs, so a reader comparing "112
+    // cells" against a per-tab figure would be comparing two different things.
+    hintLists.push(cnh);
     acqSpanned += asp; acqRounding += aro; acqNoRate += anr;
 
     const sheetId = idByTitle.get(tab.trim().toLowerCase());
@@ -258,7 +317,7 @@ export async function generateFormulaView(
   if (paintRequests.length) {
     try {
       await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({
-        spreadsheetId, resource: { requests: paintRequests },
+        spreadsheetId: dstId, resource: { requests: paintRequests },
       }));
       painted = true;
     } catch (e) {
@@ -266,8 +325,10 @@ export async function generateFormulaView(
     }
   }
 
-  return { tabs, formulaCells, fyLabel: res.fyLabel, salesDerived, acqDerived, acqSummed,
+  return { tabs, reportSheetId: dstId, formulaCells, fyLabel: res.fyLabel, salesDerived, acqDerived, acqSummed,
            acqAsValue, acqSpanned, acqRounding, acqNoRate, expenseRowsTotalled,
            chargeDerived, chargeAttempted, chargeDerivedBy,
-           chargeNearMiss, chargeNoRate, chargeNoTurnover, chargeMissBy, painted };
+           chargeNearMiss, chargeNoRate, chargeNoTurnover, chargeTooSmall, chargeOffMarket, chargeMissBy,
+           chargeNoRateHints: mergeNoRateHints(hintLists),
+           painted };
 }

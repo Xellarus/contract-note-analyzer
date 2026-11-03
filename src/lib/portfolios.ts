@@ -136,6 +136,90 @@ export const portfolioByCode = (code: string): Portfolio | undefined => {
 
 export const sheetIdForId = (id: string): string => portfolioById(id)?.sheetId ?? '';
 
+/**
+ * WHERE A PORTFOLIO'S GENERATED REPORTS GO, when that is not its own sheet.
+ *
+ * `Portfolio.sheetId` is the account's DATABASE - True Entry, Opening Holdings, Corporate
+ * Actions, the live Holding tab, every import. That never moves through this table and nothing
+ * here can redirect a read.
+ *
+ * This redirects the capital-gains REGISTER's output for ONE financial year: the gains tabs,
+ * the transaction statements, the three FY-end holding statements, the ITR unlisted schedule
+ * and the formula twins. The ledger stays where the app reads it from.
+ *
+ * Keyed on portfolio AND FY start year, deliberately. A redirect that applied to every year
+ * would regenerate an ALREADY-FILED year into a new workbook on the next click, leaving the
+ * version in the original sheet standing as an orphan under a heading that still looks
+ * current - the exact failure the legacy-tab rename exists to prevent, arriving from a new
+ * direction. One year, one entry, one decision.
+ *
+ * Adding another account or another year is ONE entry here.
+ */
+export interface ReportDestination {
+  /** `Portfolio.id`, lowercase - the same key `portfolioById` takes. */
+  portfolioId: string;
+  /** FY START year: 2026 means FY26-27 (1-Apr-2026 to 31-Mar-2027). */
+  fyStartYear: number;
+  /** The Google Sheet the reports for that year are WRITTEN to. */
+  sheetId: string;
+  /** Why, in the owner's words. Shown nowhere; it is here for the next reader. */
+  note?: string;
+}
+
+export const REPORT_DESTINATIONS: ReportDestination[] = [
+  {
+    portfolioId: 's713', fyStartYear: 2026,
+    sheetId: '1W3XgGm8-vJksXeOg0EA2Gq7yNOdrfAkTk7ZJ5ShzRaA',
+    note: 'Owner request 29-Oct-2026: FY26-27 reports for Integrated / Saket Agarwal / S713 go to a separate workbook. The ledger stays in the S713 sheet.',
+  },
+  // The other four Integrated accounts, same arrangement, same year (owner request
+  // 03-Nov-2026, one workbook link supplied per account). Each ledger stays where it is.
+  //
+  // EVERY DESTINATION IS A DIFFERENT WORKBOOK, and with five entries that stopped being
+  // self-evident. Two accounts sharing one would not fail or warn: the tab names carry the FY
+  // but not the account, so the second run would overwrite the first's `Capital Gains for
+  // FY26-27` in place and one client's filed figures would simply be gone. Asserted over the
+  // table in `tmp-trx.ts`, together with the rule that no destination is any account's ledger.
+  {
+    portfolioId: 't059', fyStartYear: 2026,
+    sheetId: '12v7dp0j9c6XIMMLBDWijLZpBHdH1yHVibe1fNAGy638',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Integrated / Taparia Holdings / T059.',
+  },
+  {
+    portfolioId: 's1404', fyStartYear: 2026,
+    sheetId: '1HPtBzHEFLJ872APSfjLHXBwd8-5J6sfGN3ru8KXJLkE',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Integrated / Sagun Capital / S1404.',
+  },
+  {
+    portfolioId: 'g058', fyStartYear: 2026,
+    sheetId: '1Sc5w91euToJDu7SfbkVDZuikhSVtnoRiqqNjx-1tFSs',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Integrated / Gunjan Agarwal / G058.',
+  },
+  {
+    portfolioId: 'c087', fyStartYear: 2026,
+    sheetId: '1W7G6WJ3x_NsvdsXYMub2K_lWZ57gPUp3F5iQND91Ke4',
+    note: 'Owner request 03-Nov-2026: FY26-27 reports for Integrated / Chaitanya Agarwal / C087.',
+  },
+];
+
+/**
+ * The sheet a portfolio's reports for a given FY are written to.
+ *
+ * Falls back to the portfolio's own sheet, so an account with no entry behaves exactly as it
+ * always has - and a TYPO in `portfolioId` or `fyStartYear` fails that way too, writing to the
+ * ordinary place rather than somewhere unexpected. `reportDestinationFor` is what the UI uses
+ * to SAY a redirect is in force, because "it went to the usual place" and "the override did not
+ * match" are the same observation from here and must not be.
+ */
+export const reportDestinationFor = (
+  portfolioId: string, fyStartYear: number,
+): ReportDestination | undefined =>
+  REPORT_DESTINATIONS.find(d => d.portfolioId === portfolioId && d.fyStartYear === fyStartYear);
+
+export const reportSheetIdFor = (portfolioId: string, fyStartYear: number): string =>
+  reportDestinationFor(portfolioId, fyStartYear)?.sheetId || sheetIdForId(portfolioId);
+
+
 export const portfolioSheetUrl = (id: string): string => {
   const s = sheetIdForId(id);
   return s ? `https://docs.google.com/spreadsheets/d/${s}/edit` : '';

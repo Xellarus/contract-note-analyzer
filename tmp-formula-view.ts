@@ -10,8 +10,22 @@
  * Run:  npx tsx tmp-formula-view.ts
  */
 import { readFileSync } from "node:fs";
-import { buildFormulaGrid, colA1, FORMULA_TAB_SUFFIX, BANNER_ROWS, buildPaintRequests, acquisitionCostFormula, acquisitionMiss, acquisitionSumFormula, expenseFormulas, chargeIdentityFormulas, CHARGE_RATES } from "./src/lib/trxFormulaGrid";
+import { buildFormulaGrid, colA1, FORMULA_TAB_SUFFIX, BANNER_ROWS, buildPaintRequests, acquisitionCostFormula, acquisitionMiss, acquisitionSumFormula, expenseFormulas, chargeIdentityFormulas, CHARGE_RATES, mergeNoRateHints } from "./src/lib/trxFormulaGrid";
 let pass = 0, fail = 0;
+
+/**
+ * Re-base a formula written in the FILED TAB's own rows onto the twin, which sits
+ * `BANNER_ROWS` lower. Every grid-driven expectation below is authored in filed-tab rows and
+ * passed through this, so moving the banner can never leave one pointing a row off the cell it
+ * means - which is the failure mode that would otherwise pass silently, because a formula
+ * reading the row above is still a well-formed formula.
+ *
+ * Only for assertions against `buildFormulaGrid`. The builders driven DIRECTLY (acquisition
+ * sums, charge identities) are handed explicit row numbers by their caller and carry no banner.
+ */
+const tw = (f: string) =>
+  f.replace(/\b([A-Z]{1,2})(\d+)\b/g, (_m, c, n) => `${c}${Number(n) + BANNER_ROWS}`);
+
 const ok = (label: string, cond: boolean) => {
   if (cond) { pass++; console.log(`  ok   ${label}`); }
   else { fail++; console.log(`  FAIL ${label}`); }
@@ -92,9 +106,10 @@ const src = () => {
       // No purchase rows in this block — the position is carried in, so every acquisition is an
       // opening date-line. `srcCharged()` below is the one that exercises them.
       purchaseRows: [],
-      chargeCols: { brok: 11, stt: 12, gst: -1, et: -1, stamp: -1, sebi: -1, ipf: -1, dmat: -1 },
+      chargeCols: { brok: 11, stt: 12, gst: -1, et: -1, stamp: -1, sebi: -1, ipf: -1 },
       expenseRows: { breakdown: 10, total: 11, totalCol: 11 },
       isIntraday: false,
+      isOffMarket: false,
       firstDataRow: 3,
       paint: {
         sno: 0, name: 0, oDate: 1, pDate: 5, sDate: 5,
@@ -200,9 +215,10 @@ const srcCharged = () => {
       grandTotalRow: 6,
       plColsUsed: [13],
       chargeColsUsed: [14, 16],
-      chargeCols: { brok: 14, stt: 16, gst: -1, et: -1, stamp: -1, sebi: -1, ipf: -1, dmat: -1 },
+      chargeCols: { brok: 14, stt: 16, gst: -1, et: -1, stamp: -1, sebi: -1, ipf: -1 },
       expenseRows: { breakdown: 7, total: 8, totalCol: 14 },
       isIntraday: false,
+      isOffMarket: false,
       firstDataRow: 3,
       paint: {
         sno: 0, name: 0, oDate: 1, pDate: 5, sDate: 9,
@@ -256,9 +272,10 @@ const srcRates = () => {
       grandTotalRow: 5,
       plColsUsed: [13],
       chargeColsUsed: [14, 15, 16, 17, 18, 19, 21],
-      chargeCols: { brok: 14, stt: 15, gst: 16, et: 17, stamp: 18, sebi: 19, ipf: 21, dmat: -1 },
+      chargeCols: { brok: 14, stt: 15, gst: 16, et: 17, stamp: 18, sebi: 19, ipf: 21 },
       expenseRows: { breakdown: 6, total: 7, totalCol: 14 },
       isIntraday: false,
+      isOffMarket: false,
       firstDataRow: 3,
       paint: {
         sno: 0, name: 0, oDate: 1, pDate: 5, sDate: 9,
@@ -297,11 +314,11 @@ console.log("\n-- the per-sale gain ----------------------------------------");
   const B = BANNER_ROWS;
   // ACQUISITION COST = sale qty x the rate it was acquired at, both of them cells on this tab.
   // G10 is the ST sale's own quantity; D7 is the FIRST opening line's rate.
-  eq("acquisition cost is qty x the acquisition rate (ST)", rows[6 + B][WIDTH], "=ROUND(G11*D8,2)");
+  eq("acquisition cost is qty x the acquisition rate (ST)", rows[6 + B][WIDTH], tw("=ROUND(G7*D4,2)"));
   // THE ONE THAT MATTERS: this sale's cost comes from the SECOND opening line, so the builder
   // must have tried the first, found it did not reproduce the engine, and moved on.
   eq("...and the SECOND candidate is reached when the first does not fit (LT)",
-     rows[7 + B][WIDTH], "=ROUND(G12*D9,2)");
+     rows[7 + B][WIDTH], tw("=ROUND(G8*D5,2)"));
   // THE VERIFIER MUST MULTIPLY BY WHAT THE CELL EVALUATES TO, NOT BY WHAT IT PRINTS. D7 becomes
   // `=F7/D7` further down this same builder, so Sheets multiplies by 250.0000003 — and at 20,000
   // shares that is a PAISE away from the printed 250. These two lines are the fixture proving the
@@ -314,9 +331,10 @@ console.log("\n-- the per-sale gain ----------------------------------------");
   // Both inputs on the SAME row. The filed layout cannot express this: FIFO matches a sale
   // against lots spread over the purchase rows above, so the purchase row BESIDE a sale is not
   // the lot it consumed and `=saleAmt - purchaseAmt` across adjacent rows would be wrong.
-  eq("the ST gain is a formula over its own row", rows[6 + B][9], "=I11-N11");
-  eq("the LT gain is a formula over its own row", rows[7 + B][10], "=I12-N12");
-  ok("the row refs account for the banner", /11$/.test(rows[6 + B][9]) && /12$/.test(rows[7 + B][10]));
+  eq("the ST gain is a formula over its own row", rows[6 + B][9], tw("=I7-N7"));
+  eq("the LT gain is a formula over its own row", rows[7 + B][10], tw("=I8-N8"));
+  ok("the row refs account for the banner",
+     new RegExp(`${7 + B}$`).test(rows[6 + B][9]) && new RegExp(`${8 + B}$`).test(rows[7 + B][10]));
   // 4 rates + 2 gains + 2 acquisition costs + 2 P/L totals + 2 charge totals + the acquisition
   // column total + 2 expense column totals + 2 rows x (EXPENSES, EX-STT) + the footer Total,
   // its ex-STT companion and the cross-foot
@@ -386,7 +404,7 @@ console.log("\n-- a refused derivation keeps the VALUE, and is COUNTED ------");
   // derived is the failure this count exists to prevent.
   eq("...and both fallbacks are counted", acqAsValue, 2);
   // The P/L formula is written either way — it reads the ACQUISITION COST cell, whatever is in it.
-  eq("the gain still reads its own row", rows[6 + B][9], "=I11-N11");
+  eq("the gain still reads its own row", rows[6 + B][9], tw("=I7-N7"));
 }
 
 console.log("\n-- a fallback SAYS WHICH KIND of fallback it is -------------");
@@ -432,15 +450,18 @@ console.log("\n-- the candidates are SCOPED TO THE BLOCK -------------------");
   // ...and SNAPSHOT, never the live array, or every sale on the tab ends up holding the LAST
   // block's rates once the loop has run to the end.
   ok("each sale takes a COPY of the list", /acqCands: \[\.\.\.blockAcq\]/.test(REG));
-  ok("an opening date-line is a candidate", /noteAcq\(out\.length - 1, COL\.oRate, /.test(REG));
+  // `of` is `L.openCols()`, the throwing accessor the opening family is reached through now
+  // that it is absent from `ColMap` on the acquisition tabs. Anchored on the CALL, not on a
+  // column name, so it keeps testing the thing it is about.
+  ok("an opening date-line is a candidate", /noteAcq\(out\.length - 1, of\.r, /.test(REG));
   ok("an in-year purchase is one too", /noteAcq\(out\.length - 1, COL\.pRate, /.test(REG));
   // EVERY candidate carries the DATE its row states, and that is what ties a consumed lot back
   // to the row that supplied it. Rate alone multiplies out identically from any row sharing it,
   // so a sum could foot perfectly while naming the wrong date line.
   ok("a candidate records the date its row states",
      /const noteAcq = \(r: number, rateCol: number, ts\?: number\) =>/.test(REG));
-  ok("the opening head row passes its own date", /noteAcq\(out\.length - 1, COL\.oRate, openAgg\[0\]\.ts\)/.test(REG));
-  ok("a further opening line passes its own", /noteAcq\(out\.length - 1, COL\.oRate, a\.ts\)/.test(REG));
+  ok("the opening head row passes its own date", /noteAcq\(out\.length - 1, of\.r, openAgg\[0\]\.ts\)/.test(REG));
+  ok("a further opening line passes its own", /noteAcq\(out\.length - 1, of\.r, a\.ts\)/.test(REG));
   ok("a purchase passes its own", /noteAcq\(out\.length - 1, COL\.pRate, p\.ts\)/.test(REG));
   // A RESTATEMENT is an acquisition rate. After a split the lots carry the rescaled `purPrice`,
   // so a later sale costs qty x the RESTATED rate and NO original opening rate can reproduce it —
@@ -489,13 +510,13 @@ console.log("\n-- A SALE SPANNING LOTS IS A SUM, NOT A FALLBACK -------------");
   // One term per lot. The QUANTITIES are literals because 3,600 and 4,400 are stated on no row —
   // the sale row says 8,000 and the purchase rows say 40,000 and 20,000 — while every RATE is a
   // cell, so it is referenced. D7 is the 12-Aug line, D8 the 11-Sep one.
-  eq("a two-lot sale reads as the sum it is", rows[5 + B][WIDTH], "=ROUND(3600*D8+4400*D9,2)");
+  eq("a two-lot sale reads as the sum it is", rows[5 + B][WIDTH], tw("=ROUND(3600*D4+4400*D5,2)"));
   eq("...and it is counted as a sum, not a derivation", acqSummed, 1);
   eq("...so no single rate was credited", acqDerived, 0);
   eq("...and nothing fell back", acqAsValue, 0);
   eq("...so the multi-lot bucket is empty", acqSpanned, 0);
   // The P/L still reads its own row, whatever shape the cost cell took.
-  eq("the gain reads the summed cost", rows[5 + B][9], "=I10-N10");
+  eq("the gain reads the summed cost", rows[5 + B][9], tw("=I6-N6"));
 
   // THE SUM MUST MULTIPLY BY WHAT THE RATE CELL EVALUATES TO, not by what it prints. Every rate
   // cell on the twin becomes `=AMOUNT/QTY`, so Sheets uses the full-precision quotient — the
@@ -507,7 +528,7 @@ console.log("\n-- A SALE SPANNING LOTS IS A SUM, NOT A FALLBACK -------------");
   live.derive.saleRows[0].pnl = 867601.19;
   live.derive.saleRows[0].matched[0].rate = 380.5780025;
   const b3 = buildFormulaGrid(live);
-  eq("the sum multiplies by the LIVE rate, not the printed one", b3.rows[5 + B][WIDTH], "=ROUND(3600*D8+4400*D9,2)");
+  eq("the sum multiplies by the LIVE rate, not the printed one", b3.rows[5 + B][WIDTH], tw("=ROUND(3600*D4+4400*D5,2)"));
   eq("...and really did derive at the paise the engine reported", b3.acqSummed, 1);
 
   // WITHOUT the match the very same block has to fall back — which is what proves the sum is
@@ -619,19 +640,19 @@ console.log("\n-- THE EXPENSE SIDE SHOWS ITS OWN WORKING --------------------");
 
   // NON-CONTIGUOUS. The real layout leaves `COL.exchClg` unwritten between SEBI and IPF, so a
   // `first:last` range would total a headed column carrying nothing.
-  eq("a PURCHASE row totals its charge cells", rows[4 + B][EXP], "=SUM(O9,Q9)");
-  eq("a SALE row totals its charge cells too", rows[5 + B][EXP], "=SUM(O10,Q10)");
+  eq("a PURCHASE row totals its charge cells", rows[4 + B][EXP], tw("=SUM(O5,Q5)"));
+  eq("a SALE row totals its charge cells too", rows[5 + B][EXP], tw("=SUM(O6,Q6)"));
   // Subtracted from the cell beside it, so the two can differ by EXACTLY the STT cell and by
   // nothing else. Re-summing seven columns here invites a second definition that could drift.
-  eq("ex-STT is the total MINUS the STT cell", rows[5 + B][DED], "=S10-Q10");
-  eq("...on the purchase row as well", rows[4 + B][DED], "=S9-Q9");
+  eq("ex-STT is the total MINUS the STT cell", rows[5 + B][DED], tw("=S6-Q6"));
+  eq("...on the purchase row as well", rows[4 + B][DED], tw("=S5-Q5"));
   // A row with no charge block is left alone — `=SUM()` over blanks prints a confident 0.00
   // under a heading, which reads as "this row cost nothing" rather than "this row has no charges".
   ok("an opening date-line gets no expense total", typeof rows[3 + B][EXP] !== "string");
 
   // The footer `Total` is today a bare number with no stated relationship to the figures above.
-  eq("the footer Total sums the breakdown", rows[8 + B][14], "=SUM(O12,Q12)");
-  eq("...and its ex-STT companion", rows[8 + B][DED], "=O13-Q12");
+  eq("the footer Total sums the breakdown", rows[8 + B][14], tw("=SUM(O8,Q8)"));
+  eq("...and its ex-STT companion", rows[8 + B][DED], tw("=O9-Q8"));
 
   // THE BREAKDOWN ROW MUST STAY VALUES. This is the whole reason the cross-foot means anything:
   // point it at the GRAND TOTAL row and both sides reduce to one set of cells, so the check
@@ -641,11 +662,11 @@ console.log("\n-- THE EXPENSE SIDE SHOWS ITS OWN WORKING --------------------");
 
   // The cross-foot, stated ON the sheet, naming the difference rather than just failing.
   eq("the cross-foot compares the two routes to one total", rows[8 + B][EXP],
-     '=IF(ROUND(O13-S11,2)=0,"ties to the rows above","DIFFERS by "&TEXT(ROUND(O13-S11,2),"0.00"))');
+     tw('=IF(ROUND(O9-S7,2)=0,"ties to the rows above","DIFFERS by "&TEXT(ROUND(O9-S7,2),"0.00"))'));
 
   // Both halves must reach the GRAND TOTAL row or the cross-foot has nothing to read.
-  eq("the EXPENSES column is totalled", rows[6 + B][EXP], "=SUM(S8:S10)");
-  eq("...and the ex-STT column", rows[6 + B][DED], "=SUM(T8:T10)");
+  eq("the EXPENSES column is totalled", rows[6 + B][EXP], tw("=SUM(S4:S6)"));
+  eq("...and the ex-STT column", rows[6 + B][DED], tw("=SUM(T4:T6)"));
 
   // NOTHING NETS EXPENSES AGAINST A GAIN. s.48, and gains here are charge-free turnover. The
   // columns sit beside a P/L column, which already invites the misreading; a reference would
@@ -700,22 +721,22 @@ console.log("\n-- A STATUTORY RATE IS A CANDIDATE, NEVER AN ASSERTION -------");
   const { rows, chargeDerived, chargeDerivedBy } = buildFormulaGrid(srcRates() as any);
   const B = BANNER_ROWS;
   // Purchase row r3 -> sheet row 7; its turnover is in column I.
-  eq("delivery STT on a BUY is 0.1% of turnover", rows[3 + B][15], "=ROUND(0.001*I8,2)");
-  eq("stamp duty on a BUY is 0.015%", rows[3 + B][18], "=ROUND(0.00015*I8,2)");
-  eq("the SEBI turnover fee is Rs 10 per crore", rows[3 + B][19], "=ROUND(0.000001*I8,2)");
-  eq("the NSE exchange charge is Rs 307 per crore", rows[3 + B][17], "=ROUND(0.0000307*I8,2)");
+  eq("delivery STT on a BUY is 0.1% of turnover", rows[3 + B][15], tw("=ROUND(0.001*I4,2)"));
+  eq("stamp duty on a BUY is 0.015%", rows[3 + B][18], tw("=ROUND(0.00015*I4,2)"));
+  eq("the SEBI turnover fee is Rs 10 per crore", rows[3 + B][19], tw("=ROUND(0.000001*I4,2)"));
+  eq("the NSE exchange charge is Rs 307 per crore", rows[3 + B][17], tw("=ROUND(0.0000307*I4,2)"));
   // GST is 18% of a CHARGE BASE, never of turnover, and STT and stamp duty sit OUTSIDE it.
-  eq("GST is 18% of brokerage + ETC + SEBI", rows[3 + B][16], "=ROUND(0.18*(O8+R8+T8),2)");
+  eq("GST is 18% of brokerage + ETC + SEBI", rows[3 + B][16], tw("=ROUND(0.18*(O4+R4+T4),2)"));
   // BROKERAGE has no statutory identity — a plan is whatever it is, and a formula there would be
   // numerology that happened to foot.
   eq("brokerage is never attempted", rows[3 + B][14], 500);
 
   // Sale row r4 -> sheet row 8, turnover in column M.
-  eq("delivery STT on a SELL is 0.1% too", rows[4 + B][15], "=ROUND(0.001*M9,2)");
+  eq("delivery STT on a SELL is 0.1% too", rows[4 + B][15], tw("=ROUND(0.001*M5,2)"));
   // THE FIRST CANDIDATE IS NEVER TAKEN ON FAITH. NSE's Rs 307/crore gives 61.40 here; the figure
   // is the BSE A/B rate, so a later candidate has to be reached — and the row does not record
   // which exchange it traded on, which is exactly why every rate is offered and verified.
-  eq("a LATER exchange-charge candidate is reached", rows[4 + B][17], "=ROUND(0.0000375*M9,2)");
+  eq("a LATER exchange-charge candidate is reached", rows[4 + B][17], tw("=ROUND(0.0000375*M5,2)"));
   // There is no sell-side stamp duty on an exchange trade (collected from the buyer, s.9A(1)(a)),
   // and the cell is BLANK — turning it into 0.00 would assert a levy that does not exist.
   ok("a blank charge cell is never written", !String(rows[4 + B][18]).startsWith("="));
@@ -735,7 +756,7 @@ console.log("\n-- A STATUTORY RATE IS A CANDIDATE, NEVER AN ASSERTION -------");
   rupee.values[4][12] = 804;          // turnover 804 -> 0.1% = 0.804
   rupee.values[4][15] = 1;            // ...settled to the rupee
   rupee.derive.saleRows[0].turnover = 804;
-  eq("a rupee-settled STT derives with ROUND(...,0)", buildFormulaGrid(rupee).rows[4 + B][15], "=ROUND(0.001*M9,0)");
+  eq("a rupee-settled STT derives with ROUND(...,0)", buildFormulaGrid(rupee).rows[4 + B][15], tw("=ROUND(0.001*M5,0)"));
 
   // AND A CHARGE NO RATE REPRODUCES KEEPS ITS VALUE. On a scrip with several fills in one day the
   // per-trade STT is an ALLOCATION off a rounded day-aggregate (which is why `allocateStt` exists),
@@ -900,6 +921,178 @@ console.log("\n-- the rate table is DATA, and it is tried in order ----------");
   const sg2 = chargeIdentityFormulas(smallGap, ref);
   eq("...while 5 paise off the same charge is drift", [sg2.nearMiss, sg2.noRate].join("/"), "1/0");
 
+  // ── THE RATE THE DATA IS ASKING FOR ───────────────────────────────────────
+  //
+  // A real run reported 455 cells matching NO known rate against 257 of allocation drift, which
+  // is the opposite of what was predicted - so the missing rates are worth MORE than the drift,
+  // and "455" on its own says nothing about which rates to add. A charge that reproduces no
+  // candidate still knows what rate it WAS: divide it back out. Quoted per CRORE because that is
+  // the unit every exchange circular uses and the unit the owner will type.
+  const asking = bucketSrc();
+  asking.values[3][17] = 50;           // Rs 500/crore of 10,00,000 - no candidate is near it
+  const ask = chargeIdentityFormulas(asking, ref);
+  eq("an unmatched charge names the rate it would need",
+     JSON.stringify(ask.noRateHints.find(h => h.charge === "et")),
+     JSON.stringify({ charge: "et", tabs: ["Capital Gains for FY26-27"], unit: "crore", value: 500, count: 1 }));
+  // WHICH TAB wanted it, which is what says whether to act: a rate the listed book asks for is a
+  // gap in CHARGE_RATES, the same number asked for by an off-market tab is not a rate at all.
+  eq("...and names the tab that asked for it",
+     (ask.noRateHints.find(h => h.charge === "et") || { tabs: [] }).tabs.join(","), "Capital Gains for FY26-27");
+
+  // GROUPED AND COUNTED, or a list of one-off rows is as useless as the bare number. Both rows
+  // at the same rate must collapse to one hint of count 2.
+  const twice = bucketSrc();
+  twice.values[3][17] = 50;            // Rs 500/crore of 10,00,000
+  twice.values[4][17] = 100;           // Rs 500/crore of 20,00,000 - the SAME rate, other row
+  const tw = chargeIdentityFormulas(twice, ref);
+  eq("two rows asking for one rate are ONE hint, counted",
+     JSON.stringify(tw.noRateHints.find(h => h.charge === "et")),
+     JSON.stringify({ charge: "et", tabs: ["Capital Gains for FY26-27"], unit: "crore", value: 500, count: 2 }));
+
+  // GST is quoted against its BASE, never against turnover - and a figure ABOVE 18% is the note
+  // saying its base holds something this ledger has no column for. True Entry carries no
+  // clearing-charges column at all, so that is not hypothetical.
+  const wideBase = srcRates() as any;
+  wideBase.values[3][16] = 104.71;     // 18% of (531.70 + 50 of clearing this ledger cannot see)
+  const wideRes = chargeIdentityFormulas(wideBase, ref);
+  const gh = wideRes.noRateHints.find(h => h.charge === "gst");
+  eq("an unmatched GST names a PERCENTAGE of the base tried", gh && gh.unit, "pct");
+  eq("...and a base wider than the ledger's shows as ABOVE 18%", !!gh && gh.value > 18, true);
+
+  // ONLY for the no-rate bucket. A near miss already HAS its rate - it is a paise of allocation
+  // drift - so dividing there would report a rate ALREADY IN THE TABLE with noise on the end and
+  // swamp the list with near-duplicates of rates that need nothing done to them.
+  const drift = bucketSrc();
+  drift.values[3][19] = 1.04;          // 4 paise off the SEBI fee: drift, not a missing rate
+  const dr = chargeIdentityFormulas(drift, ref);
+  eq("allocation drift is NOT reported as a missing rate", dr.noRateHints.length, 0);
+  eq("...and it is still bucketed as drift", [dr.nearMiss, dr.noRate].join("/"), "1/0");
+
+  // A fixture that derives everything must ask for nothing, or the list is noise from the start.
+  eq("a clean book asks for no rates", chargeIdentityFormulas(bucketSrc(), ref).noRateHints.length, 0);
+
+  // THE CROSS-TAB MERGE, driven directly. One missing rate appears on the delivery tab AND on
+  // both single-period tabs - they restate the same sales - so the view must ADD those counts
+  // rather than take the last tab's. It is a pure exported function precisely so this is
+  // reachable: the view itself is gapi-driven and this suite never runs it, and a probe on the
+  // earlier inline version came back SILENT.
+  const H = (charge: string, value: number, count: number, tab = "Capital Gains") =>
+    ({ charge, tabs: [tab], unit: "crore" as const, value, count });
+  // The SMALLEST hint is inserted FIRST, deliberately. With the commonest arriving first the
+  // map's own insertion order already puts it at the head and the sort is unreachable - a probe
+  // removing it came back SILENT until this fixture was reordered.
+  const merged = mergeNoRateHints([
+    [H("ipf", 9.99, 3)],
+    [H("et", 375, 40)],
+    [H("et", 375, 30, "Intra-Day"), H("et", 297, 5)],
+    [H("et", 375, 42)],
+  ]);
+  eq("the same rate on three tabs is ONE hint carrying their sum",
+     JSON.stringify(merged.find(h => h.charge === "et" && h.value === 375)),
+     JSON.stringify({ charge: "et", tabs: ["Capital Gains", "Intra-Day"], unit: "crore", value: 375, count: 112 }));
+  // UNIONED, not overwritten and not duplicated: two tabs wanting one rate is one entry naming
+  // both, and the same tab twice must not appear twice.
+  eq("...naming every tab that wanted it, once each",
+     (merged.find(h => h.charge === "et" && h.value === 375) || { tabs: [] }).tabs.join(","),
+     "Capital Gains,Intra-Day");
+  eq("...while a different rate for the same charge stays separate",
+     JSON.stringify(merged.find(h => h.charge === "et" && h.value === 297)),
+     JSON.stringify({ charge: "et", tabs: ["Capital Gains"], unit: "crore", value: 297, count: 5 }));
+  eq("...commonest first, not first-seen first", merged[0].count, 112);
+  eq("...which is NOT the order they arrived in", merged[merged.length - 1].count, 3);
+  eq("...and the cap is applied", mergeNoRateHints([
+    Array.from({ length: 20 }, (_, i) => H("et", 100 + i, 1)),
+  ]).length, 8);
+  // The caller's own list must not gain counts from another tab's - the accumulator COPIES.
+  // Without that, one tab's hints are mutated in place and a second call double-counts them.
+  const mine = [H("et", 375, 40)];
+  mergeNoRateHints([mine, [H("et", 375, 30)]]);
+  eq("merging does not mutate the lists handed in", mine[0].count, 40);
+
+  // ── THE APP'S OWN INTRADAY CONVENTION, WHICH THE DATA NAMED ───────────────────────
+  //
+  // The hint list on the owner's real book asked for STT at Rs 1,250/crore, 23 cells. That is
+  // 0.0125% - exactly HALF the statutory intraday rate - and it is not a statute at all:
+  // `allocateStt` splits the intraday pool "50/50 between the buy leg and the sell leg", which
+  // the source states is a deliberate accounting convention. So BOTH legs of a squared-off round
+  // trip carry half, and a rate table that knows only the statute can never reproduce either.
+  const half = srcRates() as any;
+  half.derive.isIntraday = true;
+  half.values[3][15] = 125;            // 0.0125% of 10,00,000 - the BUY leg
+  half.values[4][15] = 250;            // 0.0125% of 20,00,000 - the SELL leg
+  const halfW = chargeIdentityFormulas(half, ref).writes;
+  const hBuy = halfW.find(w => w.r === 3 && w.c === 15);
+  const hSell = halfW.find(w => w.r === 4 && w.c === 15);
+  eq("the intraday 50/50 split derives on the BUY leg", hBuy && hBuy.f, "=ROUND(0.000125*I7,2)");
+  eq("...and on the SELL leg too", hSell && hSell.f, "=ROUND(0.000125*M8,2)");
+
+  // ORDER: where BOTH reproduce the figure, the STATUTE must win. On a turnover of 4,000 the
+  // statutory 0.025% rounded to paise and the 50/50 convention rounded to the RUPEE are both
+  // exactly 1.00, so which gets written is decided purely by the order of the table - and a tab
+  // describing a plain statutory charge as this app's accounting convention states the
+  // arithmetic wrongly while footing perfectly. Without this coincidence the ordering is
+  // unreachable (the two rates cannot otherwise produce one figure) and a probe moving the
+  // convention to the front came back SILENT.
+  const tie = srcRates() as any;
+  tie.derive.isIntraday = true;
+  tie.values[4][12] = 4000;            // sale turnover
+  tie.values[4][15] = 1;               // 0.025% of 4,000 = 1.00, and 0.0125% of 4,000 = 0.50 -> 1
+  const tieW = chargeIdentityFormulas(tie, ref).writes.find(w => w.r === 4 && w.c === 15);
+  eq("where both reproduce the figure the STATUTE wins", tieW && tieW.f, "=ROUND(0.00025*M8,2)");
+
+  // ── UNDER A RUPEE, NO TEST CAN TELL ───────────────────────────────────────
+  //
+  // THE SAME ABSOLUTE MISS - fifty paise - on either side of the rupee line, landing in opposite
+  // buckets. That is the whole rule: a charge is a pro-rata share of the note's printed total, so
+  // the residual on one row is a large FRACTION of a small charge, and a SEBI fee of 0.50 that
+  // came out 0.20 is ordinary rather than evidence of a wrong rate. Counting those as fixable is
+  // why `noRate` read 455 on the real book while the rates behind it were nonsense.
+  const under = bucketSrc(); under.values[3][19] = 0.5;    // SEBI: Rs 10/crore gives exactly 1.00
+  const over = bucketSrc(); over.values[3][19] = 1.5;
+  const un = chargeIdentityFormulas(under, ref);
+  const ov = chargeIdentityFormulas(over, ref);
+  eq("50 paise out on a sub-rupee charge is UNDECIDABLE",
+     [un.nearMiss, un.noRate, un.tooSmall].join("/"), "0/0/1");
+  eq("...and the SAME 50 paise on a larger charge is a missing rate",
+     [ov.nearMiss, ov.noRate, ov.tooSmall].join("/"), "0/1/0");
+  // No implied rate from an undecidable one - dividing a sub-rupee charge by its turnover is
+  // precisely what produced "SEBI 3087.2 per crore" against a statutory Rs 10.
+  eq("an undecidable charge contributes no implied rate", un.noRateHints.length, 0);
+  eq("...while the larger one still does", ov.noRateHints.length, 1);
+
+  // ── AN OFF-MARKET TAB HAS NO EXCHANGE, SO NO EXCHANGE LEVY HAS AN IDENTITY ──────────
+  //
+  // Found by running it: the twin was trying NSE and BSE exchange rates against the rows of
+  // `Private Equity Capital Gains for FY25-26` and binning every one as a MISSING RATE - which
+  // is where "SEBI 6,980 per crore" against a statutory Rs 10 came from. A private placement has
+  // no exchange, so STT, ET, the SEBI turnover fee and IPF never had an identity there.
+  //
+  // DISJOINT by construction: identical figures, one tab off-market and one not.
+  const offM = bucketSrc(); offM.derive.isOffMarket = true; offM.values[3][19] = 50;
+  const onM = bucketSrc(); onM.values[3][19] = 50;
+  const om = chargeIdentityFormulas(offM, ref);
+  const on = chargeIdentityFormulas(onM, ref);
+  eq("an unmatched SEBI fee on an off-market tab is reported as such",
+     [om.noRate, om.offMarket].join("/"), "0/1");
+  eq("...the SAME figure on a listed tab is still a missing rate",
+     [on.noRate, on.offMarket].join("/"), "1/0");
+  eq("...and an off-market miss contributes no implied rate", om.noRateHints.length, 0);
+
+  // STILL ATTEMPTED, never skipped. A company unlisted at FY start keeps its WHOLE year on the
+  // unlisted tab (`classOfKeyInFy`), so a PE tab legitimately carries post-listing EXCHANGE
+  // trades whose real charges must still derive. Skipping would silently stop that.
+  const listedMidYear = bucketSrc(); listedMidYear.derive.isOffMarket = true;
+  const lw = chargeIdentityFormulas(listedMidYear, ref).writes;
+  ok("a genuine exchange charge on an off-market tab STILL derives",
+     lw.some(w => w.r === 3 && w.c === 19) && lw.some(w => w.r === 3 && w.c === 17));
+
+  // STAMP DUTY and GST are deliberately NOT exchange levies - stamp is payable on an off-market
+  // transfer too (collected by the depository) and GST rides on any brokerage or fee.
+  const stampOff = bucketSrc(); stampOff.derive.isOffMarket = true;
+  stampOff.values[3][18] = 999;        // nowhere near 0.015% of 10,00,000
+  const so = chargeIdentityFormulas(stampOff, ref);
+  eq("stamp duty keeps its identity off-market", [so.noRate, so.offMarket].join("/"), "1/0");
+
   // A CHARGED row with no turnover is counted rather than vanishing: it is the one shape where
   // nothing was even attempted, so it would otherwise be invisible in every count on the badge.
   const ntRow = bucketSrc();
@@ -925,6 +1118,21 @@ console.log("\n-- the banner and the paint cannot drift ---------------------");
      rows.length, s0.values.length + BANNER_ROWS);
   eq("...so the first filed row lands at BANNER_ROWS",
      JSON.stringify(rows[BANNER_ROWS]), JSON.stringify(s0.values[0]));
+
+  // NO NARRATION IN THE BANNER (03-Nov-2026, owner: "remove them from all the sheet where's
+  // there narration"). The two explanatory paragraphs came off and BANNER_ROWS came down with
+  // them. Asserted as a LENGTH bound over every banner row rather than by quoting the removed
+  // sentences, because a reworded paragraph is the same problem and a phrase check would miss
+  // it - and the paragraphs were 200-400 characters against a title of about 60.
+  for (let i = 0; i < BANNER_ROWS; i++) {
+    ok(`banner row ${i + 1} is not a paragraph`,
+       `${rows[i]?.[0] ?? ""}`.length <= 120);
+  }
+  // The TITLE line stays. The rows copied in below it start with the filed tab's OWN caption,
+  // so without it the workbook holds two tabs under one identical heading - one of them
+  // formulas, which is the orphan-under-a-current-heading failure from another direction.
+  ok("...but the one-line title survives, naming the tab this twins",
+     `${rows[0][0]}`.startsWith("DERIVED VIEW") && `${rows[0][0]}`.includes(s0.tab));
 
   // The withdrawn GST shape must not creep back onto a written grid. Asserted over the WHOLE
   // grid rather than one cell, because what made it wrong was that it appeared on SOME rows and
@@ -973,9 +1181,9 @@ console.log("\n-- RATE = AMOUNT / QTY --------------------------------------");
   const { rows } = buildFormulaGrid(src() as any);
   const B = BANNER_ROWS;
   // The direction is the codebase's own: AMOUNT is authoritative, RATE derived from it.
-  eq("the head row's opening rate", rows[3 + B][3], "=E8/C8");
-  eq("a further opening date-line", rows[4 + B][3], "=E9/C9");
-  eq("a sale's rate", rows[6 + B][7], "=I11/G11");
+  eq("the head row's opening rate", rows[3 + B][3], tw("=E4/C4"));
+  eq("a further opening date-line", rows[4 + B][3], tw("=E5/C5"));
+  eq("a sale's rate", rows[6 + B][7], tw("=I7/G7"));
   // THE TWO ROWS THAT MUST NOT GET ONE. A corp-action CONTRA line carries a signed amount with
   // no qty and no rate (writing zeros there would read as "0 shares at 0.00"); the CLOSING NIL
   // row carries the TEXT "NIL" in the amount column. By COLUMN these look identical to the rows
@@ -1003,11 +1211,11 @@ console.log("\n-- the grand total ------------------------------------------");
 {
   const { rows } = buildFormulaGrid(src() as any);
   const B = BANNER_ROWS;
-  eq("ST total sums its own column over the data rows", rows[9 + B][9], "=SUM(J8:J13)");
-  eq("LT total sums its own column", rows[9 + B][10], "=SUM(K8:K13)");
-  eq("brokerage total sums its own column", rows[9 + B][11], "=SUM(L8:L13)");
-  eq("STT total sums its own column", rows[9 + B][12], "=SUM(M8:M13)");
-  eq("matched cost totals too", rows[9 + B][WIDTH], "=SUM(N8:N13)");
+  eq("ST total sums its own column over the data rows", rows[9 + B][9], tw("=SUM(J4:J9)"));
+  eq("LT total sums its own column", rows[9 + B][10], tw("=SUM(K4:K9)"));
+  eq("brokerage total sums its own column", rows[9 + B][11], tw("=SUM(L4:L9)"));
+  eq("STT total sums its own column", rows[9 + B][12], tw("=SUM(M4:M9)"));
+  eq("matched cost totals too", rows[9 + B][WIDTH], tw("=SUM(N4:N9)"));
   const all = rows.flat().filter(c => typeof c === "string" && c.startsWith("="));
   // Phrased over WHERE the formula sits and WHAT it reads, not over the characters in it. The
   // first version asked whether a P/L *reference* appeared beside a charge *reference*, which a
@@ -1052,7 +1260,7 @@ console.log("\n-- the guard behind the emitter -----------------------------");
   const B = BANNER_ROWS;
   eq("a blank qty yields no formula, even if the emitter offers the row", rows[5 + B][3], "");
   eq("...and a TEXT amount yields none either", rows[8 + B][3], "");
-  eq("...while the genuine rows are unaffected", rows[3 + B][3], "=E8/C8");
+  eq("...while the genuine rows are unaffected", rows[3 + B][3], tw("=E4/C4"));
 }
 
 console.log("\n-- the emitter's own exclusions -----------------------------");
@@ -1063,16 +1271,60 @@ console.log("\n-- the emitter's own exclusions -----------------------------");
   ok("the contra line is excluded at the emitter",
     /if \(cn\.qty !== undefined && cn\.rate !== undefined && cn\.qty > 0\) \{/.test(REG));
   // The CLOSING NIL row is pushed with no noteRate call at all.
-  const nilPush = REG.slice(REG.indexOf('row[COL.name] = "CLOSING"; row[COL.oAmt] = "NIL"'));
+  // ANCHOR-FOUND FIRST. `slice(-1)` on a missed `indexOf` hands back one character, on which
+  // the negative assertion below is vacuously true - so a rename of the code it guards makes it
+  // pass rather than fail. That is the same fault `tmp-holdings-scope.ts` already paid for.
+  const nilAt = REG.indexOf('row[COL.name] = "CLOSING"; row[of.a] = "NIL"');
+  ok("the CLOSING NIL row is locatable in source", nilAt >= 0);
+  const nilPush = REG.slice(nilAt);
+  const nilEnd = nilPush.indexOf("closingRanges.push");
+  ok("...and its span is locatable too", nilEnd > 0);
   ok("the CLOSING NIL row is never offered",
-    !/noteRate/.test(nilPush.slice(0, nilPush.indexOf("closingRanges.push"))));
+    nilAt >= 0 && nilEnd > 0 && !/noteRate/.test(nilPush.slice(0, nilEnd)));
   // A split restatement is offered only when it has a positive quantity.
   ok("a zero-qty split restatement is excluded", /if \(sp\.qty > 0\) \{ noteRate\(/.test(REG));
   // And the head row only when it actually carries an opening line.
   ok("the head row is offered only when it has one",
-    /if \(openAgg\.length\) \{ noteRate\(out\.length - 1, COL\.oQty/.test(REG));
+    /if \(openAgg\.length\) \{\s*const of = L\.openCols\(\);\s*noteRate\(out\.length - 1, of\.q/.test(REG));
 }
 
+
+console.log("\n-- the twin lands beside the tab it twins -------------------");
+{
+  // `generateFormulaView` is gapi-driven and THIS SUITE NEVER EXECUTES IT - the same reason the
+  // implied-rate merge and the off-market flag are source-asserted. A probe on this path comes
+  // back silent, so the assertions are over comment-stripped SOURCE.
+  //
+  // What they pin: once an FY's reports go to a separate workbook (29-Oct-2026), a twin written
+  // to the account's own sheet is a formula page with nothing to be a formula page OF, and
+  // `<tab> (Formula)` sitting alone there reads as though the register itself had failed.
+  const VIEW = strip("src/lib/trxFormulaView.ts");
+
+  // ONE source of truth, and it is the REGISTER's answer rather than this function's own
+  // argument: there is exactly one authority on where the tabs went.
+  ok("the twin destination comes from the register result",
+     /const dstId = res\.reportSheetId \|\| sourceSpreadsheetId;/.test(VIEW));
+  // The source parameter is RENAMED, which is what turned every old use into a compile error
+  // when the split was made - the same technique the opening column family used.
+  ok("the read source is named so it cannot be confused with the destination",
+     /sourceSpreadsheetId: string,/.test(VIEW) && !/\(\s*spreadsheetId: string,/.test(VIEW));
+  // And the destination is FORWARDED to the register, or the collect run would compute a grid
+  // for one workbook while the twins were written to another.
+  ok("the destination is forwarded to the register",
+     /generateTrxRegister\(sourceSpreadsheetId, fyStartYear, title, collected, destSpreadsheetId\)/.test(VIEW));
+
+  // NO WRITE may name the source. Every `spreadsheetId:` in this file must be fed `dstId`.
+  const writes = VIEW.match(/spreadsheetId:\s*[A-Za-z_$][\w$]*/g) || [];
+  ok("every write in the view names a spreadsheet", writes.length >= 4);
+  // A twin written to the account's own sheet sits alone there, with no filed tab beside it.
+  ok("...and every one of them is the destination",
+     writes.every(w => /spreadsheetId:\s*dstId/.test(w)));
+  ok("ensureSheetTabs creates the twins in the destination",
+     /ensureSheetTabs\(dstId,/.test(VIEW) && !/ensureSheetTabs\(sourceSpreadsheetId,/.test(VIEW));
+  // The result SAYS where they went. A field absent on a redirect cannot tell "no override"
+  // from "the override did not match", and those read identically from the UI.
+  ok("the result reports the destination", /reportSheetId: dstId/.test(VIEW));
+}
 
 console.log("\n-- the paint -----------------------------------------------");
 {
@@ -1130,6 +1382,15 @@ console.log("\n── it never touches the filed tab ─────────
   // Collect mode still runs the charge-conservation guard, so a register this app would REFUSE
   // to write cannot be rendered as a derived view either.
   ok("it refuses if the register ran in write mode", /if \(!res\.collectedOnly\)/.test(VIEW) && /throw new Error/.test(VIEW));
+  // The cross-tab hint merge is SOURCE-asserted, because `generateFormulaView` is gapi-driven
+  // and this suite never executes it - a probe on the runtime path came back SILENT. The rule
+  // itself is tested directly above through `mergeNoRateHints`; what cannot be reached is the
+  // view FEEDING it every tab. One missing rate shows on the delivery tab and on both
+  // single-period tabs, so a view that kept only the last one would under-report by two thirds.
+  ok("every twin's hints reach the merge", /hintLists\.push\(cnh\)/.test(VIEW));
+  ok("...through the SHARED rule, not a second copy of it",
+     /chargeNoRateHints: mergeNoRateHints\(hintLists\)/.test(VIEW));
+  ok("...and nothing clears the accumulator between tabs", !/hintLists\.length\s*=/.test(VIEW));
   // USER_ENTERED is required for a formula to evaluate and is safe ONLY because fmtDate writes
   // dd.mm.yyyy with dots; slashed dates would be reparsed as US mm-dd for every day <= 12.
   ok("it writes USER_ENTERED", /valueInputOption: "USER_ENTERED"/.test(VIEW));
@@ -1142,6 +1403,24 @@ console.log("\n── it never touches the filed tab ─────────
   ok("collect mode returns after the guard", guard > 0 && collect > guard);
   ok("...and before the first filed write", collect > 0 && firstWrite > collect);
   ok("...carrying a marker so it cannot read as a finished register", /collectedOnly: true,/.test(REG));
+
+  // THE OFF-MARKET WIRING, which neither suite can execute. `derive` is filled only in collect
+  // mode and read only by the formula view, which is gapi-driven; `tmp-trx-run.mjs` reads the
+  // WRITTEN tabs and never sees this channel at all. A probe that stopped the class tab passing
+  // its own flag came back SILENT, so it is asserted over source - the same fallback the
+  // emitter's `rateCells` exclusions already take.
+  ok("emitTab accepts an off-market flag", /offMarket = false\): Emission/.test(REG));
+  ok("...and records it on the derive channel", /isOffMarket: offMarket,/.test(REG));
+  // The value must come from the CLASS REGISTRY, not be hardcoded: `offMarket` is true for
+  // Private Equity and AIF and false for Mutual Fund and Bond, and that distinction is the whole
+  // point - forcing it true would describe a real exchange charge as impossible.
+  ok("...fed from the asset class itself on a class tab",
+     /\[\], ASSET_CLASSES\[id\]\.offMarket\)/.test(REG));
+  // The LISTED book must not be told it is off-market, or every genuine exchange levy on the
+  // main and intra-day tabs stops being reported as a missing rate when it really is one.
+  ok("...while the listed tabs pass no such flag",
+     /emitTab\(dL, listedActive, [^)]*"Delivery Expenses"\)/.test(REG)
+     && /emitTab\(iL, intradayActive, [^)]*"Intra-day Expenses"\)/.test(REG));
 }
 
 console.log(`\n${"=".repeat(60)}\n${pass} passed, ${fail} failed`);

@@ -40,7 +40,7 @@ import AddTradeModal from './AddTradeModal';
 import StockOpeningImportModal from './StockOpeningImportModal';
 import CubeLoader from './ui/CubeLoader';
 import { GainBar } from './ui/HoldingsViz';
-import { PORTFOLIOS, portfolioById, sheetIdForId, portfolioSheetUrl, brokerLabel, portfolioDisplayLabel, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
+import { PORTFOLIOS, portfolioById, sheetIdForId, reportSheetIdFor, reportDestinationFor, portfolioSheetUrl, brokerLabel, portfolioDisplayLabel, DEFAULT_PORTFOLIO_ID } from '../lib/portfolios';
 import { classifySheetsError, sheetsAccessLabel, SheetsErrorKind } from '../lib/sheetsAccess';
 import { toast, confirmDialog, ModalShell } from './ui/overlay';
 
@@ -1181,7 +1181,13 @@ export default function Holdings({
     setTrxStatus(null);
     try {
       const spreadsheetId = sheetIdForId(pid);
-      const result = await generateTrxRegister(spreadsheetId, selectedFy, portfolioById(pid)?.label);
+      // READ from the account's own sheet, WRITE wherever its reports for this FY belong.
+      // `reportSheetIdFor` returns the account's own sheet when there is no override, so this
+      // is unchanged for twelve of the thirteen portfolios and for every other year.
+      const result = await generateTrxRegister(
+        spreadsheetId, selectedFy, portfolioById(pid)?.label, undefined,
+        reportSheetIdFor(pid, selectedFy),
+      );
       setTrxStatus({ pid, result });
       setScripReview(result.unresolved.length > 0 ? { pid, master: result.master, unresolved: result.unresolved } : null);
     } catch (err: any) {
@@ -1215,7 +1221,10 @@ export default function Holdings({
     setFvStatus(null);
     try {
       const spreadsheetId = sheetIdForId(pid);
-      const result = await generateFormulaView(spreadsheetId, selectedFy, portfolioById(pid)?.label);
+      const result = await generateFormulaView(
+        spreadsheetId, selectedFy, portfolioById(pid)?.label,
+        reportSheetIdFor(pid, selectedFy),
+      );
       setFvStatus({ pid, result });
     } catch (err: any) {
       const msg = err?.result?.error?.message || err?.message || "Unknown error";
@@ -4784,6 +4793,22 @@ export default function Holdings({
                         <option key={y} value={y}>{`FY${String(y).slice(2)}-${String(y + 1).slice(2)}`}</option>
                       ))}
                     </select>
+                    {/* BEFORE the click, not only after it. The register writes this FY's tabs
+                        into a different workbook, and a redirect discovered only by hovering a
+                        badge afterwards is one the owner meets as "my tabs are missing". The
+                        colour classes are lifted verbatim from the Rebuild button two elements
+                        up, so they are literal names the theme layers already repaint - no new
+                        shade is introduced here. */}
+                    {reportDestinationFor(id, selectedFy) && (
+                      <a
+                        href={`https://docs.google.com/spreadsheets/d/${reportDestinationFor(id, selectedFy)!.sheetId}/edit`}
+                        target="_blank" rel="noopener noreferrer"
+                        title={`Reports for this financial year are written to a SEPARATE workbook, not this account's own sheet. The ledger is unchanged and is still read from this account's sheet. ${reportDestinationFor(id, selectedFy)!.note || ''}`}
+                        className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-1 rounded-md"
+                      >
+                        &rarr; other sheet
+                      </a>
+                    )}
                     <button
                       onClick={() => generateTrx(id)} disabled={anyBusy}
                       aria-label="Generate Capital Gains" title="Generate the scrip-wise FY Capital Gains report (opening → purchases → sales → closing) + a 'Holding as on 31st March' snapshot tab"
@@ -4876,6 +4901,12 @@ export default function Holdings({
                         ...(trx.result.periodTabs
                           ? [trx.result.periodTabs.short, trx.result.periodTabs.long]
                           : []),
+                        // And their acquisition-wise twins, for the same reason again: the
+                        // register writes six listed tabs now, and a tooltip naming four
+                        // reads as though two of them had failed.
+                        ...(trx.result.acqTabs
+                          ? [trx.result.acqTabs.short, trx.result.acqTabs.long]
+                          : []),
                         ...(trx.result.holdingTabs
                           ? [trx.result.holdingTabs.equity, trx.result.holdingTabs.pe, trx.result.holdingTabs.combined]
                           : [trx.result.holdingTabName]),
@@ -4893,6 +4924,14 @@ STT Removed: ${trx.result.sttFlaggedInMaster} flagged in master`
                         + (trx.result.sttSuppressed.length
                           ? `, suppressed on ${trx.result.sttSuppressed.length}: ${trx.result.sttSuppressed.join(', ')}`
                           : ', suppressed on none')
+                        // The Dmat column was removed from every tab, which also took it out of
+                        // the charge-conservation guard - so it is the one charge no longer
+                        // reconciled against True Entry. Integrated notes really do carry a DP
+                        // charge, so this says the rupees rather than letting them disappear.
+                        + (trx.result.dmatNotShown > 0
+                          ? `
+Demat charges: ${trx.result.dmatNotShown.toLocaleString('en-IN', { minimumFractionDigits: 2 })} on the ledger for this FY and shown on NO tab - the Dmat column was removed. Every other charge still reconciles to True Entry; this one no longer does. Say the word and it comes back.`
+                          : '')
                         // The ITR schedule fails the same silent way: a tab that lists no
                         // companies looks identical whether the book holds none, the Private
                         // Equities tab went unread, or the companies did not resolve. The two
@@ -4918,8 +4957,36 @@ Unlisted equity shares: ${trx.result.itrCompanies ?? 0} companies on "${trx.resu
                         + ((trx.result.listedDuringFy || []).length
                           ? `
 LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and transactions stay on the unlisted tabs for this year (it was unlisted for part of it) while the 31-March holding is on the equity tab. Sales on or after the listing date are s.112A listed transfers; earlier ones are off-market. The tab itself carries the date.`
+                          : '')
+                        // WHERE THE TABS WENT. Without this the owner opens the account's own
+                        // sheet, finds none of the tabs just named, and reads a successful run
+                        // as a broken one. The ledger is NOT redirected and saying so is half
+                        // the point - the account's sheet is still the live database.
+                        + (trx.result.reportSheetId && trx.result.reportSheetId !== sheetIdForId(id)
+                          ? `
+
+WRITTEN TO A SEPARATE WORKBOOK, not this account's own sheet — every tab named above is there, not here. The ledger (True Entry, Opening Holdings, Corporate Actions) is unchanged and is still read from this account's sheet.
+  https://docs.google.com/spreadsheets/d/${trx.result.reportSheetId}/edit`
+                          : '')
+                        // And what is STILL in the account's own sheet under these same
+                        // headings: last run's figures, which now look current and are not.
+                        // Named rather than deleted - this run does not write to that sheet.
+                        + ((trx.result.staleInSource || []).length
+                          ? `
+  SUPERSEDED COPIES still in this account's own sheet, carrying an EARLIER run's figures under the same headings: ${trx.result.staleInSource.join(', ')}. Delete them there, or they read as this year's.`
                           : '')}>
                         ✓ {trx.result.fyLabel} · {trx.result.scrips} scrips
+                        {/* A tooltip nobody hovers is not a disclosure. The destination is
+                            stated ON the badge, because "the tabs are not in my sheet" is the
+                            first thing the owner would otherwise conclude. Deliberately NO new
+                            colour class - it rides the badge's own violet, which the theme
+                            already repaints brass in both directions. */}
+                        {trx.result.reportSheetId && trx.result.reportSheetId !== sheetIdForId(id) && (
+                          <> · → separate workbook</>
+                        )}
+                        {(trx.result.staleInSource || []).length > 0 && (
+                          <> · {trx.result.staleInSource.length} superseded here</>
+                        )}
                         {/* Shown only when the master actually carries the flag, so the badge
                             stays unchanged for everyone who does not use it. "0 of N" is the
                             loud case: the column WAS read and the scrip still did not match. */}
@@ -4934,6 +5001,9 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                             {trx.result.sttSuppressed.length === 0 && ` of ${trx.result.sttFlaggedInMaster} flagged`}
                           </>
                         )}
+                        {trx.result.dmatNotShown > 0 && (
+                          <> · {trx.result.dmatNotShown.toLocaleString('en-IN', { minimumFractionDigits: 2 })} demat not shown</>
+                        )}
                       </span>
                     ) : (
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg" title={trx.error}>✗ Capital Gains failed</span>
@@ -4945,7 +5015,11 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                          sales has nothing to derive, which is not a failed run. */
                       <span
                         className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-1 rounded-lg"
-                        title={`Derived view written to: ${fvStatus.result.tabs.join(', ')}. The filed Capital Gains tabs were not touched.${
+                        title={`Derived view written to: ${fvStatus.result.tabs.join(', ')}${
+                          fvStatus.result.reportSheetId && fvStatus.result.reportSheetId !== sheetIdForId(id)
+                            ? ` — IN A SEPARATE WORKBOOK, beside the filed tabs they twin rather than in this account's own sheet: https://docs.google.com/spreadsheets/d/${fvStatus.result.reportSheetId}/edit`
+                            : ''
+                        }. The filed Capital Gains tabs were not touched.${
                           fvStatus.result.acqSummed > 0
                             ? ` ${fvStatus.result.acqSummed} ACQUISITION COST cell(s) span more than one lot and read as a SUM — one qty x rate term per lot FIFO consumed, e.g. =ROUND(3600*E69+4400*E70,2). The quantities are written out because the FIFO split is stated on no row; the rates are cell references.`
                             : ''
@@ -4961,10 +5035,23 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                                   const why = [
                                     r.chargeNearMiss > 0 && `${r.chargeNearMiss} sit a paise or two off a known rate because the broker ALLOCATED the note's one printed total across its trades instead of computing each row — expected, and a formula there would state a figure this tab does not hold`,
                                     r.chargeNoRate > 0 && `${r.chargeNoRate} match no known rate at all, which is the only actionable bucket: a rate missing from CHARGE_RATES`,
+                                    r.chargeOffMarket > 0 && `${r.chargeOffMarket} are exchange levies on an OFF-MARKET tab (Private Equity / AIF) — there was no exchange, so STT, exchange charges, the SEBI turnover fee and IPF never had a statutory identity there. They are still attempted, because a company that listed mid-year keeps its whole year on the unlisted tab and its post-listing charges genuinely do derive`,
+                                    r.chargeTooSmall > 0 && `${r.chargeTooSmall} are UNDER A RUPEE, where allocation noise and a wrong rate are the same observation and no test could tell them apart — a SEBI fee of 0.50 pro-rated down to 0.20 is ordinary, and a rate sheet cannot touch these`,
                                     r.chargeNoTurnover > 0 && `${r.chargeNoTurnover} on rows carrying a charge but no positive turnover`,
                                   ].filter(Boolean).join('; ');
                                   const kinds = Object.keys(r.chargeMissBy).map(k => `${r.chargeMissBy[k]} ${k}`).join(', ');
-                                  return why ? ` Of the rest: ${why}${kinds ? ` (by charge: ${kinds})` : ''}.` : '';
+                                  // The RATES THE DATA IS ASKING FOR, which is the only part of
+                                  // this that can be acted on. A missing rate is fixable in one
+                                  // place; naming it beats naming the count.
+                                  const hints = (r.chargeNoRateHints || []).length
+                                    ? ' Rates that would fix the unmatched ones, recovered from the figures themselves: '
+                                      + r.chargeNoRateHints.map(h => h.unit === 'crore'
+                                          ? `${h.charge.toUpperCase()} ${h.value} per crore (${h.count} cell${h.count === 1 ? '' : 's'})`
+                                          : `${h.charge.toUpperCase()} ${h.value}% of the base tried (${h.count} cell${h.count === 1 ? '' : 's'})`
+                                        ).join(', ')
+                                      + '. A GST figure above 18% means the base holds something this ledger has no column for.'
+                                    : '';
+                                  return why ? ` Of the rest: ${why}${kinds ? ` (by charge: ${kinds})` : ''}.${hints}` : hints;
                                 })()
                               }`
                             : ''
@@ -5000,13 +5087,36 @@ LISTED DURING THIS YEAR: ${trx.result.listedDuringFy.join(', ')} — gains and t
                             [
                               fvStatus.result.chargeNearMiss > 0 && `${fvStatus.result.chargeNearMiss} allocated`,
                               fvStatus.result.chargeNoRate > 0 && `${fvStatus.result.chargeNoRate} no rate`,
+                              fvStatus.result.chargeTooSmall > 0 && `${fvStatus.result.chargeTooSmall} under a rupee`,
+                              fvStatus.result.chargeOffMarket > 0 && `${fvStatus.result.chargeOffMarket} off-market`,
                             ].filter(Boolean).length
                               ? ` (${[
                                   fvStatus.result.chargeNearMiss > 0 && `${fvStatus.result.chargeNearMiss} allocated`,
                                   fvStatus.result.chargeNoRate > 0 && `${fvStatus.result.chargeNoRate} no rate`,
+                                  fvStatus.result.chargeTooSmall > 0 && `${fvStatus.result.chargeTooSmall} under a rupee`,
+                                  fvStatus.result.chargeOffMarket > 0 && `${fvStatus.result.chargeOffMarket} off-market`,
                                 ].filter(Boolean).join(', ')})`
                               : ''
                           }`}
+                        {/* THE RATES THE DATA IS ASKING FOR, on the FACE of the badge and not only
+                            in the tooltip. This is the one part of the whole diagnostic that can
+                            be ACTED on - it is the content of the rate sheet, written by the
+                            book's own figures - and the owner reads this badge by screenshotting
+                            it, so a hover-only list is a list nobody sees. Top three here, the
+                            rest on hover. */}
+                        {(fvStatus.result.chargeNoRateHints || []).length > 0 && (
+                          <> · needs {fvStatus.result.chargeNoRateHints.slice(0, 3).map(h => {
+                            // The TAB is what says whether a missing rate is worth chasing: one
+                            // wanted by the listed book is a gap in CHARGE_RATES, the same number
+                            // wanted by a Private Equity tab is not a rate at all.
+                            const where = (h.tabs || []).map(t => String(t).split(' for ')[0]).join('+');
+                            const num = h.unit === 'crore' ? `${h.value}/cr` : `${h.value}%`;
+                            return `${h.charge.toUpperCase()} ${num} ×${h.count}${where ? ` [${where}]` : ''}`;
+                          }).join(', ')}
+                            {fvStatus.result.chargeNoRateHints.length > 3 &&
+                              ` +${fvStatus.result.chargeNoRateHints.length - 3} more`}
+                          </>
+                        )}
                         {/* The BREAKDOWN, not just the count. Three reasons sit behind that one
                             number and they have completely different answers — "spanned" cannot
                             be fixed by any formula, "rounding" is arithmetic, "no rate" is a

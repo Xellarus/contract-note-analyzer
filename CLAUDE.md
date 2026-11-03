@@ -27,7 +27,7 @@ There is no CSS test of any kind, and no browser in the loop — anything visual
 | `node tmp-pe-run.mjs` | Private Equities tab reader, incl. the PAN / Face Value / Type Of Company columns and the two header collisions they create (49 assertions) |
 | `node tmp-pe-fold-run.mjs` | PE fold-in to the scrip master, stubbed Sheets API — plus the **request count** of a master load, the tab-list-is-not-an-authority rule, the batch-failure fallback, the `PVT.LTD.` name shape, the listed-as-PE/resolves-as-PE invariant, the **ticker-collision record** that stops a dropped class being silent, and SOURCE checks that Add Trade refreshes the page's master on save, FORCES a fresh one on open, names the collision instead of telling the owner to add the company again, and that the unlisted dropdown neither truncates its list nor truncates it silently, and the LISTED/UNLISTED TWIN rules — including that the twin gets its OWN `key`, which is what stops two companies sharing one holding bucket, the `ipo(...)` block built from the owner's REAL Kusumgar / ESDS rows, which pins that a LISTING DATE supersedes the twin, and the `unread:` block — a data-carrying column the reader maps to NOTHING, on both the batched and the per-tab path (179) |
 | `node tmp-pe-write-run.mjs` | Non-listed tab WRITES — registering a company on any class tab, and the CMP write-back with its overwrite guard (85). Round-trips the header the writer CREATES back through the reader, so the two can never disagree |
-| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write, and the SINGLE-PERIOD listed tabs — driven off fixture A, where ALPHA is long-term and BETA short-term so the split is DISJOINT by construction, asserting that each tab carries exactly one of them, that each has ONE P/L column (which is what makes `plCol` throw on a mis-routed sale), that neither prints a CLOSING section while the main tab keeps its own, that each P/L total ties to the figure already filed, that the shared-purchase-charge overlap is DISCLOSED on the tab, and that an empty period is still written with a sentence saying so. Two SOURCE assertions carry what no written tab can show: that the period tabs stay OUT of the charge-conservation sum (counting them trebles every listed charge and NO register writes at all) and that the partition check counts the PERIOD tabs rather than restating the main tab's own row count — a guard comparing a number to itself passes forever (328; 329 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
+| `node tmp-trx-run.mjs` | Capital Gains register: per-class tabs, transaction statements, demerger restatement, asset-class refusal, the "STT Removed" flag, and that the sheet-WRITING engines force a fresh master read while the read-only hot paths do not, fixture H's REAL no-ISIN ledger header, and fixture J's merger/demerger holding-period carry-over plus `carryLots` head-on, and fixture K's bonus re-derivation with `parseRatio`/`freeSharesFor`, and fixtures L/L2/L3 — the **three-way holding split**, an empty class still writing its tab, the legacy holding tab being RENAMED rather than orphaned, and PAN / Face Value / Type Of Company reaching the PE statement from the scrip master, and fixture M — the ITR schedule end to end: which blocks reach it, an exited company, a same-day round trip, the canonical-name rule and the RAW write, and the SINGLE-PERIOD listed tabs — driven off fixture A, where ALPHA is long-term and BETA short-term so the split is DISJOINT by construction, asserting that each tab carries exactly one of them, that each has ONE P/L column (which is what makes `plCol` throw on a mis-routed sale), that neither prints a CLOSING section while the main tab keeps its own, that each P/L total ties to the figure already filed, that **a period tab shows only the purchases ITS OWN sales consumed, pro-rated** — BETA bought 500 and sold 200 short, so the short-term tab reads 200 where the main tab reads 500 — that an OPENING lot never becomes a purchase row however it was sold, that no in-FY purchase can ever fund a long-term sale in the same FY, that the three expense totals (26.11 / 18.65 / 55.95) are mutually distinct so no wrong answer can coincide with a right one, that the shortfall from the main tab is exactly the UNSOLD shares’ charges (11.19 = 18.65 x 300/500) — a figure the tab itself no longer states, since the narration came off on 03-Nov-2026 and is now asserted ABSENT by exact phrase AND by the geometry (the row under SCRIPT NAME must be a block row, not prose) — and that an empty period is still written with a sentence saying so. **Fixtures P / P2 / P3** carry the matched-purchase mechanism: P1 a split over a fully-sold purchase (shown at the quantity BOUGHT, not the post-split lot size), P2 an in-FY purchase the period’s sales never touched so `restateCols` must follow THIS tab and file the split in the OPENING family — the only shape that catches gating on `L.id` instead of rewriting the clone — and P3 two same-day buys, the only thing that catches the `want` drawdown going missing. **The two ACQUISITION tabs** are driven off the same fixture A, whose two scrips are disjoint in exactly the way that matters: BETA's short-term sale was funded by an IN-YEAR buy so its acquisition tab must match its period tab, while ALPHA's long-term sale came entirely out of OPENING stock so its period tab shows no purchase at all and its acquisition tab must show one — zero against a real quantity, which is the whole fold-in with the right and wrong answers on opposite sides of nothing. It also asserts the geometry (four columns narrower, no OPENING STOCK heading, PURCHASE immediately after SCRIPT NAME), that a B/F row's charge cells are blank ON THE ROW rather than merely absent from the total, that the expense total is unmoved by the extra rows, and that SALES less ACQUISITIONS is the P/L already filed. **Fixtures Q and R** were each built for a probe that came back silent: Q a pre-FY charged buy plus a 2:1 split plus two sales eating one date — which is also what caught `matchedPurchases` capping post-split quantity against a pre-split purchase and double-counting a lot — and R two same-day buys at DIFFERENT prices, the only shape with two distinct lots at one date, where the `room` drawdown moves only the per-row charge and nothing else. Two SOURCE assertions carry what no written tab can show: that the period tabs stay OUT of the charge-conservation sum (counting them doubles every listed sale charge and NO register writes at all) and that the partition check counts the PERIOD tabs rather than restating the main tab's own row count — a guard comparing a number to itself passes forever. The removed **Dmat** column is pinned as the WHOLE charge block in order rather than as "Dmat is absent", because the geometry is derived from `CHARGE_HDR` and a re-insertion anywhere shifts every charge one column right on a filed page; its fixture gives fixture A a DP charge on each of its three in-year trades so the reported `dmatNotShown` (21.75) is disjoint from both 0 and from a register that refuses to write at all (489; 490 with `TRX_BASELINE` set). `STT_DEBUG=1` dumps the cell-by-cell diff fixture G asserts on |
 | `node tmp-holding-lastpx-run.mjs` | Valuing an unlisted holding at its last traded price — capture + resolver precedence, plus the listed/unlisted TWIN crossover in BOTH price maps and in both directions, and the first coverage `makeExceptionResolver` has ever had (37) |
 | `node tmp-nuvama-run.mjs` | Nuvama parser (159) |
 | `node tmp-yahoo-symbols.mjs` | Price-script symbol resolution — runs the REAL `YahooPriceUpdate.gs` functions in a `vm` sandbox with Apps Script stubbed: ISIN / name / alias / **ticker** matching, the truncated-prefix rule and its ambiguity refusal, canonical-beats-alias in either row order, the override table, NSE-primary-BSE-fallback, and that the `?sym=` probe reports the rule that actually fired (34). Several cases run with `SYMBOL_OVERRIDES` **emptied**, so they prove the general path rather than a hand-listed entry |
@@ -109,17 +109,28 @@ the same `listedActive` blocks as the main tab with the sales filtered by holdin
 **They are the ONE exception to "a sale appears on exactly one tab", and the whole design turns
 on saying so out loud.** Every figure on them is already filed on `Capital Gains for FY..`. So:
 
-- **They must stay OUT of `cgGrand`.** A block's PURCHASE rows appear on BOTH period tabs — a
-  scrip sold in both periods was acquired once — so adding them trebles every listed charge, the
-  conservation guard sees drift, and **no register writes at all**. Exactly the transaction
-  statements' rule, for exactly the same reason. Probed: the guard reports
-  `brok off by 30.00, stt off by 15.00…` and refuses the whole register.
-- **Out of that guard means unguarded, so they carry their own: the PARTITION CHECK.** It cannot
-  check charges (the purchase rows legitimately double), so it checks the thing the split can
-  actually get wrong — every delivery sale row is short OR long, so the two tabs' sale-row counts
-  must add to the main tab's, and each period's P/L must equal the figure already filed for it.
-  It throws rather than writing. It is what catches a dropped block *and* an in-place `sales`
-  filter that empties the second tab.
+- **They must stay OUT of `cgGrand`.** Every sale charge on them is already counted once on the
+  main tab, so adding them DOUBLES every listed sale charge, the conservation guard sees drift,
+  and **no register writes at all**. Exactly the transaction statements' rule, for exactly the
+  same reason. (It used to TREBLE it, because a block's purchase rows appeared on both period
+  tabs as well; purchases came off those tabs on 28-Oct-2026, see below.)
+- **Out of that guard means unguarded, so they carry their own: the PARTITION CHECK.** THREE
+  arms now. Every delivery sale row is short OR long, so the two tabs' sale-row counts must add
+  to the main tab's; each period's P/L must equal the figure already filed for it; and — since
+  purchases came off these tabs — **their charge totals must add to the main tab's SALE charges,
+  to the paise, column by column.** It throws rather than writing. It is what catches a dropped
+  block *and* an in-place `sales` filter that empties the second tab.
+  **The charge check is TWO arms, and only one of them is an equality — that asymmetry is the
+  whole of it.** SALES partition exactly, so the two tabs' sale charges must ADD UP to the main
+  tab's, to the paise, per column. PURCHASES do not and must never be forced to: a purchase
+  appears on a period tab only to the extent it was sold in that period, so the charges of shares
+  still held on 31 March, and of opening stock which is never shown there at all, legitimately
+  reach NEITHER tab. The purchase arm is therefore a **CEILING** — what the two tabs claim may
+  not exceed what the main tab carries. That is the direction every bug in `matchedPurchases`
+  runs (a lot attributed to both tabs, or drawn down twice), while an equality would fire on
+  every real book and be switched off within a week.
+  Both arms are in RUPEES and per column, and they catch what the row COUNT cannot — a count only
+  notices a row that VANISHED, not one that landed on the wrong tab or was paid for twice.
 - **A single P/L column each, and that is a safety mechanism rather than a cosmetic one.**
   `PL_OF` gains `SHORT: ["st"]` and `LONG: ["lt"]`, so `makeLayout` builds a tab one column
   narrower — and `plCol` then **THROWS** if the wrong bucket is ever routed there
@@ -135,11 +146,28 @@ on saying so out loud.** Every figure on them is already filed on `Capital Gains
   `L.id === "DELIVERY"` gate. Emptying `block.closing` on the clone as well was written and then
   removed — a second route to the same outcome is unreachable code that looks like a safeguard,
   which this repo has already paid for once.
-- **The overlap is DISCLOSED ON THE TAB**, in note rows above the first block: purchases and
-  opening stock are the whole scrip's, their charges appear on the sibling tab, do not add the
-  two expense totals, and the authoritative charge total is on the main tab. Two filed pages
-  whose totals must not be summed is precisely the difference nobody can debug six months later
-  — the same discipline as the Combined holding tab's shortfall note.
+- **THE TAB NO LONGER DISCLOSES ANY OF IT — the narration came off on 03-Nov-2026** (*"I have
+  notice these narrations in all of our calculating sheet, please remove them from all the sheet
+  where's there narration"*). These tabs carried four paragraphs between the column header and
+  the first block, stating that the purchases shown are the ones these sales consumed at the
+  quantity consumed; that opening stock is never shown as a purchase here; that **the two period
+  tabs MAY be added**; and that they come to less than the main tab's expense total by the
+  purchase charges of everything not sold in either period. All four are gone, and so is the
+  retracted sentence (*"do not add the two expense totals together"*) that preceded them.
+  - **The facts did not stop being true, they stopped being WRITTEN DOWN**, and that is the cost
+    the owner accepted. The 11.19 shortfall against the main tab is now stated nowhere a reader
+    can see; what still enforces it every run is the CEILING arm of the partition check, and
+    what records the arithmetic is the suite. If this ever has to be explained again, it is
+    explained here and not on the page.
+  - **The EMPTY arm stays.** A tab with no sales in its period is still written with
+    *"No short term listed transactions in FY.."* — a tab carrying nothing but column headers
+    reads as a failed run rather than as an answer, which is the same rule the intraday and
+    listed tabs splice a sentence in for. Probed: dropping it too fires.
+  - **Asserted BOTH ways, which is the part worth keeping.** The removed sentences are pinned by
+    exact phrase AND the geometry is pinned structurally — the row directly under SCRIPT NAME
+    must be a block row, not a long string sitting alone in the NAME column. A phrase list alone
+    passes the day someone rewords a note; the structure alone passes if a paragraph moves
+    further down the page.
 - **Note rows are PUSHED before the first block, never spliced in after the emission.** Every
   index the paint reads (`expStart`, `expEnd`) and every index `derive` records is captured as
   the rows go out, so a splice shifts the colour bands a row off the values they describe. (The
@@ -150,6 +178,352 @@ on saying so out loud.** Every figure on them is already filed on `Capital Gains
   failure if skipped: last year's figures standing under this year's heading.
 - **NOT twinned by the formula view.** `collect.push` is explicit, and a period tab is already a
   restatement of a tab the view twins.
+
+**THE SINGLE-PERIOD TABS SHOW ONLY THE PURCHASES THAT FUNDED THEIR OWN SALES** (28-Oct-2026,
+arrived at in two steps on one day — the first step is kept because the second only makes sense
+against it).
+
+**Step 1 — the report.** Adding the two tabs' expense totals gave **Rs 34,24,216.37** against
+**Rs 40,27,801.34** on the main tab: **Rs 6,03,584.97 SHORT**, with nothing on either page able
+to explain the direction, let alone the amount.
+
+**It was wrong in two opposite directions at once, and the tab disclosed only one of them.** A
+scrip sold in BOTH periods had its in-FY purchase charges printed on BOTH tabs, counted twice; a
+scrip with NO sale in a period had its whole block dropped by `.filter(b => b.sales.length > 0)`,
+so a scrip bought and not sold that year reached NEITHER tab and its purchase charges vanished
+from both. The sum could therefore land OVER or UNDER depending on which shape dominated — while
+the note warned only about the duplication, i.e. told the reader to expect it too BIG.
+
+Measured before anything was changed, with the two effects isolated: a never-sold purchase alone
+came out **18.65 UNDER**; a scrip sold in both periods alone came out **18.65 OVER**; both
+together came out **exactly 0.00**. A gap of zero there is not agreement — it is two errors
+cancelling, and it is why a balanced example would never have shown this.
+
+**Step 2 — what is emitted now** (*"i want only those purchase entries with expenses to be shown
+(not opening shares) that were bought AND sold in the short term period only"*): the in-FY
+purchases that FUNDED this period's sales, each PRO-RATED to the quantity those sales actually
+consumed. `matchedPurchases` in `trxRegister.ts`.
+
+- **The FIFO already recorded it.** Every sale carries `matched` — the lots it consumed — and
+  they are captured PER BUCKET (`stLots` / `ltLots` partition on the same test that decides the
+  row). Nothing is re-derived from the printed rows, which is the mistake the ACQUISITION COST
+  column already documents at length.
+- **PRO-RATING IS NOT A NEW CONVENTION HERE; IT IS THE ONE THESE TABS ALREADY USE.** A single
+  sale spanning both periods is already printed as two rows with its quantity split and its
+  charges scaled by `scaleCharges`. Doing the same on the buy side makes the two sides agree
+  rather than introducing anything.
+- **Keyed on `buyTs` ALONE, never on the rate.** After a SPLIT the surviving lots carry a
+  rescaled `purPrice` while keeping their original acquisition date, so a rate match would
+  silently drop every post-split purchase — exactly the blocks where a reader most needs to see
+  what the shares cost.
+- **`Math.min(avail, p.qty)` is the guard that matters.** A `carryLots` parcel keeps its PARENT's
+  `buyTs`, which can coincide with an in-FY purchase date, so the matched quantity can exceed
+  what that purchase really supplied. Capping means the worst case is showing a purchase in full
+  that was only partly consumed — never more than was bought, never a fabricated share. Probed:
+  without it fixture P over-draws a 100-share purchase with a 200-share post-split lot and the
+  **CEILING arm throws, so no register writes at all.**
+- **The matched quantity is DRAWN DOWN as each purchase takes its share.** Two buys on one date
+  share one `buyTs` bucket; without the drawdown both claim the whole of it and the page shows
+  400 shares bought to fund a 200-share sale. The ceiling cannot catch that (12.43 claimed
+  against 37.30 filed is still under it), which is why **fixture P3** asserts the quantity
+  instead — and the probe is caught by P3 **alone**, at 364 passed / 1 failed.
+- **OPENING STOCK IS NEVER A PURCHASE HERE, and that falls out of the mechanism.** An opening
+  lot's `buyTs` is pre-FY, so it matches no entry in `b.purchases` and contributes nothing. An
+  opening lot CAN be sold short-term (bought in February, sold in June) and the owner's
+  instruction is explicit that it still does not become a purchase row. Fixture A pins it:
+  ALPHA's sale came out of opening stock and the long-term tab shows no purchase at all.
+- **THE LONG-TERM TAB GETS NONE OF THIS, AND NO CODE SAYS SO.** The longest an in-FY purchase can
+  be held inside one FY is 364 days, short of the 365-day listed threshold, so no in-FY purchase
+  can ever fund a long-term sale in the same year. The same rule applied to both tabs therefore
+  yields purchases on SHORT and nothing on LONG by arithmetic rather than by a special case. The
+  suite pins it anyway, because a future `ltDays` change would make it reachable and nobody would
+  think to look.
+- **The footer is `Short Term Expenses` again** (it was `Short Term Sale Expenses` for the few
+  hours the tab carried no purchases). The figure now genuinely IS the period's expenses — both
+  legs of the trades it reports — so the plain label is the accurate one. The suite matches it as
+  an EXACT CELL, never a substring of the row: the notes quote the label in prose, so `includes`
+  would pass on a tab whose footer had gone.
+- **THE PURCHASES ARE REWRITTEN ON THE CLONE, NEVER gated inside `emitTab` on `L.id` the way
+  CLOSING is — the OPPOSITE resolution to the CLOSING rule above, for a stated reason.**
+  `restateCols` reads `blk.purchases.length` to decide which column family a SPLIT or corp-action
+  RESTATEMENT is printed in. Gate the emission alone and the block still answers *"I have
+  purchases"* with the WHOLE year's list, so a split is filed under the PURCHASE column family on
+  a tab whose sales were funded entirely out of opening stock and which shows no purchase row at
+  all. Rewriting the array is the ONE point that does every job: the loop emits exactly the
+  matched rows, only their scaled charges reach `grand`, `restateCols` follows the rows actually
+  on THIS tab, and `buyRows` counts them. Both rules are "one mechanism"; they resolve opposite
+  ways because *which* mechanism suffices differs.
+- **Fixture P2 is the only shape that can see that**, and it is built for it: an in-FY purchase
+  the period's sales never touched, a 2:1 split, and an opening lot that FIFO eats instead.
+  Probed — the `L.id` gate files the SPLIT in the PURCHASE family on a tab with no purchase row:
+  right charges, **wrong layout, and no arithmetic guard anywhere can see it.**
+- **The OPENING columns stayed on these two tabs, and the four PURCHASE columns always had.**
+  `LEFT_KEYS` was module-level and shared by every variant, so dropping a family on one tab meant
+  a per-variant left block, new geometry, a new paint range and a new formula-view column map.
+  That work was done on 28-Oct-2026 for the ACQUISITION tabs — see the section below — and these
+  two tabs are deliberately unchanged by it: they keep both families, because the period tab is
+  the CONTRACT NOTE's view and the acquisition tab is the LOT view.
+
+All six probes fire: the clone taking the whole year's purchases, the `L.id` gate, dropping the
+pro-rate, dropping the cap, dropping the drawdown, and feeding purchases into `saleCharges`.
+
+**AND `matchedPurchases` ALLOCATES IN COST, NOT IN SHARES — a units bug these tabs shipped with**
+(found 28-Oct-2026 by fixture Q, while building the acquisition tabs below). It capped with
+`Math.min(matchedQty, pu.qty)`, and **those two are in different units whenever a split
+intervened**: the matched lots are POST-split (the split branch rewrites `purPrice` and the lot
+quantity together) while `b.purchases` records what the contract note said, PRE-split.
+
+A 100-share buy that split 2:1 and was **half** sold afterwards matched 100 post-split shares
+against a 100-share purchase, concluded the whole lot was consumed, and **claimed all of its
+brokerage against half a position**. Silent on the page: the purchase row looked ordinary and
+the charge block looked ordinary. Cost is invariant under a split, so it is the only currency
+the two sides can be compared in, and `allocateMatched` now works in rupees throughout.
+
+- **ONE allocator behind both views.** The period tabs render it in NOTE units
+  (`qty = pu.qty x f`), the acquisition tabs in LOT units (`qty` = the shares FIFO actually
+  consumed). The AMOUNT and the CHARGES are the identical figures on both, because both scale
+  `pu` by the same `f` — which is what lets the guard between them be an equality.
+- **`r6` on the note quantity**, because `f` is a ratio of two rupee figures:
+  `300 x (20000/30000)` is `199.99999999999997`, and a filed tab would print 200 while the
+  suite compared against something else.
+- **`Math.min(cost, room)` is still the guard that matters**, now in rupees. A `carryLots`
+  parcel keeps its PARENT's `buyTs`, so the matched cost at a date really can exceed what that
+  purchase paid for; the excess falls through to stock brought forward, which is what it is.
+- **It moves filed figures.** A period tab regenerated for an FY containing a split with a
+  partial post-split sale will show different purchase charges from one generated before
+  28-Oct-2026. The new figure is the right one. **No capital gain moves** — every gain here is
+  charge-free turnover.
+
+**AND THE LISTED BOOK ALSO GETS TWO ACQUISITION TABS — THE SAME SPLIT WITH ONE ACQUISITION
+COLUMN FAMILY INSTEAD OF TWO** (28-Oct-2026, asked as *"make 2 new tabs of the same bifurcated
+ST LT ... in both remove the opening stock columns and keep the purchase column ... the purchase
+column should have all the acquisition purchase entry only"*).
+
+`Short Term Capital Gains (Acquisitions) for FY..` and `Long Term Capital Gains (Acquisitions)
+for FY..`. Every lot the period's sales consumed is a PURCHASE row: the in-year buys with their
+expenses exactly as the period tabs show them, and the stock carried in from earlier years —
+which on those tabs sits in a different column family, under a heading that answers a question
+nobody reading the page is asking.
+
+**They are a THIRD restatement of sales already filed**, so they stay OUT of `cgGrand` exactly as
+the period tabs do: counting all three QUADRUPLES every listed charge, the conservation guard
+sees drift, and NO REGISTER WRITES AT ALL. Six listed capital-gains tabs now; the badge names all
+six, because a tooltip naming four reads as though two had failed.
+
+- **The opening columns left `ColMap` ENTIRELY — not made optional, made ABSENT.** An optional
+  `oDate` is the trap this file already documents for the P/L keys: with no `strictNullChecks`,
+  `row[COL.oDate]` on a variant that has none compiles, evaluates to `row[undefined]`, and
+  silently drops a figure out of a filed tax tab under a green build. A MISSING key is a type
+  error regardless of strictness, so removing them turned every one of ~20 call sites into a
+  compile error and `tsc` genuinely proved each had been re-pointed. They come back through
+  **`L.openCols()`, which THROWS** — the identical mechanism, and reason, as `plCol`.
+- **`LEFT_OF` / `HAS_OPENING` beside `PL_OF`.** The same precedent as `geom(withCompanyCols)` on
+  the FY-end holding tabs: the column order and the HEADER row are built in one expression, so a
+  column cannot exist with no heading over it or the reverse. Two structural detectors sit beside
+  the existing ones — the opening family must be the four columns immediately before PURCHASE,
+  and with none, PURCHASE must follow SCRIPT NAME.
+- **THE NARRATION CAME OFF THESE TOO** (03-Nov-2026, same instruction). Four paragraphs, gone
+  the same way and asserted absent the same way, with the empty-tab sentence kept. The one that
+  carried a real fact was the B/F paragraph — that a carried-in lot's blank charge cells are
+  deliberate rather than a failed import — and the `B/F` LABEL on the row is what states that
+  now. Which is exactly why that label is pinned as an EXACT SCRIPT NAME cell: it went from
+  being one of two places the fact appeared to being the only one.
+- **A CARRIED-IN ROW IS LABELLED `B/F` AND CARRIES NO CHARGES**, and the second half is the
+  load-bearing decision. That brokerage and STT were paid in a year that is already filed, they
+  are not this year's expense, and s.48 would not allow them against this year's gain. The label
+  is what stops the blank charge cells reading as missing data — a purchase row dated 2019 with
+  an empty charge block otherwise looks like a failed import. Same idiom as `SPLIT` and `CLOSING`.
+- **So the expense total is IDENTICAL to the period sibling's**, which is what lets the guard be
+  an equality on both arms rather than the ceiling the period tabs get against the main tab.
+  Sale rows, P/L, sale charges and purchase charges all tie, per column, to the paise. **The
+  purchase arm is the one that fires if a B/F row ever arrives with charges on it** — and
+  nothing on the tab could show that, because those cells are blank by design.
+- **SALES AMOUNT less PURCHASE AMOUNT is the P/L already filed.** The property these tabs have
+  and the period tabs cannot, because every lot that paid for these sales is on the page. Stated
+  on the tab, and asserted.
+- **A SPLIT or corp action is a SENTENCE here, not a figure.** The matched lots already carry the
+  post-split `purPrice`, so a restatement row would be counted twice and the purchase quantity
+  column would stop being the shares these sales disposed of. The owner's word was *"only"*. The
+  clone sets `splits: []` and strips every corp-action line to its text; dropping the event
+  outright would hide a split from a filed page, which is the worse failure.
+- **`restateCols` is therefore UNREACHABLE on these tabs, and was deliberately NOT given a third
+  arm.** A `|| !L.open` fallback was written and removed: with both sources empty it is
+  unreachable code that LOOKS like a safeguard, which this repo has already paid for once with
+  the discriminating name slot. If a later edit puts a restatement back, `openCols()` throws and
+  no register is written — the right failure.
+- **`opening: []` on the clone is what makes the absent family SAFE rather than merely unused.**
+  With it, `openAgg` is empty on every block and `openCols()` is never reached. `closing` is left
+  alone: the existing `L.id === "DELIVERY"` gate already excludes it, and a second route to one
+  outcome is the unreachable-safeguard trap again.
+- **NOT twinned by the formula view**, same as the period tabs. `derive.paint`'s four opening
+  entries are now `number | null` and `trxFormulaGrid` branches on them — a null reaching the
+  Sheets API is a range starting at column 0, i.e. the whole left edge formatted as a quantity.
+- **The quantity invariant inside `matchedAcquisitions` is a RUNTIME NET, honestly labelled.**
+  Probed in PAIRS — break the drawdown and remove it, drop the fold-in and remove it — and the
+  fixtures still fail loudly either way, so the suite does not depend on it. It is kept because
+  the shapes it covers are the ones no fixture has, and there it turns a wrong acquisition total
+  on a filed page into a refusal to write. Tolerance is a ten-thousandth of a SHARE, not a
+  paise-scale epsilon: a tighter bound buys nothing and risks refusing a correct register over
+  float noise.
+
+**Fixtures Q and R are what make any of this tested**, and each was built for a probe that came
+back SILENT:
+
+- **Q** — a pre-FY buy in True Entry (so the opening lot genuinely CARRIES charges; the
+  `Opening Holdings` seed sets `ZERO_CHARGES`, which made every earlier fixture satisfy the
+  no-charges guard trivially), a 2:1 split, and TWO sales eating one date. It is also what found
+  the cost-versus-shares bug above: the acquisition tab printed the in-year lot as a purchase of
+  Rs 20,000 **and** a B/F remainder of Rs 10,000, double-counting one lot on a filed page, and
+  `SALES less ACQUISITIONS` came to Rs 23,000 against a P/L of Rs 33,000.
+- **R** — two same-day buys at DIFFERENT prices, which is the only shape with two distinct lots
+  at one date. Fixture P3's two buys are at the same price and merge into one matched lot, so
+  only the `h.qty` drawdown was in play; `room` was untested. Without it the first purchase
+  absorbs the second lot too, reports `f = 2.0`, and claims DOUBLE its own brokerage while the
+  second claims half — total cost and total shares both still tie, so **only the per-row charge
+  shows it**, and what catches it is the period tabs' CEILING arm refusing to write.
+
+Ten probes fire: the cost-not-shares allocation, the carried-in fold-in, B/F charges, both
+drawdowns, `opening: []`, `cgGrand`, the per-variant left block, the split stripping, and the
+width geometry. The quantity invariant is silent alone, which is reported above rather than
+papered over.
+
+**THERE IS NO `Dmat` COLUMN ON ANY TAB, AND THE REMOVAL REPORTS ITSELF** (26-Oct-2026, asked as
+*"from all capital gain sheet remove dmat charges column i dont think anyone provides us with
+that info"*). Gone from every capital-gains tab, both single-period tabs and the transaction
+statements. The charge block is now EIGHT columns.
+
+**The premise was nearly right, and the exception is the whole design of the change.**
+**INTEGRATED does provide one** — `integrated.ts` reads a demat / DP charge off the obligation
+detail and allocates it per trade, and the import adds a `Demat Charges` column to True Entry for
+those notes. Every other broker omits it, so on the rest of the book the column was a headed
+blank on a filed document.
+
+- **`Charges.dmat` is still READ from the ledger.** Nothing is thrown away, and the ledger keeps
+  its column — Integrated imports still write it, Edit Trade still edits it, Reports still shows
+  it. Only the register's tabs stopped displaying it.
+- **Removing the column FORCED `dmat` out of the charge-conservation guard**, and that is the
+  real cost. A charge expected on the tabs but emitted nowhere makes the guard see drift and
+  **no register writes at all** — the rule already stated above, hit from the other direction.
+  So every other charge still reconciles to what True Entry actually charged and this one now
+  does not.
+- **Which is why `TrxRegisterResult.dmatNotShown` exists.** The rupees the tabs no longer display,
+  summed from exactly the trades whose charges reach a gains tab, on the register badge. `0` —
+  the expected answer on a book with no Integrated notes — is the measurement that JUSTIFIES the
+  removal; anything else is a number to look at, and the column comes back in one line. A figure
+  that is neither shown nor checked is how a real expense disappears without trace, and this is
+  the same discipline as `sttSuppressed` and the Combined tab's shortfall note.
+- **The geometry renumbered itself.** `makeLayout(id)` derives every index from `LEFT_KEYS`,
+  `CHARGE_KEYS` and `PL_OF[id]`, so one entry out of `CHARGE_KEYS` and one out of `CHARGE_HDR`
+  moved every charge column left across all four variants. The existing structural detectors
+  (`headers.length !== WIDTH`, `COL.ipf !== WIDTH - 1`) stand guard if the two arrays ever drift
+  apart — probed, and the suite ABORTS AT MODULE LOAD rather than misfiling a charge.
+- **The transaction statements lost it too, by design.** `TXN_HDR` reuses `CHARGE_HDR` verbatim
+  with a module-load alignment check, *"so a statement sitting beside a gains tab has the same
+  charge block in the same order"*. It costs nothing in practice: those statements are written
+  for the NON-LISTED classes and Integrated's DP charges are listed-equity charges that only ever
+  appeared on the gains tabs. `TX.net` moved 16 → 15, `TXN_WIDTH` 17 → 16.
+
+**Two probes came back SILENT and BOTH were faults in the probe design, not untested code** —
+the second is a trap worth remembering. (1) The harness only looked for `FAIL` lines, so a probe
+that made the suite ABORT read as silence and a structural detector doing its job looked
+untested; it now treats a missing `N passed, 0 failed` summary as a fire. (2) `expect.dmat` and
+the guard's `keys` list were probed SEPARATELY, and either alone is a genuine no-op — an
+`expect.dmat` that `keys` never compares, or a `"dmat"` in `keys` comparing 0 against 0. **Only
+the PAIR is the bug**, and probed together it fires exactly as predicted: the register refuses to
+write. Fixture A with a DP charge on each of its three in-year trades, right and wrong answers
+disjoint at **21.75 against 0**.
+
+**A FINANCIAL YEAR'S REPORTS CAN BE WRITTEN TO A DIFFERENT WORKBOOK FROM THE LEDGER**
+(29-Oct-2026, asked as *"I want all our fy26-27 data cg and everything to be in our other google
+sheet ... This is for Integrated - Saket Agarwal - S713"*).
+
+`REPORT_DESTINATIONS` in `portfolios.ts` is the single registry, and adding an account or a year
+is ONE entry. It holds **five, all FY26-27**: S713 (29-Oct-2026), then T059, S1404, G058 and
+C087 (03-Nov-2026, one workbook link supplied per account). All five are Integrated accounts and
+every ledger stays where it is.
+
+**NO TWO ENTRIES MAY SHARE A WORKBOOK**, and that invariant was added when the table reached five
+rather than when it held one. The tab names carry the FY but not the account, so two accounts
+pointing at one book do not collide loudly: the second run OVERWRITES the first's
+`Capital Gains for FY26-27` in place, both runs report success, and one client's filed figures
+are simply gone. Asserted over the table, probed, and it fires — as does a pair of destinations
+SWAPPED between two accounts, which resolves and writes and looks entirely ordinary. Each
+account's destination is therefore pinned to its own id individually, not merely checked for
+being non-empty.
+
+**ONE IDENTIFIER USED TO DO BOTH JOBS.** `generateTrxRegister(spreadsheetId, ...)` read True
+Entry, Opening Holdings and Corporate Actions from it AND wrote every output tab back to it.
+It is now `sourceSpreadsheetId` plus an optional `destSpreadsheetId`, resolved inside to `srcId`
+(three reads) and `dstId` (twenty-one writes).
+
+- **The parameter was RENAMED rather than added beside**, which is the whole safety argument.
+  Splitting one identifier is a change where a single missed site is silent in the worst way: a
+  filed tax tab written to the account's own sheet while the rest of the run went elsewhere, or
+  a LEDGER read from the report workbook - which holds no True Entry and would report the whole
+  year as empty while looking like a finished run. Renaming turns every existing use into a
+  COMPILE ERROR, so `tsc` proves each of the 24 was re-pointed deliberately. Same technique as
+  the OPENING family leaving `ColMap`, and it is now used twice.
+- **ONLY WRITES FOLLOW THE DESTINATION. Nothing can redirect a read**, and that is not a
+  convention but a property of the registry: it is consulted by the CALLER, which passes it as
+  the destination argument alone.
+- **The registry is keyed on portfolio AND FY start year.** A redirect scoped to the account
+  would regenerate an ALREADY-FILED year into the new workbook on the next click, leaving the
+  filed version standing in the original sheet as an orphan under a heading that still looks
+  current. A redirect scoped to the year alone would file one client's gains in another
+  client's book. Both are probed, and both fire.
+- **A typo FALLS BACK to the account's own sheet**, because `reportSheetIdFor` ends in
+  `|| sheetIdForId(portfolioId)`. That is the conservative direction - an override that does
+  not match writes to the ordinary place rather than somewhere unexpected - and it is why
+  `reportDestinationFor` exists separately: the UI needs to tell *"no override"* from *"the
+  override did not match"*, which read identically from the resolved id. The suite also asserts
+  over the TABLE that every `portfolioId` is real, that no entry names the account's own sheet
+  (a no-op wearing the clothes of a redirect) and that **no entry targets another account's
+  ledger**, which is the worst outcome available here.
+- **`TrxRegisterResult.reportSheetId` is ALWAYS set**, including when it is the account's own
+  sheet. A field present only on a redirect cannot distinguish the two cases, and the badge
+  needs to - a run that writes nothing into the sheet the owner is looking at is otherwise
+  indistinguishable from a run that did nothing. Same discipline as `sttFlaggedInMaster`
+  reporting a zero rather than being absent.
+- **THE FORMULA TWIN FOLLOWS THE FILED TAB, and takes the REGISTER'S answer for where that is**
+  (`res.reportSheetId`), never re-resolving it. One authority: a twin in the account's own sheet
+  is a formula page with nothing to be a formula page OF, and `<tab> (Formula)` sitting there
+  alone reads as though the register had failed. SOURCE-asserted in `tmp-formula-view.ts`,
+  because `generateFormulaView` is gapi-driven and neither suite executes it - a behavioural
+  probe on that path comes back silent.
+- **`staleInSource` names what is LEFT BEHIND.** The account's own sheet still carries this FY's
+  tabs from any run made before the redirect: last year's figures under this year's heading,
+  which is the orphan the legacy-tab rename exists to prevent, arriving from a new direction.
+  They are NAMED, never deleted and never renamed - once a redirect is in force this function
+  does not write to that sheet at all. It compares against the list of tabs THIS RUN WROTE, not
+  against every tab in the source: listing `True Entry` there would read as an instruction to
+  delete the account's database. Costs ONE `spreadsheets.get`, only when redirected, wrapped so
+  it can never fail a register that is already written - and on failure it pushes a sentence
+  saying it could not look, because an empty list would state a conclusion it never reached.
+- **The redirect is disclosed BEFORE the click as well as after it**, as a chip beside the FY
+  dropdown linking to the destination. A redirect discovered only by hovering a badge afterwards
+  is one the owner meets as *"my tabs are missing"*. Its colour classes are lifted verbatim from
+  the Rebuild button beside it, so no new shade enters the theme layers.
+
+Fixture S drives all of it: a ledger with an opening lot, a demerger and two sales, written to a
+destination whose `__sheetTabs` is a bare `Sheet1`. **S** asserts every write and every paint
+landed in the destination and NONE in the source, while all three reads still came off the
+source; **S2** that an ordinary run is unchanged; **S3** that the superseded copies are named and
+the ledger tabs are not; **S4** drives the registry directly, both scopes and the table
+invariants. All eleven probes fire.
+
+**Two of them were SILENT first and the second is the useful one.** The opening-basis read and
+the corp-action read were no-ops in fixture S until it was given an opening lot and a demerger -
+every fixture that HAS them passes no destination, so `dstId === srcId` there and the mutation
+cannot bite. Then the opening-basis assertion was *still* silent, because
+`some(r => r[3] === 300)` was satisfied by the DEMERGER parcel, which is also 300 shares. It is
+now asserted on the FIGURE - GAMMA's long-term gain of 5,666.67 against the 0 an uncovered sale
+books - which is disjoint by construction. **A presence check on a number that appears elsewhere
+on the page is not a check.**
+
+**What this does NOT do.** The ledger does not move: True Entry, Opening Holdings, Corporate
+Actions, the live `Holding` tab, every import and `rebuildHoldingTab` / `syncCapitalGains` all
+still read and write the account's own sheet. So the report workbook is not self-contained and
+cannot be regenerated from on its own.
 
 **The FY-end holding statement is THREE tabs per FY** (changed 14-Sep-2026), split the same way
 the capital-gains tabs are and for the same reason — PE is off-market, long-term at 730 days and
@@ -2320,6 +2694,141 @@ that guessing between those buckets cost two rounds:
 - **`chargeMissBy`** names the charge each miss came from, so *"ET is inconsistent"* is a fact on
   the badge rather than something to be noticed by eye on a tab.
 
+**AND THE DATA NAMES THE RATES IT IS MISSING** (26-Oct-2026). A real run came back
+**1496/2208 derived, 257 allocated, 455 no rate** — which **overturned the prediction above**:
+allocation drift was expected to dominate and it does not. Nearly two thirds of the misses are a
+rate the table does not carry, so the fixable half is the bigger half.
+
+`455` on its own names nothing, which is the same undifferentiated number `acqAsValue` was before
+it was bucketed. But a charge that reproduces no candidate **still knows what rate it was** —
+divide it back out. `NoRateHint` carries that, grouped and counted, commonest first:
+
+- **Quoted per CRORE** for a turnover levy, because that is the unit every exchange circular uses
+  and the unit the owner will type into a sheet. 2dp keeps 297.00, 306.99 and 375.00 apart.
+- **GST is quoted as a PERCENTAGE of the base that was tried**, never of turnover — a figure
+  ABOVE 18% is the note saying its base holds something this ledger has no column for, which is
+  not hypothetical: True Entry carries no clearing-charges column at all.
+- **Only ever for the `noRate` bucket.** A near miss already HAS its rate and is a paise of
+  allocation drift; dividing there reports a rate ALREADY IN THE TABLE with noise on the end and
+  swamps the list with near-duplicates of rates that need nothing done to them. Probed.
+- **`mergeNoRateHints` is ONE definition**, used by the grid for its own rows and by the view
+  across every twin. One missing rate appears on the delivery tab AND on both single-period tabs
+  — they restate the same sales — so a view that replaced instead of adding would under-report by
+  two thirds. It COPIES rather than referencing, or one tab's list gains counts from another's.
+- The view's half is **SOURCE-asserted**: `generateFormulaView` is gapi-driven and the suite never
+  executes it, so a probe on that path came back SILENT. The rule itself is driven directly.
+
+**THE FIRST REAL HINT LINE KILLED THE PREMISE IT WAS BUILT TO SERVE**, which is what the
+instrument was for. The owner ran it and got:
+
+```
+needs STT 1250/cr x23, SEBI 3087.2/cr x21, ET 107.83/cr x15 +5 more
+```
+
+Three different things, and only ONE is a rate:
+
+- **STT Rs 1,250/crore is 0.0125% - exactly HALF the statutory intraday rate - and it is not a
+  statute at all.** `allocateStt` splits the intraday pool *"50/50 between the buy leg and the
+  sell leg (Real SEBI intraday STT is sell-side-only 0.025%; this deliberately books half on each
+  leg per the client's accounting convention)"*. So BOTH legs of a squared-off round trip carry
+  half, and a table holding only the statute can reproduce neither. **Added**, as a `BOTH`-side
+  INTRADAY candidate, AFTER the statutory rows - on a turnover of 4,000 the statutory 0.025% at
+  paise and the convention at the RUPEE are both exactly 1.00, so the order decides which the tab
+  claims, and describing a plain statutory charge as this app's own convention states the
+  arithmetic wrongly while footing perfectly. That coincidence is the fixture; without it the
+  ordering is unreachable and the probe came back SILENT.
+- **SEBI Rs 3,087/crore is 309x the statutory Rs 10, and ET Rs 107.83 is a third of NSE's Rs 307.**
+  No such rates exist. They are not rates at all.
+- **AND THE COUNTS ARE THE REAL FINDING: 23, 21, 15.** Eight hints covering well under a hundred
+  of the 455. A handful of genuinely missing rates would show counts in the HUNDREDS; a long tail
+  of near-unique implied rates is the signature of ALLOCATION, which is cause (3) all along.
+
+**So `noRate` was over-counting, and the threshold is why.** A charge is a pro-rata share of the
+note's printed total, so the residual landing on one row is a large FRACTION of a small charge -
+a SEBI fee of Rs 0.50 that came out Rs 0.20 is ordinary, and nothing can tell that from a rate
+three times too low. At Rs 10/crore, SEBI and IPF are sub-rupee on almost every row of this book.
+
+**`chargeTooSmall` is the honest fourth bucket: under a rupee, no test could have told.** Those
+take no implied-rate hint either - dividing a sub-rupee charge by its turnover is precisely what
+produced "SEBI 3,087 per crore". The suite pins the rule with the SAME absolute miss, fifty
+paise, on either side of the rupee line, landing in opposite buckets.
+
+**THE OFF-MARKET BUCKET IS REAL, BUT IT WAS BUILT ON A WRONG DIAGNOSIS — READ THIS FIRST**
+(26-Oct-2026). A second run reported `SEBI 6,980/cr x16, ET 4.81/cr x15, ET 9.94/cr x12` — 698x
+the statutory SEBI fee and a sixtieth of NSE's exchange charge — and the three tabs twinned were
+`Capital Gains`, `Intra-Day` and `Private Equity Capital Gains`. **The private-equity tab was
+blamed on that coincidence alone, and that was wrong.**
+
+**THREE ROUNDS WERE THEN SPENT TELLING THE OWNER TO RELOAD A PAGE THAT WAS ALREADY CURRENT**,
+because an unchanged count cannot distinguish "the new code is not running" from "the new code
+ran and the bucket is legitimately 0". The code was verified on disk, the dev server was verified
+to be serving it by `curl`, and the badge still looked identical — because `chargeOffMarket`
+really was 0.
+
+**The fix was to make the diagnostic name the TAB each implied rate came from**, which answered
+both questions in one line: `needs SEBI 6980.22/cr x16 [Intra-Day]`. Tags present means the new
+code is running; the tag itself says where to look. **All three were `[Intra-Day]` — none were
+Private Equity.** PE rows carry BLANK charge cells, so nothing is ever attempted on them and the
+off-market bucket is correctly empty on this book.
+
+**THE LESSON, which is the one this file keeps relearning: a COUNT cannot be a diagnostic when
+zero and not-running look the same.** Every bucket added here should carry something that
+identifies itself — the tab, the charge, the rate — or the next report of "still the same" is
+unfalsifiable from both ends.
+
+**The real cause is the same-day matcher, and it is a DAY AGGREGATE.** It groups on `key|ts` with
+**no intraday-flag test** (already noted above for the ITR schedule), re-expresses the whole day's
+rows for that scrip, sums every buy's charges and every sell's charges, and pro-rates them by
+quantity:
+
+```ts
+const buyCharges = buys.reduce((c, t) => addCharges(c, t.charges), {...});
+buyCharges: scaleCharges(buyCharges, matched / buyQty),
+```
+
+So one intraday row's charge block is a whole day's charges for that scrip, across every note AND
+both trade kinds. A blend of 0.1% delivery STT and 0.025% intraday STT has no statutory identity
+by construction — exactly the day-aggregate problem this file already documents for STT, reaching
+every charge. The ratio is PRESERVED by `scaleCharges` (quantity fraction on both sides), so what
+the hint reports is the day's own blended rate, which is not a rate anyone published.
+
+**The off-market work was kept**, because it is correct on its own terms and costs nothing: an
+off-market trade genuinely has no exchange levy, and a PE tab that ever did carry a figure in one
+of those columns would otherwise be reported as a missing rate. It is simply not what was
+happening here.
+
+The original claim, left for the shape of the mistake:
+
+**An off-market trade has no exchange, so no exchange levy has a statutory identity against it.**
+STT is a tax on a transaction on a RECOGNISED STOCK EXCHANGE; the SEBI turnover fee, the exchange
+transaction charge and IPF are levied by or for an exchange. A figure typed into one of those
+columns on a Private Equity or AIF tab implies whatever rate the division gives — which is exactly
+what those hints were.
+
+- **`EXCHANGE_LEVIED` is `stt` / `et` / `sebi` / `ipf`, and STAMP DUTY and GST are deliberately
+  NOT in it.** Stamp duty is payable on an off-market transfer too, collected by the depository
+  rather than the exchange, and GST rides on any brokerage or fee. Both keep their identities
+  there. Probed by adding stamp to the set.
+- **They are still ATTEMPTED, never skipped, and that is the subtle half.** A company unlisted at
+  FY start keeps its WHOLE year on the unlisted tab (`classOfKeyInFy`), so a Private Equity tab
+  legitimately carries post-listing EXCHANGE trades whose real STT and exchange charges should
+  derive. Only the MISS is reported differently — a new `chargeOffMarket` bucket, carrying no
+  implied-rate hint. Probed by skipping them instead.
+- **`isOffMarket` comes from the CLASS REGISTRY, never from the layout.** `L.id` is `DELIVERY` on
+  a Private Equity tab exactly as it is on the listed one, so it cannot be derived from the
+  variant and `emitTab` takes it as a parameter, fed `ASSET_CLASSES[id].offMarket`. That
+  distinction is load-bearing: PE and AIF are off-market, **Mutual Fund and Bond are not**.
+- **That wiring is SOURCE-asserted**, because neither suite can execute it — `derive` is filled
+  only in collect mode and read only by the gapi-driven view, while `tmp-trx-run.mjs` reads the
+  WRITTEN tabs. A probe that stopped the class tab passing its flag came back SILENT. Four
+  assertions now cover it, including that the LISTED tabs pass no such flag, since telling the
+  main tab it is off-market would stop every genuine exchange levy being reported as missing.
+
+**What this means for the hand-maintained rate sheet the owner proposed: it is worth far less
+than 455 suggested.** The measurement was built to decide that and it did - and it decided
+against the thing it was built to support. Report the number that is actually actionable
+(`chargeNoRate` after the sub-rupee split) before building anything on it.
+
 **The threshold is RELATIVE with an absolute FLOOR** (`max(5 paise, 1%)`) and both arms are
 load-bearing, each with its own probe. 4 paise on a ₹1.00 SEBI fee is 4%, so the relative arm
 alone calls it a missing rate — and this book is full of charges that small. A rupee on a ₹30.70
@@ -2327,13 +2836,26 @@ exchange charge is 3.3%, so the floor alone calls it drift — which is precisel
 hides. It measures the CLOSEST candidate, never the first, for the same reason `acquisitionMiss`
 does.
 
-**And the tab says it too**, in a third banner line: a charge cell shows its rate only where that
-rate reproduces the broker's own figure, so one column deriving on some rows and not others is
-EXPECTED. **`BANNER_ROWS` moved 3 → 4 with it**, and that constant is what the paint shifts every
-band by — add a line without moving it and every colour band sits a row off the values it
-describes, which reads as a rendering quirk rather than a bug.
-`rows.length === values.length + BANNER_ROWS` is the one assertion tying the two together, and the
-suite's own banner offsets were switched from a hardcoded `3` to the constant.
+**The tab used to say it too**, in a third banner line — a charge cell shows its rate only where
+that rate reproduces the broker's own figure, so one column deriving on some rows and not others
+is EXPECTED. **That line and the s.48 line came off on 03-Nov-2026** with the rest of the
+narration, and **`BANNER_ROWS` went 4 → 2** with them: a one-line title and a spacer.
+
+- **The TITLE line stays, and the reason is not decoration.** The rows copied in beneath it
+  begin with the filed tab's OWN caption, so without it the workbook holds two tabs under one
+  identical heading, one of them formulas — the orphan-under-a-current-heading failure arriving
+  from a new direction. Probed.
+- **`BANNER_ROWS` is what the paint shifts every band by**, so moving the lines without moving
+  the constant puts every colour band a row off the values it describes — a rendering quirk to
+  look at, a bug to debug. `rows.length === values.length + BANNER_ROWS` is the one assertion
+  tying the two together, and it is what caught the change in the first place.
+- **THE SUITE'S EXPECTED FORMULAS HAD THE OLD OFFSET BAKED IN, 34 of them** — `rows[6 + B]` was
+  banner-relative but the string beside it said `=ROUND(G11*D8,2)`, which is row 7 plus a banner
+  of 4. They are now authored in FILED-TAB rows and passed through a `tw()` helper that adds
+  `BANNER_ROWS`, so the banner can never strand one again. The ones driven DIRECTLY
+  (`acquisitionSumFormula`, `chargeIdentityFormulas`) are handed explicit rows by their caller,
+  carry no banner, and are deliberately NOT wrapped — wrapping those would have been a silent
+  two-row error in the other direction.
 
 - **STT MOSTLY CANNOT DERIVE, AND THAT IS THE CORRECT ANSWER.** Rule 4 of the STT Rules 2004
   rounds it to the **nearest rupee** — which is this repo's documented Share India 20-paise
@@ -2366,11 +2888,15 @@ suite's own banner offsets were switched from a hardcoded `3` to the constant.
 - **Candidate ORDER is load-bearing and the first is never taken on faith.** The suite's sale row
   carries the BSE exchange rate, so NSE's is tried and rejected first.
 
-`npx tsx tmp-formula-view.ts` (58 → 99 → 138 → 166 → 194 → **212**) drives the pure builder
+`npx tsx tmp-formula-view.ts` (58 → 99 → 138 → 166 → 194 → 212 → 228 → 235 → 244 → 248 → 255 → **258**) drives the pure builder
 directly — a synthetic fixture is sharper here than a real tab, the same reason `tmp-recon-run.mjs`
 does, and the multi-lot fixture is the owner's real block to the rupee. All 70 probes fire, across
-four sweeps (acquisition 29, expenses 14, rates 16, misses-and-banner 11, the last of which puts
-the withdrawn GST shape BACK and confirms the tab refuses it). **Five of the rate
+seven sweeps (acquisition 29, expenses 14, rates 16, misses-and-banner 11 — one of which puts the
+withdrawn GST shape BACK and confirms the tab refuses it — implied-rate hints 8, the undecidable
+bucket 6, and off-market 7). **TWO hint
+probes were SILENT first**, each for its own reason: the merge fixture inserted the COMMONEST
+hint first, so the map's own insertion order already put it at the head and the sort was
+unreachable; and the view's per-tab feed is not executable by this suite at all. **Five of the rate
 probes were SILENT on their first run** and each named a real untested path; the fixtures that
 reach them are listed above.
 

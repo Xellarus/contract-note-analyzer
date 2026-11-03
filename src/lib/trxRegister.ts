@@ -107,18 +107,67 @@ type PlKey = "intra" | "st" | "lt";
  * long-term sale ever reaches the short-term tab instead of writing it into a column that does
  * not exist and losing the figure. Intraday cannot reach them for the same reason.
  */
-type VariantId = "DELIVERY" | "INTRADAY" | "SHORT" | "LONG";
+type VariantId = "DELIVERY" | "INTRADAY" | "SHORT" | "LONG" | "SHORT_ACQ" | "LONG_ACQ";
 const PL_LABEL: Record<PlKey, string> = { intra: "Intra-Day", st: "Short term", lt: "Long term" };
 const PL_OF: Record<VariantId, PlKey[]> = {
   DELIVERY: ["st", "lt"], INTRADAY: ["intra"], SHORT: ["st"], LONG: ["lt"],
+  SHORT_ACQ: ["st"], LONG_ACQ: ["lt"],
 };
 const BUCKET_PL: Record<"INTRA" | "ST" | "LT", PlKey> = { INTRA: "intra", ST: "st", LT: "lt" };
 
-const LEFT_KEYS = ["sno", "name", "oDate", "oQty", "oRate", "oAmt", "pDate", "pQty", "pRate", "pAmt", "sDate", "sQty", "sRate", "sAmt"] as const;
-const CHARGE_KEYS = ["brok", "stt", "gst", "et", "dmat", "stamp", "sebi", "exchClg", "ipf"] as const;
-const LEFT_HDR = ["S.No", "SCRIPT NAME", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "DATE", "NO OF SHARE", "RATE", "AMOUNT", "DATE", "NO OF SHARE", "RATE", "AMOUNT"];
-const CHARGE_HDR = ["Brok.Total", "STT", "GST", "ET Charges", "Dmat", "Stamp duty", "SEBI Chg.", "EXCH.Clg.", "IPF"];
-type ColMap = Record<(typeof LEFT_KEYS)[number] | (typeof CHARGE_KEYS)[number], number>;
+/**
+ * The left block, MINUS the OPENING STOCK family - see `OPEN_KEYS` directly below for why
+ * those four are not here.
+ *
+ * Every column index on every variant is derived from these arrays by `makeLayout`, exactly
+ * as `geom(withCompanyCols)` derives the FY-end holding tabs' geometry: one definition, and
+ * no second set of numbers that can drift out of step with it.
+ */
+const LEFT_CORE = ["sno", "name", "pDate", "pQty", "pRate", "pAmt", "sDate", "sQty", "sRate", "sAmt"] as const;
+/**
+ * THE OPENING STOCK FAMILY, WHICH NOT EVERY VARIANT HAS, AND WHICH IS THEREFORE DELIBERATELY
+ * ABSENT FROM `ColMap`.
+ *
+ * The ACQUISITION tabs (`SHORT_ACQ` / `LONG_ACQ`) carry every acquisition - stock brought
+ * forward included - in the PURCHASE columns, so they have no opening family at all. The
+ * obvious spelling for that is an OPTIONAL `oDate` on `ColMap`, and it is the same trap this
+ * file already documents for the P/L keys: with no `strictNullChecks`, `row[COL.oDate]` on a
+ * variant that has none compiles, evaluates to `row[undefined]`, and silently drops a figure
+ * out of a filed tax tab under a green build.
+ *
+ * A MISSING key is a type error regardless of strictness. So these four are reachable only
+ * through `L.openCols()`, which THROWS - the identical mechanism, and for the identical
+ * reason, as `plCol`.
+ */
+const OPEN_KEYS = ["oDate", "oQty", "oRate", "oAmt"] as const;
+const CHARGE_KEYS = ["brok", "stt", "gst", "et", "stamp", "sebi", "exchClg", "ipf"] as const;
+const DQRA = ["DATE", "NO OF SHARE", "RATE", "AMOUNT"];
+const LEFT_HDR_CORE = ["S.No", "SCRIPT NAME", ...DQRA, ...DQRA];
+/** Which variants print an OPENING STOCK family. The acquisition tabs are the two that do not. */
+const HAS_OPENING: Record<VariantId, boolean> = {
+  DELIVERY: true, INTRADAY: true, SHORT: true, LONG: true,
+  SHORT_ACQ: false, LONG_ACQ: false,
+};
+/**
+ * NO "Dmat" COLUMN (removed 26-Oct-2026, asked as *"from all capital gain sheet remove dmat
+ * charges column i dont think anyone provides us with that info"*).
+ *
+ * Nearly right, and the exception is the reason the removal reports itself. INTEGRATED does
+ * provide one - `integrated.ts` reads a demat charge off the obligation detail and allocates it
+ * per trade, and the import adds a `Demat Charges` column to True Entry for those notes. Every
+ * other broker omits it, so on this book the column was a headed blank on every filed tab.
+ *
+ * `Charges.dmat` is still READ from the ledger, deliberately. It no longer reaches a tab, so it
+ * also had to leave the charge-conservation guard's `expect` - a charge expected but not emitted
+ * makes the guard see drift and NO REGISTER WRITES AT ALL. Leaving the guard is the one thing
+ * that could make a real figure vanish without trace, so the register now carries
+ * `dmatNotShown`: the rupees on the ledger that these tabs no longer display.
+ */
+const CHARGE_HDR = ["Brok.Total", "STT", "GST", "ET Charges", "Stamp duty", "SEBI Chg.", "EXCH.Clg.", "IPF"];
+type ColMap = Record<(typeof LEFT_CORE)[number] | (typeof CHARGE_KEYS)[number], number>;
+/** The four OPENING STOCK columns, as one unit. Named `d/q/r/a` because `restateCols` already
+ *  hands the purchase family round in exactly that shape and the two are interchangeable. */
+type Family = { d: number; q: number; r: number; a: number };
 
 /**
  * The TRANSACTION STATEMENT layout - one row per transaction, for the non-listed classes.
@@ -135,13 +184,13 @@ const TXN_HDR = ["S.No", "DATE", "SCRIPT NAME", "TYPE", "NO OF SHARE", "RATE", "
                  ...CHARGE_HDR, "NET AMOUNT"];
 const TX = {
   sno: 0, date: 1, name: 2, type: 3, qty: 4, rate: 5, amt: 6,
-  brok: 7, stt: 8, gst: 9, et: 10, dmat: 11, stamp: 12, sebi: 13, exchClg: 14, ipf: 15,
-  net: 16,
+  brok: 7, stt: 8, gst: 9, et: 10, stamp: 11, sebi: 12, exchClg: 13, ipf: 14,
+  net: 15,
 };
 const TXN_WIDTH = TXN_HDR.length;
 // The charge block must line up with CHARGE_HDR or every charge lands one column out in a
 // document someone files. Cheap structural check, at module load.
-if (TXN_WIDTH !== 17) throw new Error(`Transaction statement layout: ${TXN_WIDTH} columns, expected 17.`);
+if (TXN_WIDTH !== 16) throw new Error(`Transaction statement layout: ${TXN_WIDTH} columns, expected 16.`);
 if (TXN_HDR[TX.brok] !== CHARGE_HDR[0] || TXN_HDR[TX.ipf] !== CHARGE_HDR[CHARGE_HDR.length - 1]) {
   throw new Error("Transaction statement layout: the charge block is not aligned with CHARGE_HDR.");
 }
@@ -152,6 +201,17 @@ interface Layout {
   WIDTH: number;
   plKeys: PlKey[];
   plCols: { key: PlKey; col: number; label: string }[];
+  /**
+   * The OPENING STOCK family, or `null` on a variant that prints none.
+   *
+   * Read it to ASK the question ("does this tab have one?"); use `openCols()` to USE the
+   * answer. Dereferencing this directly compiles without `strictNullChecks` and is exactly
+   * what the columns were taken out of `ColMap` to prevent.
+   */
+  open: Family | null;
+  /** The OPENING STOCK family. Throws on a variant that has none, rather than writing
+   *  `row[undefined]` and losing the figure - the same contract as `plCol`. */
+  openCols: () => Family;
   /** First P/L column — where the SALES colour band ends and the P/L band begins. */
   firstPl: number;
   /** Last P/L column — the expense-footer label anchor, immediately left of Brok.Total. */
@@ -164,21 +224,48 @@ interface Layout {
 
 const makeLayout = (id: VariantId): Layout => {
   const plKeys = PL_OF[id];
-  const order: string[] = [...LEFT_KEYS, ...plKeys, ...CHARGE_KEYS];
+  const hasOpen = HAS_OPENING[id];
+  // The opening family sits between SCRIPT NAME and PURCHASE, so it is spliced in at index 2
+  // rather than appended - and the header row is built in the SAME expression, which is what
+  // stops a column existing with no heading over it (or the reverse).
+  const left: string[] = hasOpen
+    ? [...LEFT_CORE.slice(0, 2), ...OPEN_KEYS, ...LEFT_CORE.slice(2)]
+    : [...LEFT_CORE];
+  const leftHdr = hasOpen
+    ? [...LEFT_HDR_CORE.slice(0, 2), ...DQRA, ...LEFT_HDR_CORE.slice(2)]
+    : [...LEFT_HDR_CORE];
+  const order: string[] = [...left, ...plKeys, ...CHARGE_KEYS];
   const COL = {} as ColMap;
   order.forEach((k, i) => { (COL as any)[k] = i; });
   const WIDTH = order.length;
   const plCols = plKeys.map((k) => ({ key: k, col: order.indexOf(k), label: PL_LABEL[k] }));
   const firstPl = plCols[0].col, lastPl = COL.brok - 1;
-  const headers = [...LEFT_HDR, ...plKeys.map(() => "P/L"), ...CHARGE_HDR];
+  const open: Family | null = hasOpen
+    ? { d: order.indexOf("oDate"), q: order.indexOf("oQty"), r: order.indexOf("oRate"), a: order.indexOf("oAmt") }
+    : null;
+  const headers = [...leftHdr, ...plKeys.map(() => "P/L"), ...CHARGE_HDR];
   // Cheap structural detectors. A one-column drift here silently misfiles every charge in a
   // tax document and neither tsc nor vite can see it; these throw at generate time instead.
   if (headers.length !== WIDTH) throw new Error(`Register layout ${id}: ${headers.length} headers for ${WIDTH} columns.`);
   if (COL.ipf !== WIDTH - 1) throw new Error(`Register layout ${id}: IPF is not the last column.`);
   if (firstPl !== COL.sAmt + 1) throw new Error(`Register layout ${id}: the P/L block is not adjacent to SALES AMOUNT.`);
   if (lastPl !== plCols[plCols.length - 1].col) throw new Error(`Register layout ${id}: lastPl is not the last P/L column.`);
+  // The opening family must sit immediately before PURCHASE and be contiguous, or the ORANGE
+  // band and every `for (c = open.d; c <= open.a; c++)` copy spans the wrong cells.
+  if (open && (open.a !== COL.pDate - 1 || open.a - open.d !== 3)) {
+    throw new Error(`Register layout ${id}: the OPENING STOCK family is not the four columns before PURCHASE.`);
+  }
+  if (!open && COL.pDate !== COL.name + 1) {
+    throw new Error(`Register layout ${id}: PURCHASE does not follow SCRIPT NAME on a tab with no opening family.`);
+  }
   return {
-    id, COL, WIDTH, plKeys, plCols, firstPl, lastPl, headers,
+    id, COL, WIDTH, plKeys, plCols, firstPl, lastPl, headers, open,
+    openCols: () => {
+      // Reaching here means a row that belongs in the OPENING STOCK family was emitted on a
+      // tab that has none. Refuse rather than write it into a column that does not exist.
+      if (!open) throw new Error(`Register bug: an OPENING STOCK row reached the ${id} tab, which has no opening columns.`);
+      return open;
+    },
     blankRow: () => new Array(WIDTH).fill(""),
     plCol: (b) => {
       const c = plCols.find((x) => x.key === BUCKET_PL[b]);
@@ -273,9 +360,22 @@ interface CorpNote {
 }
 
 // Per-scrip accumulated block.
+/**
+ * One PURCHASE row.
+ *
+ * `broughtForward` marks a row that is NOT an in-year purchase: a lot carried in from an
+ * earlier year that this year's FIFO consumed, printed in the purchase family on the
+ * ACQUISITION tabs, which have no OPENING STOCK columns. It is a DISPLAY fact - it decides a
+ * label and nothing else - and the row carries `ZERO_CHARGES` because those buy-side costs
+ * were incurred in a year that is already filed.
+ */
+interface PurchaseRow {
+  ts: number; qty: number; avgPrice: number; turnover: number; charges: Charges;
+  broughtForward?: boolean;
+}
 interface Block {
   key: string; name: string;
-  purchases: { ts: number; qty: number; avgPrice: number; turnover: number; charges: Charges }[];
+  purchases: PurchaseRow[];
   sales: { ts: number; qty: number; avgPrice: number; turnover: number; charges: Charges; category: "INTRA" | "ST" | "LT"; pnl: number; matched?: MatchedLot[] }[];
   splits: { ts: number; qty: number; rate: number; amount: number }[];   // restated holding after a split (post-split qty/rate/total cost)
   corpNotes: CorpNote[];
@@ -315,6 +415,38 @@ export interface TrxRegisterResult {
    * in that period, for the same reason the intraday tab is.
    */
   periodTabs: { short: string; long: string };
+  /**
+   * The two ACQUISITION tabs — the same ST/LT split with ONE acquisition column family
+   * instead of two, stock brought forward shown as a B/F purchase row rather than as opening
+   * stock.
+   *
+   * A THIRD restatement of `tabName`, so absent from the charge-conservation sum for the same
+   * reason `periodTabs` is. Each ties to its period sibling instead, on equalities.
+   */
+  acqTabs: { short: string; long: string };
+  /**
+   * The spreadsheet these tabs were WRITTEN to, which is not always the account's own.
+   *
+   * Always set, even when it IS the account's own sheet. A field present only on a redirect
+   * cannot tell "the override did not match" from "no override exists", and those have
+   * opposite remedies - the same reason `sttFlaggedInMaster` reports a zero rather than being
+   * absent. The UI compares it against the portfolio's `sheetId` and says so when they differ,
+   * because a run that writes nothing into the sheet the owner is looking at is otherwise
+   * indistinguishable from a run that did nothing.
+   */
+  reportSheetId: string;
+  /**
+   * Tabs for THIS FY still sitting in the account's OWN sheet after the reports were written
+   * somewhere else.
+   *
+   * They are last run's figures under this year's heading - the orphan the legacy-tab rename
+   * exists to prevent, arriving from a new direction. NOT deleted and not renamed: this
+   * function's whole contract once a redirect is in force is that it does not write to the
+   * account's sheet. Named, so the owner can delete them knowingly.
+   *
+   * Empty when nothing is redirected, and empty when the source carries no such tab.
+   */
+  staleInSource: string[];
   /** The FY-end holding statement that carries EVERY class. Stays the headline name:
    *  a consumer that says "the holding tab" means the complete one. */
   holdingTabName: string;
@@ -368,6 +500,18 @@ export interface TrxRegisterResult {
    */
   sttFlaggedInMaster: number;
   sttSuppressed: string[];
+  /**
+   * Demat / DP charges that are on True Entry for this FY and are on NO tab, because the Dmat
+   * column was removed (26-Oct-2026).
+   *
+   * Reported for one reason: removing the column also took `dmat` out of the charge-conservation
+   * guard, which is the only thing tying these tabs to what the ledger actually charged. Every
+   * other charge is still reconciled; this one is now simply not shown, and a figure that stops
+   * being checked AND stops being displayed is how a real expense disappears without trace.
+   * INTEGRATED notes genuinely carry one, so this is not hypothetical - it is just `0` on a book
+   * that has none, which is the answer that justified removing the column.
+   */
+  dmatNotShown: number;
   scrips: number;
   buyRows: number;
   sellRows: number;
@@ -404,7 +548,19 @@ const fyLabelOf = (startYear: number) =>
  * 31-Mar-2024). Reads True Entry + Corporate Actions, writes a new tab.
  */
 export async function generateTrxRegister(
-  spreadsheetId: string,
+  /**
+   * The account's DATABASE - True Entry, Opening Holdings, Corporate Actions. Read only.
+   *
+   * Named `sourceSpreadsheetId` rather than `spreadsheetId` ON PURPOSE (29-Oct-2026). Splitting
+   * one identifier into a read source and a write destination is the kind of change where a
+   * single missed site is silent in the worst way: a tax tab written to the account's own sheet
+   * while the rest of the run went elsewhere, or - far worse - a ledger read from the REPORT
+   * workbook, which holds no True Entry and would report the whole year as empty. Renaming the
+   * parameter turns every existing use into a COMPILE ERROR, so `tsc` proves each one was
+   * re-pointed deliberately. That is the same technique the OPENING column family used when it
+   * left `ColMap`, and for the same reason.
+   */
+  sourceSpreadsheetId: string,
   fyStartYear: number,
   title?: string,
   /**
@@ -418,7 +574,23 @@ export async function generateTrxRegister(
    * carries `collectedOnly: true` so it cannot be mistaken for a finished register.
    */
   collect?: CgFormulaSource[],
+  /**
+   * Where the GENERATED REPORTS are written, when that is not the account's own sheet.
+   *
+   * Defaults to the source, so every existing caller is unchanged. The caller resolves it
+   * through `reportSheetIdFor` in `portfolios.ts`, which is the single registry of these.
+   *
+   * ONLY writes follow it. Nothing here can redirect a read: the ledger is the account's and
+   * a report workbook has no True Entry in it.
+   */
+  destSpreadsheetId?: string,
 ): Promise<TrxRegisterResult> {
+  /** READS. The ledger, and nothing else, ever comes from here. */
+  const srcId = sourceSpreadsheetId;
+  /** WRITES. Every generated tab, and nothing else, ever goes here. */
+  const dstId = destSpreadsheetId || sourceSpreadsheetId;
+  /** True when the reports are going somewhere other than the account's own sheet. */
+  const redirected = dstId !== srcId;
   const fyStartTs = new Date(fyStartYear, 3, 1).getTime();          // 1-Apr, inclusive
   const fyEndExclTs = new Date(fyStartYear + 1, 3, 1).getTime();    // next 1-Apr, exclusive
   const fyLabel = fyLabelOf(fyStartYear);
@@ -427,7 +599,7 @@ export async function generateTrxRegister(
   let teRes: any;
   try {
     teRes = await (gapi.client as any).sheets.spreadsheets.values.get({
-      spreadsheetId, range: "True Entry!A:Z",
+      spreadsheetId: srcId, range: "True Entry!A:Z",
       valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "SERIAL_NUMBER",
     });
   } catch (e: any) {
@@ -548,13 +720,13 @@ export async function generateTrxRegister(
   }
 
   // ── 3. Corporate actions (Merger / Demerger) as dated events ──
-  const corpActions = await loadCorporateActions(spreadsheetId);
+  const corpActions = await loadCorporateActions(srcId);
 
   // Opening basis carried into the FY (lots as of 1-Apr of fyStartYear+1). True
   // Entry is FY26-only, so a scrip bought before FY26 has no buy row here; without
   // this seed its FY26 sells would find no lot → P/L 0 (blank) and OPENING STOCK
   // empty. Seed exactly like syncCapitalGains. No-op if the tab doesn't exist.
-  const openingSeed = await loadOpeningHoldings(spreadsheetId).catch(() => []);
+  const openingSeed = await loadOpeningHoldings(srcId).catch(() => []);
   for (const ol of openingSeed) {
     const key = keyOf(ol.isin, ol.name);
     if (ol.name && (nameByKey.get(key)?.length ?? 0) < ol.name.length) nameByKey.set(key, ol.name);
@@ -1048,7 +1220,15 @@ export async function generateTrxRegister(
   interface Emission {
     values: any[][]; plBandEnd: number; expStart: number; expEnd: number;
     closingRanges: { start: number; end: number }[];
-    grand: Charges; grandPnl: Partial<Record<PlKey, number>>;
+    grand: Charges;
+    /**
+     * This tab's SALE charges alone, accumulated by the SAME field list `grand` uses so the
+     * two can be compared term for term. It exists for the partition check: with purchases
+     * off the single-period tabs, each one's `grand` IS its period's sale charges, so the two
+     * must add to the main tab's `saleCharges` exactly.
+     */
+    saleCharges: Charges;
+    grandPnl: Partial<Record<PlKey, number>>;
     scrips: number; buyRows: number; sellRows: number;
     /**
      * What the FORMULA VIEW needs to rebuild this tab with its arithmetic exposed
@@ -1113,7 +1293,8 @@ export async function generateTrxRegister(
       plColsUsed: number[];
       chargeColsUsed: number[];
       /** The charge columns BY NAME, because a rate belongs to a charge, not to a position. */
-      chargeCols: { brok: number; stt: number; gst: number; et: number; stamp: number; sebi: number; ipf: number; dmat: number };
+      chargeCols: { brok: number; stt: number; gst: number; et: number; stamp: number; sebi: number; ipf: number };
+      isOffMarket: boolean;
       /**
        * The expense footer: the row repeating each charge total, the row carrying their sum,
        * and the column that sum sits under (Brok, beneath the breakdown).
@@ -1128,15 +1309,17 @@ export async function generateTrxRegister(
       firstDataRow: number;
       /** Column geometry, so the twin can repaint itself exactly as the filed tab is painted. */
       paint: {
-        sno: number; name: number; oDate: number; pDate: number; sDate: number;
-        oQty: number; oRate: number; oAmt: number;
+        sno: number; name: number; pDate: number; sDate: number;
+        /** NULL on a variant with no OPENING STOCK family — the acquisition tabs. */
+        oDate: number | null; oQty: number | null; oRate: number | null; oAmt: number | null;
         pQty: number; pRate: number; pAmt: number;
         sQty: number; sRate: number; sAmt: number;
         brok: number; ipf: number; firstPl: number; lastPl: number; width: number;
       };
     };
   }
-  const emitTab = (L: Layout, activeBlocks: Block[], caption: string, expenseLabel: string, notes: string[] = []): Emission => {
+  const emitTab = (L: Layout, activeBlocks: Block[], caption: string, expenseLabel: string, notes: string[] = [],
+                   offMarket = false): Emission => {
       const { COL, blankRow } = L;
       const active = activeBlocks
         .slice()
@@ -1174,7 +1357,11 @@ export async function generateTrxRegister(
       // title + group header + column header
       const titleRow = blankRow(); titleRow[COL.name] = caption; out.push(titleRow);
       const grp = blankRow();
-      grp[COL.oDate] = "OPENING STOCK"; grp[COL.pDate] = "PURCHASE"; grp[COL.sDate] = "SALES";
+      // "PURCHASE" on a tab with no opening family means every acquisition, carried-in stock
+      // included, so it is headed for what it holds rather than for where the shares came from.
+      if (L.open) grp[L.open.d] = "OPENING STOCK";
+      grp[COL.pDate] = L.open ? "PURCHASE" : "PURCHASE / ACQUISITION";
+      grp[COL.sDate] = "SALES";
       for (const pc of L.plCols) grp[pc.col] = pc.label;
       out.push(grp);
       out.push(L.headers);
@@ -1185,15 +1372,25 @@ export async function generateTrxRegister(
       for (const n of notes) { const nr = blankRow(); nr[COL.name] = n; out.push(nr); }
 
       const grand: Charges = { ...ZERO_CHARGES };
+      // SALES only. `grand` is this tab's whole expense total; this is the half of it that a
+      // sibling tab can be reconciled against, because a sale belongs to exactly one holding
+      // period while a purchase belongs to none.
+      const saleCharges: Charges = { ...ZERO_CHARGES };
       // Seeded from the VARIANT, not with all three buckets: a bucket that cannot appear on
       // this tab must stay absent, so a leak shows up as an undefined rather than a 0.
       const grandPnl: Partial<Record<PlKey, number>> = Object.fromEntries(L.plKeys.map((k) => [k, 0]));
+    // ONE definition of which fields the tab's totals are made of. `COL.exchClg` has no field
+    // behind it and `dmat` is no longer displayed, so neither is summed — and both accumulators
+    // must agree on that or the partition check compares two different things.
+    const addGrandFields = (into: Charges, c: Charges) => {
+      into.brok += c.brok; into.stt += c.stt; into.gst += c.gst; into.et += c.et;
+      into.stamp += c.stamp; into.sebi += c.sebi; into.ipf += c.ipf;
+    };
     const chargeCells = (row: any[], c: Charges) => {
       row[COL.brok] = c.brok || ""; row[COL.stt] = c.stt || ""; row[COL.gst] = c.gst || "";
       row[COL.et] = c.et || ""; row[COL.stamp] = c.stamp || ""; row[COL.sebi] = c.sebi || "";
-      row[COL.ipf] = c.ipf || ""; row[COL.dmat] = c.dmat || "";
-      grand.brok += c.brok; grand.stt += c.stt; grand.gst += c.gst; grand.et += c.et;
-      grand.stamp += c.stamp; grand.sebi += c.sebi; grand.ipf += c.ipf; grand.dmat += c.dmat;
+      row[COL.ipf] = c.ipf || "";
+      addGrandFields(grand, c);
     };
 
     // Consolidate opening/closing lots into ONE line per calendar date: summed qty,
@@ -1213,20 +1410,22 @@ export async function generateTrxRegister(
       for (const e of arr) e.rate = e.qty > 0 ? e.amount / e.qty : 0;
       return arr;
     };
-    // one consolidated opening/closing row (cols C–F)
-    const aggRow = (a: DateAgg, label?: string): any[] => {
+    // One consolidated opening/closing row. The column FAMILY is a parameter rather than the
+    // opening columns by name: `L.openCols()` throws on a variant that has none, so a caller
+    // has to have established the tab really carries one before it can build the row.
+    const aggRow = (f: Family, a: DateAgg, label?: string): any[] => {
       const row = blankRow();
       if (label) row[COL.name] = label;
-      row[COL.oDate] = a.dateStr; row[COL.oQty] = a.qty;
-      row[COL.oRate] = r6(a.rate); row[COL.oAmt] = r2(a.amount);
+      row[f.d] = a.dateStr; row[f.q] = a.qty;
+      row[f.r] = r6(a.rate); row[f.a] = r2(a.amount);
       return row;
     };
-    // subtotal row across the consolidated dates: qty (D), weighted-avg rate (E), total (F)
-    const aggSubtotal = (aggs: DateAgg[]): any[] => {
+    // subtotal row across the consolidated dates: qty, weighted-avg rate, total
+    const aggSubtotal = (f: Family, aggs: DateAgg[]): any[] => {
       const q = aggs.reduce((s, a) => s + a.qty, 0);
       const amt = aggs.reduce((s, a) => s + a.amount, 0);
       const row = blankRow();
-      row[COL.oQty] = q; row[COL.oRate] = q > 0 ? r6(amt / q) : ""; row[COL.oAmt] = r2(amt);
+      row[f.q] = q; row[f.r] = q > 0 ? r6(amt / q) : ""; row[f.a] = r2(amt);
       return row;
     };
 
@@ -1239,9 +1438,18 @@ export async function generateTrxRegister(
     // shares had been held at FY start, and for a scrip bought and demerged in the same year
     // (Tata Motors Passenger Vehicles, Oct-2025) it looked like a second, phantom position.
     // A block with both keeps PURCHASE: that is the more recent statement of the cost.
-    const restateCols = (blk: Block) => (blk.purchases.length
-      ? { d: COL.pDate, q: COL.pQty, r: COL.pRate, a: COL.pAmt }
-      : { d: COL.oDate, q: COL.oQty, r: COL.oRate, a: COL.oAmt });
+    //
+    // THE ACQUISITION TABS HAVE NO OPENING FAMILY AT ALL, and this function is deliberately
+    // NOT given a third arm for them. It cannot be reached there: the clone empties `splits`
+    // and strips every corp-action line to its sentence, so neither of the two call sites
+    // builds a figure row. A `|| !L.open` fallback was written here and removed - with both
+    // sources empty it is unreachable code that LOOKS like a safeguard, which this repo has
+    // already paid for once with the discriminating name slot. If a later edit ever puts a
+    // restatement back on those tabs, `openCols()` throws and no register is written, which
+    // is the right failure: a restatement in the acquisition column would be counted twice.
+    const PURCHASE_FAM: Family = { d: COL.pDate, q: COL.pQty, r: COL.pRate, a: COL.pAmt };
+    const restateCols = (blk: Block): Family =>
+      (blk.purchases.length ? PURCHASE_FAM : L.openCols());
 
   const closingRanges: { start: number; end: number }[] = [];   // row spans to shade green
     let sno = 0, buyRows = 0, sellRows = 0;
@@ -1252,21 +1460,28 @@ export async function generateTrxRegister(
       const openAgg = consolidateByDate(b.opening);
       // Header row carries S.No + name — and the FIRST opening date-line, as in the source.
       const head = blankRow(); head[COL.sno] = sno; head[COL.name] = b.name;
+      // `openAgg` is empty on a tab with no opening family (the acquisition tabs are handed
+      // blocks whose `opening` is []), so `openCols()` is only ever reached where there is one.
       if (openAgg.length) {
-        const l0 = aggRow(openAgg[0]);
-        for (let c = COL.oDate; c <= COL.oAmt; c++) head[c] = l0[c];
+        const of = L.openCols();
+        const l0 = aggRow(of, openAgg[0]);
+        for (let c = of.d; c <= of.a; c++) head[c] = l0[c];
       }
       out.push(head);
       // ONLY when the head row actually carries an opening line. A scrip with no opening
-      // position has C-F empty here, and a formula over a blank qty is #DIV/0!.
-      if (openAgg.length) { noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt); noteAcq(out.length - 1, COL.oRate, openAgg[0].ts); }
+      // position has those columns empty here, and a formula over a blank qty is #DIV/0!.
+      if (openAgg.length) {
+        const of = L.openCols();
+        noteRate(out.length - 1, of.q, of.r, of.a); noteAcq(out.length - 1, of.r, openAgg[0].ts);
+      }
       // Remaining opening date-lines. No subtotal row — the date-wise lines already
       // show the full opening position, so a summed total would be redundant.
       if (openAgg.length > 1) {
+        const of = L.openCols();
         for (const a of openAgg.slice(1)) {
-          out.push(aggRow(a));
-          noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt);
-          noteAcq(out.length - 1, COL.oRate, a.ts);
+          out.push(aggRow(of, a));
+          noteRate(out.length - 1, of.q, of.r, of.a);
+          noteAcq(out.length - 1, of.r, a.ts);
         }
       }
 
@@ -1289,6 +1504,13 @@ export async function generateTrxRegister(
       for (const p of [...b.purchases].sort((x, y) => x.ts - y.ts)) {
         buyRows++;
         const row = blankRow();
+        // A lot carried in from an earlier year, on a tab with no OPENING STOCK columns. The
+        // label is the whole reason it is not mistaken for missing data: its charge cells are
+        // blank by design, and a purchase row dated 2019 with an empty charge block otherwise
+        // reads as a failed import rather than as a cost incurred in a year already filed.
+        // The SCRIPT NAME cell is free here - the block's name is on its own head row above -
+        // and this is the idiom "SPLIT" and "CLOSING" already use.
+        if (p.broughtForward) row[COL.name] = "B/F";
         row[COL.pDate] = fmtDate(p.ts); row[COL.pQty] = p.qty;
         row[COL.pRate] = r6(p.avgPrice); row[COL.pAmt] = r2(p.turnover);
         chargeCells(row, cgCharges(b.key, p.charges));
@@ -1356,7 +1578,12 @@ export async function generateTrxRegister(
         const bk = BUCKET_PL[s.category];
         if (grandPnl[bk] === undefined) throw new Error(`Register bug: a ${s.category} sale reached the ${L.id} tab.`);
         grandPnl[bk]! += s.pnl;
-        chargeCells(row, cgCharges(b.key, s.charges));
+        // Hoisted so the charge block reaches BOTH accumulators without `cgCharges` running
+        // twice — it is what applies the "STT Removed" suppression, and two calls is two
+        // chances for them to disagree about a scrip.
+        const sChg = cgCharges(b.key, s.charges);
+        chargeCells(row, sChg);
+        addGrandFields(saleCharges, sChg);
         out.push(row);
         // AFTER the push, so `r` is this row's real index. Recorded for every sale, including
         // a zero-P/L one (an uncovered quantity with no matching lot) — the formula view still
@@ -1383,18 +1610,22 @@ export async function generateTrxRegister(
       // sales makes a filed page look like it does not add up, and invites someone to "fix" it.
       // Those tabs say where the position lives instead. See the single-period block below.
       if (L.id === "DELIVERY") {
+        // DELIVERY only, and DELIVERY always has an opening family - so this `openCols()` is
+        // the same guarded call the opening lines above make, reached through the `L.id` gate
+        // rather than through a row count.
+        const of = L.openCols();
         const closeAgg = consolidateByDate(b.closing);
         const closeStart = out.length;
         if (closeAgg.length) {
           closeAgg.forEach((a, i) => {
-            out.push(aggRow(a, i === 0 ? "CLOSING" : undefined));
-            noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt);
+            out.push(aggRow(of, a, i === 0 ? "CLOSING" : undefined));
+            noteRate(out.length - 1, of.q, of.r, of.a);
           });
           // The subtotal's rate is LITERALLY `amt / q` (see aggSubtotal), so a formula there
           // reproduces the code rather than approximating it.
-          if (closeAgg.length > 1) { out.push(aggSubtotal(closeAgg)); noteRate(out.length - 1, COL.oQty, COL.oRate, COL.oAmt); }
+          if (closeAgg.length > 1) { out.push(aggSubtotal(of, closeAgg)); noteRate(out.length - 1, of.q, of.r, of.a); }
         } else {
-          const row = blankRow(); row[COL.name] = "CLOSING"; row[COL.oAmt] = "NIL"; out.push(row);
+          const row = blankRow(); row[COL.name] = "CLOSING"; row[of.a] = "NIL"; out.push(row);
         }
         closingRanges.push({ start: closeStart, end: out.length });
       }
@@ -1407,7 +1638,7 @@ export async function generateTrxRegister(
     for (const pc of L.plCols) gt[pc.col] = r2(grandPnl[pc.key] || 0) || "";
     gt[COL.brok] = r2(grand.brok); gt[COL.stt] = r2(grand.stt); gt[COL.gst] = r2(grand.gst);
     gt[COL.et] = r2(grand.et); gt[COL.stamp] = r2(grand.stamp); gt[COL.sebi] = r2(grand.sebi);
-    gt[COL.ipf] = r2(grand.ipf); gt[COL.dmat] = r2(grand.dmat);
+    gt[COL.ipf] = r2(grand.ipf);
     out.push(gt);
     dGrandTotalRow = out.length - 1;
 
@@ -1421,7 +1652,7 @@ export async function generateTrxRegister(
     // so `grand` IS this tab's expense total and the subtraction is gone with it — one less
     // way for the two halves to disagree. The reconciliation moved to the caller, where it can
     // be checked against the SOURCE trades rather than against the rows we just emitted.
-    const chargeSum = (c: Charges) => c.brok + c.stt + c.gst + c.et + c.dmat + c.stamp + c.sebi + c.ipf;
+    const chargeSum = (c: Charges) => c.brok + c.stt + c.gst + c.et + c.stamp + c.sebi + c.ipf;
     // Zeros show as 0.00 (as in the source), not blank — the columns line up under GRAND TOTAL
     // exactly. The label sits in the LAST P/L column, immediately left of the charge
     // breakdown: that is COL.lt on the delivery tab and COL.intra on the intraday one, which
@@ -1430,7 +1661,7 @@ export async function generateTrxRegister(
       const row = blankRow();
       row[L.lastPl] = label;
       row[COL.brok] = r2(c.brok); row[COL.stt] = r2(c.stt); row[COL.gst] = r2(c.gst);
-      row[COL.et] = r2(c.et); row[COL.dmat] = r2(c.dmat); row[COL.stamp] = r2(c.stamp);
+      row[COL.et] = r2(c.et); row[COL.stamp] = r2(c.stamp);
       row[COL.sebi] = r2(c.sebi); row[COL.ipf] = r2(c.ipf);
       return row;
     };
@@ -1460,23 +1691,36 @@ export async function generateTrxRegister(
         // NOT here: the layout has a ninth charge column and `Charges` carries no field for
         // it ("exchClg not captured"), so a `=SUM()` down it would print a confident 0 under
         // a headed column where today there is an honest blank.
-        chargeColsUsed: [COL.brok, COL.stt, COL.gst, COL.et, COL.stamp, COL.sebi, COL.ipf, COL.dmat],
+        chargeColsUsed: [COL.brok, COL.stt, COL.gst, COL.et, COL.stamp, COL.sebi, COL.ipf],
         chargeCols: {
           brok: COL.brok, stt: COL.stt, gst: COL.gst, et: COL.et,
-          stamp: COL.stamp, sebi: COL.sebi, ipf: COL.ipf, dmat: COL.dmat,
+          stamp: COL.stamp, sebi: COL.sebi, ipf: COL.ipf,
         },
         expenseRows: { breakdown: dExpBreakdownRow, total: dExpTotalRow, totalCol: COL.brok },
         isIntraday: L.id === "INTRADAY",
+        // OFF-MARKET, which is a fact about the ASSET CLASS and not about the layout - `L.id` is
+        // DELIVERY on a Private Equity tab exactly as it is on the listed one, so this cannot be
+        // derived from the variant and has to be passed in. The twin needs it because an
+        // off-market trade has NO EXCHANGE: a SEBI turnover fee, an exchange transaction charge
+        // and an IPF contribution are all exchange levies, and STT is a tax on transactions on a
+        // recognised stock exchange. None of them has a statutory identity against a private
+        // placement, so a figure typed into one of those columns implies an arbitrary "rate".
+        isOffMarket: offMarket,
         firstDataRow: 3,   // title, group header, column header
         paint: {
-          sno: COL.sno, name: COL.name, oDate: COL.oDate, pDate: COL.pDate, sDate: COL.sDate,
-          oQty: COL.oQty, oRate: COL.oRate, oAmt: COL.oAmt,
+          sno: COL.sno, name: COL.name, pDate: COL.pDate, sDate: COL.sDate,
+          // NULL on a tab with no opening family, and the twin's paint branches on it. Not a
+          // number standing in for "absent": the four bands and three number formats keyed on
+          // these would then be painted over the PURCHASE columns, which looks like a
+          // rendering quirk rather than the wrong geometry it is.
+          oDate: L.open ? L.open.d : null, oQty: L.open ? L.open.q : null,
+          oRate: L.open ? L.open.r : null, oAmt: L.open ? L.open.a : null,
           pQty: COL.pQty, pRate: COL.pRate, pAmt: COL.pAmt,
           sQty: COL.sQty, sRate: COL.sRate, sAmt: COL.sAmt,
           brok: COL.brok, ipf: COL.ipf, firstPl: L.firstPl, lastPl: L.lastPl, width: L.WIDTH,
         },
       },
-      grand, grandPnl, scrips: active.length, buyRows, sellRows,
+      grand, saleCharges, grandPnl, scrips: active.length, buyRows, sellRows,
     };
   };
 
@@ -1490,7 +1734,7 @@ export async function generateTrxRegister(
     let sheetId: number | undefined;
     {
       const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
-        spreadsheetId, fields: "sheets.properties(sheetId,title)",
+        spreadsheetId: dstId, fields: "sheets.properties(sheetId,title)",
       }));
       const props = (meta?.result?.sheets || []).map((s: any) => s.properties || {});
       const byTitle = (t: string) => props.find((p: any) => (p.title || "").toString().trim().toLowerCase() === t.trim().toLowerCase());
@@ -1499,14 +1743,14 @@ export async function generateTrxRegister(
         sheetId = existing.sheetId;
       } else if (legacy) {
         await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({
-          spreadsheetId,
+          spreadsheetId: dstId,
           resource: { requests: [{ updateSheetProperties: { properties: { sheetId: legacy.sheetId, title: tabName }, fields: "title" } }] },
         }));
         sheetId = legacy.sheetId;
       } else {
-        await ensureSheetTabs(spreadsheetId, [tabName]);
+        await ensureSheetTabs(dstId, [tabName]);
         const meta2: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
-          spreadsheetId, fields: "sheets.properties(sheetId,title)",
+          spreadsheetId: dstId, fields: "sheets.properties(sheetId,title)",
         }));
         sheetId = ((meta2?.result?.sheets || []).find((s: any) =>
           (s.properties?.title || "").toString().trim().toLowerCase() === tabName.trim().toLowerCase()) || {}).properties?.sheetId;
@@ -1515,9 +1759,9 @@ export async function generateTrxRegister(
     // A:Z is 26 columns — deliberately WIDER than either layout (25 / 24). A previous run
     // wrote 26, so a clear narrowed to the current width would strand last year's IPF
     // figures in the orphaned right-hand column of a tax document.
-    await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${tabName}!A:Z` }));
+    await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId: dstId, range: `${tabName}!A:Z` }));
     await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
-      spreadsheetId, range: `${tabName}!A1`, valueInputOption: "USER_ENTERED", resource: { values: em.values },
+      spreadsheetId: dstId, range: `${tabName}!A1`, valueInputOption: "USER_ENTERED", resource: { values: em.values },
     }));
 
     // ── Indian comma formatting + header styling (matches the source's look) ──
@@ -1554,9 +1798,13 @@ export async function generateTrxRegister(
       const requests: any[] = [
         // Reset FIRST; bands repaint on top, bold is re-applied to the header rows.
         resetRequest,
-        numFmt(COL.oQty, COL.oQty + 1, INT),           // opening qty
-        numFmt(COL.oRate, COL.oRate + 1, RATE),        // opening rate (full precision)
-        numFmt(COL.oAmt, COL.oAmt + 1, INR),           // opening amount
+        // Spread, not three conditional pushes: the acquisition tabs have no opening family at
+        // all, and formatting the columns that WOULD have been there reaches the PURCHASE block.
+        ...(L.open ? [
+          numFmt(L.open.q, L.open.q + 1, INT),         // opening qty
+          numFmt(L.open.r, L.open.r + 1, RATE),        // opening rate (full precision)
+          numFmt(L.open.a, L.open.a + 1, INR),         // opening amount
+        ] : []),
         numFmt(COL.pQty, COL.pQty + 1, INT),           // purchase qty
         numFmt(COL.pRate, COL.pRate + 1, RATE),        // purchase rate (full precision)
         numFmt(COL.pAmt, COL.pAmt + 1, INR),           // purchase amount
@@ -1591,9 +1839,13 @@ export async function generateTrxRegister(
       });
       const GREEN = rgb(0.298, 0.686, 0.314), ORANGE = rgb(0.93, 0.60, 0.25),
         SALMON = rgb(0.96, 0.60, 0.51), LIME = rgb(0.61, 0.80, 0.40);
+      // Where the S.No + Script Name band stops: at OPENING STOCK where there is one, and at
+      // PURCHASE where there is not. ONE expression feeding both bands, so the two cannot leave
+      // a gap or overlap - which on a header row reads as a rendering fault, not a geometry one.
+      const bandAfterName = L.open ? L.open.d : COL.pDate;
       requests.push(
-        fill(1, 3, COL.sno, COL.oDate, GREEN),     // S.No + Script Name band (rows 2–3)
-        fill(1, 3, COL.oDate, COL.pDate, ORANGE),  // OPENING STOCK band
+        fill(1, 3, COL.sno, bandAfterName, GREEN),   // S.No + Script Name band (rows 2–3)
+        ...(L.open ? [fill(1, 3, L.open.d, COL.pDate, ORANGE)] : []),   // OPENING STOCK band
         fill(1, 3, COL.pDate, COL.sDate, GREEN),   // PURCHASE band
         fill(1, 3, COL.sDate, L.firstPl, SALMON),  // SALES band
         fill(1, 3, L.firstPl, COL.brok, GREEN),    // P/L header band
@@ -1614,11 +1866,11 @@ export async function generateTrxRegister(
         },
       );
 
-      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests } }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId: dstId, resource: { requests } }));
     } catch (e) {
       console.warn(`Capital Gains formatting failed for "${tabName}" — stripping old paint so stale bands don't mislead:`, e);
       try {
-        await (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: [resetRequest] } });
+        await (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId: dstId, resource: { requests: [resetRequest] } });
       } catch { /* values are correct; formatting can be regenerated on the next run */ }
     }
   };
@@ -1712,13 +1964,212 @@ export async function generateTrxRegister(
    * set entirely, and `plCol` would throw if an INTRA sale reached a tab with no INTRA column.
    *
    * THESE ARE RESTATEMENTS, NOT A NEW ACCOUNTING, and that is the load-bearing fact. They must
-   * stay OUT of `cgGrand`: every listed charge is already counted once on the main tab, and a
-   * block's PURCHASE rows appear on BOTH period tabs (a scrip with sales in both periods is
-   * acquired once), so adding them would treble the brokerage and the conservation guard would
+   * stay OUT of `cgGrand`: every sale charge on them is already counted once on the main tab,
+   * so adding them would DOUBLE every listed sale charge and the conservation guard would
    * refuse to write the whole register. Same rule, same reason, as the transaction statements.
    *
-   * Out of that guard means unguarded, so they get their own — `periodDrift` below.
+   * PURCHASES ARE NOT EMITTED HERE (28-Oct-2026, asked as *"in the short term and long term
+   * bifurcated sheet i want you to remove purchases and its expense entries"*). A purchase
+   * belongs to NO holding period, so printing the whole scrip's purchases under one period's
+   * sales was wrong in two directions at once: a scrip sold in both periods had its purchase
+   * charges counted TWICE (once per tab), while a scrip with no sale that period contributed
+   * NONE at all, because the block was dropped entirely. The expense total was therefore
+   * neither the year's expenses nor the period's, and the sum of the two tabs could land over
+   * OR under the main tab depending on which effect won. On the owner's own book it came out
+   * Rs 6,03,584.97 SHORT and nothing on either page could explain why.
+   *
+   * WHAT IS EMITTED INSTEAD (28-Oct-2026, asked as *"i want only those purchase entries with
+   * expenses to be shown (not opening shares) that were bought AND sold in the short term
+   * period only"*): the in-FY purchases that FUNDED this period's sales, each PRO-RATED to the
+   * quantity actually sold in it. `matchedPurchases` below.
+   *
+   * Pro-rating is not a new convention on these tabs - it is the one they already use. A single
+   * sale spanning both periods is already printed as two rows with its quantity split and its
+   * charges scaled by `scaleCharges`. Doing the same on the buy side makes the two sides agree.
+   *
+   * OPENING STOCK IS NEVER SHOWN AS A PURCHASE, and that falls out of the mechanism rather than
+   * being special-cased: an opening lot's `buyTs` is pre-FY, so it matches no entry in
+   * `b.purchases` and contributes nothing. An opening lot CAN be sold short-term (bought in
+   * February, sold in June), and the owner's instruction is explicit that it still does not
+   * become a purchase row.
+   *
+   * THE LONG-TERM TAB GETS NONE OF THIS, AND NO CODE SAYS SO. The longest an in-FY purchase can
+   * be held inside one FY is 364 days, which is short of the 365-day listed threshold, so no
+   * in-FY purchase can ever fund a long-term sale in the same year. The same rule applied to
+   * both tabs therefore yields purchases on SHORT and nothing on LONG, by arithmetic rather
+   * than by a special case - and the suite pins it, because a future `ltDays` change would make
+   * it reachable and nobody would think to look.
+   *
+   * Out of `cgGrand` means unguarded, so they get their own — the partition check below.
    */
+  /**
+   * The in-FY purchase rows that funded `sales`, pro-rated to the quantity those sales actually
+   * consumed. The FIFO walk already recorded it: every sale carries `matched`, the lots it ate,
+   * PER BUCKET - `stLots` / `ltLots` are partitioned on the same test that decides the row.
+   *
+   * Keyed on `buyTs` ALONE, never on the rate. After a SPLIT the surviving lots carry a
+   * rescaled `purPrice` while keeping their original acquisition date, so a rate match would
+   * silently drop every post-split purchase - and those are exactly the blocks where a reader
+   * most needs to see what the shares cost.
+   *
+   * `Math.min(avail, p.qty)` is the one guard that matters. A corp-action parcel built by
+   * `carryLots` keeps its PARENT's `buyTs`, which can coincide with an in-FY purchase date, so
+   * `avail` can exceed what that purchase really supplied. Capping at the purchase's own
+   * quantity means the worst case is showing a purchase in full that was only partly consumed -
+   * never more than was bought, and never a fabricated share.
+   */
+  /**
+   * WHICH ACQUISITIONS PAID FOR THIS PERIOD'S SALES, AND HOW MUCH OF EACH.
+   *
+   * ONE allocator behind both single-period views - the period tabs, which render it in the
+   * CONTRACT NOTE's own units, and the acquisition tabs, which render it in LOT units. Two
+   * allocators would be two answers to "how much of this purchase was sold", and the guard
+   * comparing the two tabs' charges would be comparing two different opinions rather than
+   * checking one.
+   *
+   * IT ALLOCATES IN COST, NOT IN SHARES, AND THAT IS THE WHOLE CORRECTION HERE. The matched
+   * lots are POST-split (`carryLots` and the split branch rewrite `purPrice` and the lot
+   * quantity together) while `b.purchases` records what the contract note said, PRE-split. So
+   * `Math.min(matchedQty, pu.qty)` - which is what this did until 28-Oct-2026 - compares two
+   * different units: a 100-share buy that split 2:1 and was half sold afterwards matched 100
+   * post-split shares against a 100-share purchase, called the whole lot consumed, and claimed
+   * ALL of its brokerage against half a position. COST is invariant under a split, so it is
+   * the only currency the two sides can be compared in.
+   *
+   * `Math.min(cost, room)` is still the guard that matters, now in rupees. A `carryLots`
+   * parcel keeps its PARENT's `buyTs`, which can coincide with an in-FY purchase date, so the
+   * matched cost at a date really can exceed what that purchase paid for. Capping means the
+   * excess falls through to `carried` - stock brought forward, which is what it is - instead
+   * of inflating an in-year purchase and its charges.
+   */
+  interface MatchedAlloc {
+    /** The in-FY purchases these sales drew on. `f` is the FRACTION of each one consumed,
+     *  measured in cost; `lotQty` is the shares as the FIFO held them, post-split. */
+    taken: { pu: PurchaseRow; f: number; lotQty: number; cost: number }[];
+    /** What no in-FY purchase accounts for: stock carried in from an earlier year. */
+    carried: { ts: number; rate: number; qty: number }[];
+    /** Everything the FIFO consumed, for the invariant the two renderings share. */
+    wantQty: number;
+  }
+  const allocateMatched = (b: Block, sales: Block["sales"]): MatchedAlloc => {
+    // Merged by date AND RATE: two lots of one date at different prices are two different
+    // acquisitions, and averaging them would state a cost per share nobody paid.
+    const hits: { ts: number; rate: number; qty: number }[] = [];
+    let wantQty = 0;
+    for (const s of sales) for (const m of s.matched || []) {
+      wantQty += m.qty;
+      const e = hits.find(h => h.ts === m.buyTs && h.rate === m.rate);
+      if (e) e.qty += m.qty; else hits.push({ ts: m.buyTs, rate: m.rate, qty: m.qty });
+    }
+    const taken: MatchedAlloc["taken"] = [];
+    if (hits.length) {
+      // Oldest first, which is the order FIFO consumed them in - so two purchases sharing one
+      // date are drawn down in the same order the lots were.
+      for (const pu of [...b.purchases].sort((x, y) => x.ts - y.ts)) {
+        if (!(pu.turnover > 0) || !(pu.qty > 0)) continue;
+        let room = pu.turnover, lotQty = 0, cost = 0;
+        for (const h of hits) {
+          if (h.ts !== pu.ts || !(h.qty > 1e-9) || room <= 1e-9) continue;
+          const hCost = h.qty * h.rate;
+          const useCost = Math.min(hCost, room);
+          const useQty = hCost > 0 ? h.qty * (useCost / hCost) : h.qty;
+          // DRAWN DOWN on both sides. Without the `h.qty` half a second purchase sharing this
+          // date claims the same lot over again (two same-day buys funding one sale print
+          // twice what was sold); without `room` one purchase absorbs every lot at its date,
+          // charges and all.
+          h.qty -= useQty; room -= useCost;
+          lotQty += useQty; cost += useCost;
+        }
+        if (lotQty > 1e-9) taken.push({ pu, f: cost / pu.turnover, lotQty, cost });
+      }
+    }
+    return { taken, carried: hits.filter(h => h.qty > 1e-9), wantQty };
+  };
+
+  /**
+   * The PERIOD tabs' rendering: the purchase as the CONTRACT NOTE recorded it, scaled to the
+   * part these sales consumed. Quantity in note units - a lot that has since split still shows
+   * the shares the note says were bought - with the amount and the charges on the same scale.
+   *
+   * `r6` on the quantity because `f` is a ratio of two rupee figures: 300 x (20000/30000) is
+   * 199.99999999999997 in floating point, and a filed tab would print 200 while the suite
+   * compared against something else.
+   */
+  const matchedPurchases = (b: Block, sales: Block["sales"]): PurchaseRow[] =>
+    allocateMatched(b, sales).taken.map(t => ({
+      ts: t.pu.ts, qty: r6(t.pu.qty * t.f), avgPrice: t.pu.avgPrice,
+      // TURNOVER is scaled, never recomputed as qty x avgPrice: the rate is r6 and the amount
+      // is authoritative, which is the direction every other total here runs.
+      turnover: t.pu.turnover * t.f, charges: scaleCharges(t.pu.charges, t.f),
+    }));
+
+  /**
+   * EVERY acquisition this period's sales consumed - in-year purchases AND the stock carried
+   * in from before - as PURCHASE rows, for the two ACQUISITION tabs.
+   *
+   * Those tabs have no OPENING STOCK columns (owner's request, 28-Oct-2026: *"remove the
+   * opening stock columns and keep the purchase column ... the purchase column should have all
+   * the acquisition purchase entry only"*), so a lot bought in an earlier year has nowhere else
+   * to go - and nowhere else it SHOULD go: on a page showing one period's sales beside what
+   * paid for them, where the shares were bought is the question, and which financial year it
+   * happened in is an answer, not a different column.
+   *
+   * CARRIED-IN ROWS ARE CHARGE-FREE, and that is the load-bearing decision rather than a
+   * simplification. Their brokerage and STT were incurred in a year that is already filed; they
+   * are not this year's expense and s.48 would not allow them against this year's gain. It is
+   * also what keeps this tab's expense total IDENTICAL to its period sibling's, which is what
+   * lets the partition check below be an equality on both arms instead of a ceiling.
+   */
+  const matchedAcquisitions = (b: Block, sales: Block["sales"]): PurchaseRow[] => {
+    const { taken, carried, wantQty } = allocateMatched(b, sales);
+    const out: PurchaseRow[] = taken.map(t => ({
+      ts: t.pu.ts,
+      // LOT units, which is where this tab differs from its period sibling and the only place
+      // it does: the shares as they stood when they were sold. The COST and the CHARGES are
+      // the identical figures - both sides scale `pu` by the same `f` - which is what makes
+      // the guard below an equality.
+      qty: t.lotQty, avgPrice: t.lotQty > 0 ? t.cost / t.lotQty : t.pu.avgPrice,
+      turnover: t.cost, charges: scaleCharges(t.pu.charges, t.f),
+    }));
+    for (const c of carried) {
+      out.push({
+        ts: c.ts, qty: c.qty, avgPrice: c.rate,
+        // `qty x rate` here, where every other total in this file takes the AMOUNT as
+        // authoritative - because a matched lot HAS no amount. `rate` is the lot's own
+        // `purPrice` at full precision (not the r6 figure a row prints), so this is literally
+        // the `r2(m * l.purPrice)` term the engine subtracted to get the gain.
+        turnover: c.qty * c.rate,
+        // A FRESH zero bundle per row, never a shared reference to ZERO_CHARGES - the same
+        // rule `carryLots` parcels follow. Those charges were paid in a year already filed;
+        // claiming them here would be a deduction against this year's gain, and the row's
+        // charge cells are blank by design so nothing on the page could show it.
+        charges: { ...ZERO_CHARGES },
+        broughtForward: true,
+      });
+    }
+    // EVERY SHARE FIFO CONSUMED IS ON THIS TAB EXACTLY ONCE.
+    //
+    // A RUNTIME NET, and honestly labelled as one: the suite does NOT depend on it. Probed in
+    // pairs - break the drawdown AND remove this, drop the fold-in AND remove this - and the
+    // fixtures still fail loudly either way. It is kept because the shapes it covers are the
+    // ones no fixture has, and on those it turns a wrong acquisition total on a filed tax page
+    // into a refusal to write. That is the same bargain the charge-conservation guard and the
+    // partition check already make.
+    //
+    // The tolerance is a TEN-THOUSANDTH of a share, not a paise-scale epsilon: `useQty` is a
+    // float product, a real book carries lakhs of shares across hundreds of lots, and the only
+    // thing this is built to catch - a lot counted twice, or dropped - is whole shares out. A
+    // tighter bound buys nothing and risks refusing a correct register over float noise.
+    const got = out.reduce((n, pu) => n + pu.qty, 0);
+    if (Math.abs(got - wantQty) > 1e-4) {
+      throw new Error(
+        `Register not written: the acquisition rows for ${b.name} come to ${got} shares against `
+        + `${wantQty} the FIFO actually consumed. This is a bug in the acquisition fold-in, not in your data.`,
+      );
+    }
+    return out;
+  };
+
   const periodCg = ([
     { id: "SHORT" as VariantId, cat: "ST" as const, word: "Short Term", other: "Long Term" },
     { id: "LONG" as VariantId, cat: "LT" as const, word: "Long Term", other: "Short Term" },
@@ -1732,19 +2183,109 @@ export async function generateTrxRegister(
     // for a job the `L.id === "DELIVERY"` gate already does completely — and an unreachable
     // safeguard is worse than none, as the discriminating name slot already taught this repo.
     // One mechanism, and a probe that widens that gate is what proves it.
+    //
+    // THE PURCHASES ARE REPLACED ON THE CLONE, NOT gated inside `emitTab` on `L.id` the way
+    // CLOSING is, and that is the opposite resolution to the rule above for a stated reason.
+    // `restateCols` reads `blk.purchases.length` to decide which column family a SPLIT or
+    // corp-action RESTATEMENT is printed in. Gate the emission alone and the block still
+    // answers "I have purchases" with the WHOLE year's list, so a split is filed under the
+    // PURCHASE column family on a tab whose sales were funded entirely out of opening stock
+    // and which therefore shows no purchase row at all. Rewriting the array here is the ONE
+    // point that does every job: the loop emits exactly the matched rows, only their scaled
+    // charges reach `grand`, `restateCols` follows the rows that are actually on THIS tab, and
+    // `buyRows` counts them. CLOSING is a gate because there the gate alone was complete; here
+    // the clone alone is.
     const blocks: Block[] = listedActive
-      .map(b => ({ ...b, sales: b.sales.filter(s => s.category === p.cat) }))
+      .map(b => {
+        const sales = b.sales.filter(s => s.category === p.cat);
+        return { ...b, purchases: matchedPurchases(b, sales), sales };
+      })
       .filter(b => b.sales.length > 0);
+    // NO EXPLANATORY NOTES ON A POPULATED TAB (owner's instruction, 03-Nov-2026: these tabs
+    // are worked on as calculation sheets and the prose was in the way). The EMPTY arm stays:
+    // a tab carrying nothing but column headers reads as a failed run rather than as an answer,
+    // which is the same reason the intraday and listed tabs splice a sentence in.
     const notes = blocks.length
-      // Stated ON the tab, because two overlapping expense totals on two filed pages is exactly
-      // the kind of difference nobody can debug six months later.
-      ? [`${p.word.toUpperCase()} sales only, from the listed delivery book. Opening stock and purchases are the WHOLE scrip's, so their charges also appear on the "${p.other}" tab — do not add the two expense totals together; the authoritative charge total is on "Capital Gains for ${fyLabel}".`,
-         `Closing stock is deliberately absent: a single-period section cannot foot to a position. The FY-end holding tabs are the authority on what is still held.`]
+      ? []
       : [`No ${p.word.toLowerCase()} listed transactions in ${fyLabel}.`];
     return {
       tab: `${p.word} Capital Gains for ${fyLabel}`,
       key: BUCKET_PL[p.cat], L,
+      // Back to "... Expenses" (it was "... Sale Expenses" for the few hours this tab carried
+      // no purchases at all). The figure now genuinely IS this period's expenses - both legs of
+      // the trades it reports - so the plain label is the accurate one, and the notes carry the
+      // part a label cannot: what is NOT in it.
       em: emitTab(L, blocks, `${head}${p.word} Capital Gains for ${fyLabel}`, `${p.word} Expenses`, notes),
+    };
+  });
+
+  /**
+   * THE TWO ACQUISITION TABS - the same ST/LT split again, with ONE acquisition column family
+   * instead of two (owner's request, 28-Oct-2026).
+   *
+   * Every lot this period's sales consumed is a PURCHASE row: the in-year buys with their
+   * expenses exactly as the period tabs show them, and the stock brought forward - which on
+   * those tabs sits in OPENING STOCK, in a different column family, under a heading that
+   * answers a question nobody reading this page is asking.
+   *
+   * They are a THIRD RESTATEMENT of sales already filed on "Capital Gains for ..", which is
+   * why they stay out of `cgGrand` exactly as the period tabs do: counting all three would
+   * quadruple every listed charge, the conservation guard would see drift, and NO REGISTER
+   * WOULD WRITE AT ALL. Their own guard is the partition check below, and because each has a
+   * sibling carrying the identical sales it gets EQUALITIES on both arms rather than a ceiling.
+   */
+  const acqCg = ([
+    { id: "SHORT_ACQ" as VariantId, cat: "ST" as const, key: "st" as PlKey, word: "Short Term" },
+    { id: "LONG_ACQ" as VariantId, cat: "LT" as const, key: "lt" as PlKey, word: "Long Term" },
+  ]).map(p => {
+    const L = makeLayout(p.id);
+    /**
+     * A SPLIT or corp-action line RESTATES a position; it is not an acquisition.
+     *
+     * On the other tabs it prints its figures in a column family and reads correctly. Here it
+     * would be counted TWICE - the matched lots already carry the post-split `purPrice`, so
+     * the acquisition rows below it state the restated cost already - and the purchase
+     * quantity column would stop being the shares these sales disposed of. The owner's word
+     * was "only": the purchase column holds acquisitions and nothing else.
+     *
+     * So the FIGURES come off and the SENTENCE stays. Dropping the event outright would hide a
+     * split from a filed page, which is the worse failure of the two.
+     */
+    const notesOnly = (b: Block): CorpNote[] => [
+      ...b.splits.map(sp => ({
+        ts: sp.ts,
+        text: `SPLIT ${fmtDate(sp.ts)} — holding restated to ${sp.qty} shares at ${r6(sp.rate)}. `
+          + "The acquisition rows on this tab already carry the restated cost, so the split is not repeated as a figure.",
+      })),
+      // Stripped to the text for the same reason: a "purchase" corp-action line is an
+      // acquisition the FIFO already handed us as a matched lot, and a "holding" line is a
+      // restatement. Either one printed again is the same double count.
+      ...b.corpNotes.map(cn => ({ ts: cn.ts, text: cn.text })),
+    ];
+    const blocks: Block[] = listedActive
+      .map(b => {
+        const sales = b.sales.filter(s => s.category === p.cat);
+        // `opening: []` is what makes the absent column family safe rather than merely empty:
+        // `openAgg` is then empty on every block, so no opening row is ever built and
+        // `L.openCols()` - which THROWS on this variant - is never reached. `closing` is left
+        // alone, because the existing `L.id === "DELIVERY"` gate already excludes it and a
+        // second route to one outcome is unreachable code that looks like a safeguard.
+        return { ...b, opening: [], splits: [], corpNotes: notesOnly(b),
+                 purchases: matchedAcquisitions(b, sales), sales };
+      })
+      .filter(b => b.sales.length > 0);
+    // Same as the period tabs above: no explanatory notes on a populated tab, the empty-tab
+    // sentence kept. The B/F label on the row itself is what now carries the one fact the
+    // prose was load-bearing for - that a blank charge block on a carried-in lot is deliberate
+    // and not a failed import - which is why that label stays and these paragraphs can go.
+    const notes = blocks.length
+      ? []
+      : [`No ${p.word.toLowerCase()} listed transactions in ${fyLabel}.`];
+    return {
+      tab: `${p.word} Capital Gains (Acquisitions) for ${fyLabel}`,
+      key: p.key, L,
+      em: emitTab(L, blocks, `${head}${p.word} Capital Gains — Acquisition-wise — for ${fyLabel}`,
+                  `${p.word} Expenses`, notes),
     };
   });
 
@@ -1757,7 +2298,8 @@ export async function generateTrxRegister(
     classCg.push({
       id,
       tab: `${label} Capital Gains for ${fyLabel}`,
-      em: emitTab(dL, bl, `${head}${label} \u2014 Capital Gains for ${fyLabel}`, "Delivery Expenses"),
+      em: emitTab(dL, bl, `${head}${label} \u2014 Capital Gains for ${fyLabel}`, "Delivery Expenses",
+                  [], ASSET_CLASSES[id].offMarket),
     });
   }
 
@@ -1765,11 +2307,24 @@ export async function generateTrxRegister(
   // `grand` is by definition the sum over emitted rows, so comparing the two tabs' grands to
   // a total derived the same way would be tautological and would pass even if a whole scrip
   // were dropped. This compares against what True Entry actually charged, in the FY window.
+  /**
+   * Demat charges that are on the ledger and are no longer on any tab.
+   *
+   * The column went (26-Oct-2026) and `dmat` had to leave `expect` with it, or the guard below
+   * would see a charge it expects and no tab emitting it and refuse to write the register at
+   * all. That is the whole risk of this removal: INTEGRATED really does bill a DP charge, so
+   * dropping it out of the one check that ties these tabs to True Entry is the only way a real
+   * figure could disappear in silence. It is summed from exactly the trades whose charges reach
+   * a gains tab, and reported. `0` - the expected answer on a book with no Integrated notes -
+   * says the column was blank, which is what makes removing it the right call.
+   */
+  let dmatNotShown = 0;
   {
     const expect: Charges = { ...ZERO_CHARGES };
     const add = (c: Charges) => {
       expect.brok += c.brok; expect.stt += c.stt; expect.gst += c.gst; expect.et += c.et;
-      expect.stamp += c.stamp; expect.sebi += c.sebi; expect.ipf += c.ipf; expect.dmat += c.dmat;
+      expect.stamp += c.stamp; expect.sebi += c.sebi; expect.ipf += c.ipf;
+      dmatNotShown += c.dmat;
     };
     const inFy = (ts: number) => ts >= fyStartTs && ts < fyEndExclTs;
     /**
@@ -1795,7 +2350,7 @@ export async function generateTrxRegister(
     for (const t of residualTrades) if (inFy(t.ts) && hasRule(t.isin, t.name)) add(cgCharges(t.key, t.charges));
     for (const rt of intradayRTs) if (inFy(rt.ts)) { add(cgCharges(rt.key, rt.buyCharges)); add(cgCharges(rt.key, rt.sellCharges)); }
 
-    const keys: (keyof Charges)[] = ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf", "dmat"];
+    const keys: (keyof Charges)[] = ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf"];
     // Sums EVERY capital-gains tab, not just the two original ones. Splitting the output by
     // asset class moved charges onto new tabs; a guard still adding only delivery + intraday
     // would see every PE charge as missing and refuse to write the whole register. The
@@ -1821,12 +2376,19 @@ export async function generateTrxRegister(
   // because they are deliberately OUT of `cgGrand` above. Without this they would be the only
   // capital-gains pages in the register that nothing verifies.
   //
-  // It cannot check charges: a block's purchase rows appear on BOTH period tabs, so their
-  // charges legitimately do not sum to the main tab's. What it CAN check is the one thing the
-  // split can get wrong — whether it is a PARTITION. Every delivery sale row is short OR long
-  // (intraday is a different block set entirely), so the two tabs' sale-row counts must add to
-  // the main tab's, and each period's P/L must equal the figure already filed on it. A dropped
+  // Every delivery sale row is short OR long (intraday is a different block set entirely), so
+  // the two tabs' sale-row counts must add to the main tab's, each period's P/L must equal the
+  // figure already filed on it, and — since purchases came off these tabs — their charge
+  // totals must add to the main tab's SALE charges, to the paise, column by column. A dropped
   // block, an inverted category predicate and a double count all surface here.
+  //
+  // THE CHARGE ARM IS NEW AND IT IS THE WHOLE POINT OF TAKING PURCHASES OFF. Before, a block's
+  // purchase rows appeared on both period tabs while a block with no sale that period appeared
+  // on neither, so the two tabs' charges summed to nothing nameable and this guard had to look
+  // away from the exact figure the owner was trying to reconcile. Now it is the sharpest arm of
+  // the three: it is in RUPEES, it is per column, and it fires on a single mis-bucketed sale
+  // that the row COUNT would miss entirely — a count only notices a row that vanished, not one
+  // that landed on the wrong tab.
   {
     const rows = periodCg.reduce((s, p) => s + p.em.sellRows, 0);
     const bad: string[] = [];
@@ -1837,6 +2399,60 @@ export async function generateTrxRegister(
       const mine = p.em.grandPnl[p.key] || 0, filed = delivery.grandPnl[p.key] || 0;
       if (Math.abs(mine - filed) > 0.01) {
         bad.push(`"${p.tab}" totals ${fmtAmt(mine)} against ${fmtAmt(filed)} already filed on the main tab`);
+      }
+    }
+    // TWO CHARGE ARMS, because the two halves of a period tab's expense total stand in
+    // different relationships to the main tab and only ONE of them is an equality.
+    //
+    // SALES partition exactly - every delivery sale is short or long - so the two tabs' sale
+    // charges must ADD UP to the main tab's, to the paise, column by column.
+    //
+    // PURCHASES do not, and must never be forced to. A purchase appears here only to the extent
+    // it was sold in the period, so the charges of shares still held on 31 March, and of
+    // opening stock which is never shown here at all, legitimately reach NEITHER tab. The check
+    // is therefore a CEILING: what the two tabs claim may not exceed what the main tab actually
+    // carries. That is the direction every bug in `matchedPurchases` runs - a lot attributed to
+    // both tabs, or drawn down twice - while an equality would fire on every real book and be
+    // switched off within a week.
+    for (const k of ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf"] as (keyof Charges)[]) {
+      const sold = periodCg.reduce((sum, p) => sum + p.em.saleCharges[k], 0);
+      if (Math.abs(sold - delivery.saleCharges[k]) > 0.01) {
+        bad.push(`${k} sale charges come to ${fmtAmt(sold)} across the two period tabs against ${fmtAmt(delivery.saleCharges[k])} on the main tab`);
+      }
+      const claimed = periodCg.reduce((sum, p) => sum + (p.em.grand[k] - p.em.saleCharges[k]), 0);
+      const filed = delivery.grand[k] - delivery.saleCharges[k];
+      if (claimed - filed > 0.01) {
+        bad.push(`${k} purchase charges come to ${fmtAmt(claimed)} across the two period tabs, more than the ${fmtAmt(filed)} of purchase charges the main tab carries`);
+      }
+    }
+    // THE ACQUISITION TABS TIE TO THEIR OWN SIBLING, AND BOTH ARMS ARE EQUALITIES.
+    //
+    // They carry the identical sales to the period tab of the same period, and the identical
+    // in-year purchases; the only rows they add are stock brought forward, which carries NO
+    // charge. So every charge figure on an acquisition tab must equal its sibling's to the
+    // paise - which is a far sharper statement than the ceiling the period tabs get against the
+    // main tab, and it is the one thing that fires if a carried-in row ever arrives with
+    // charges on it. That would be a real expense claim for a cost incurred in a year already
+    // filed, and nothing on the tab would show it: a B/F row's charge cells are blank by
+    // design, so a reader cannot tell a blank from a figure that should not be there.
+    for (const a of acqCg) {
+      const sib = periodCg.find(x => x.key === a.key);
+      if (!sib) throw new Error(`Register bug: "${a.tab}" has no period tab to reconcile against.`);
+      if (a.em.sellRows !== sib.em.sellRows) {
+        bad.push(`"${a.tab}" carries ${a.em.sellRows} sale rows against ${sib.em.sellRows} on "${sib.tab}"`);
+      }
+      const mine = a.em.grandPnl[a.key] || 0, theirs = sib.em.grandPnl[a.key] || 0;
+      if (Math.abs(mine - theirs) > 0.01) {
+        bad.push(`"${a.tab}" totals ${fmtAmt(mine)} against ${fmtAmt(theirs)} on "${sib.tab}"`);
+      }
+      for (const k of ["brok", "stt", "gst", "et", "stamp", "sebi", "ipf"] as (keyof Charges)[]) {
+        if (Math.abs(a.em.saleCharges[k] - sib.em.saleCharges[k]) > 0.01) {
+          bad.push(`${k} sale charges on "${a.tab}" come to ${fmtAmt(a.em.saleCharges[k])} against ${fmtAmt(sib.em.saleCharges[k])} on "${sib.tab}"`);
+        }
+        const aBuy = a.em.grand[k] - a.em.saleCharges[k], sBuy = sib.em.grand[k] - sib.em.saleCharges[k];
+        if (Math.abs(aBuy - sBuy) > 0.01) {
+          bad.push(`${k} purchase charges on "${a.tab}" come to ${fmtAmt(aBuy)} against ${fmtAmt(sBuy)} on "${sib.tab}" — stock brought forward must carry none`);
+        }
       }
     }
     if (bad.length) {
@@ -1888,10 +2504,17 @@ export async function generateTrxRegister(
       collectedOnly: true,
       // Real: these tabs WERE computed, and their names are what the formula view twins.
       tabName, intradayTabName, fyLabel,
+      // Real, and the formula view NEEDS it: the twins must land beside the tabs they twin,
+      // which on a redirected FY is not the account's own sheet.
+      reportSheetId: dstId,
+      // EMPTY because a collect run writes nothing, so it supersedes nothing. Safe to read as
+      // "nothing left behind" only because `collectedOnly` is beside it saying why.
+      staleInSource: [],
       // Real: these were computed above, even though a collect run writes nothing. They are
       // NOT pushed to `collect` — the formula view twins the filed tabs, and a period tab is
       // already a restatement of one it twins.
       periodTabs: { short: periodCg[0].tab, long: periodCg[1].tab },
+      acqTabs: { short: acqCg[0].tab, long: acqCg[1].tab },
       scrips: delivery.scrips + intraday.scrips + classCg.reduce((s, c) => s + c.em.scrips, 0),
       buyRows: delivery.buyRows + intraday.buyRows + classCg.reduce((s, c) => s + c.em.buyRows, 0),
       sellRows: delivery.sellRows + intraday.sellRows + classCg.reduce((s, c) => s + c.em.sellRows, 0),
@@ -1901,6 +2524,7 @@ export async function generateTrxRegister(
         .filter(([, off]) => off)
         .map(([k]) => nameByKey.get(k) || k)
         .sort((a, b) => a.localeCompare(b)),
+      dmatNotShown: r2(dmatNotShown),
       classTabs: classCg.map(c => ({ id: c.id, label: ASSET_CLASSES[c.id].label, cgTab: c.tab })),
       // EMPTY, and deliberately so: a collect run returns before the holding tabs, the ITR
       // schedule and the transaction statements are built at all. Reporting a zero here is not
@@ -1918,6 +2542,10 @@ export async function generateTrxRegister(
   // tabs are. A tab skipped because its period was empty keeps LAST year's figures under THIS
   // year's heading, which is the one failure a reader cannot see.
   for (const p of periodCg) await writeAndPaint(p.L, p.tab, [], p.em);
+  // The acquisition-wise restatement of the same two periods. Written every run for the same
+  // reason as every other tab here: one skipped because its period was empty keeps LAST year's
+  // figures standing under THIS year's heading.
+  for (const a of acqCg) await writeAndPaint(a.L, a.tab, [], a.em);
   // Per-class capital gains. Sequential, like the two above: these are writes to a shared
   // spreadsheet inside the app's heaviest operation, and Sheets rate-limits per document.
   for (const c of classCg) await writeAndPaint(dL, c.tab, [], c.em);
@@ -2011,7 +2639,7 @@ export async function generateTrxRegister(
     };
     // "final amount" = closing amount + ALL expenses EXCEPT STT (STT is not part of the
     // cost basis for capital gains). STT still shows in its own column, just not in final.
-    const exclSTT = (c: Charges) => c.brok + c.gst + c.et + c.stamp + c.sebi + c.ipf + c.dmat;
+    const exclSTT = (c: Charges) => c.brok + c.gst + c.et + c.stamp + c.sebi + c.ipf;
 
     // ALL held scrips (incl. opening-only, untraded-in-FY) — a holding statement, not the
     // in-FY-activity filter the Capital Gains tab uses.
@@ -2043,7 +2671,7 @@ export async function generateTrxRegister(
     const sumLotQty = (ls: LotSnap[]) => ls.reduce((s, l) => s + l.qty, 0);
     const sumLotCost = (ls: LotSnap[]) => ls.reduce((s, l) => s + l.qty * turnoverPrice(l), 0);
     const chargedLot = (c: Charges) =>
-      c.brok + c.stt + c.gst + c.et + c.stamp + c.sebi + c.ipf + c.dmat > 0.005;
+      c.brok + c.stt + c.gst + c.et + c.stamp + c.sebi + c.ipf > 0.005;
 
     // `classOfKeyInFy` — the schedule's own title is the test: "held at ANY TIME during the
     // previous year". A company that listed in November was an unlisted company for seven
@@ -2197,7 +2825,7 @@ export async function generateTrxRegister(
     // reads per minute that nothing counts.
     let props: any[] = [];
     const readProps = async () => {
-      const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title)" }));
+      const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({ spreadsheetId: dstId, fields: "sheets.properties(sheetId,title)" }));
       props = (meta?.result?.sheets || []).map((s: any) => s.properties || {});
     };
     await readProps();
@@ -2211,21 +2839,21 @@ export async function generateTrxRegister(
       const legacy = byTitle(`Holding ${asOn}`);
       if (legacy) {
         await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({
-          spreadsheetId,
+          spreadsheetId: dstId,
           resource: { requests: [{ updateSheetProperties: { properties: { sheetId: legacy.sheetId, title: combinedHoldingTab }, fields: "title" } }] },
         }));
         legacy.title = combinedHoldingTab;   // keep the local view in step so the create pass skips it
       }
     }
     const missing = [...variants.map(v => v.tab), itrTab].filter(t => !byTitle(t));
-    if (missing.length) { await ensureSheetTabs(spreadsheetId, missing); await readProps(); }
+    if (missing.length) { await ensureSheetTabs(dstId, missing); await readProps(); }
 
     const paint: any[] = [];
     for (const v of variants) {
       const hSheetId = byTitle(v.tab)?.sheetId;
-      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${v.tab}!A:Z` }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId: dstId, range: `${v.tab}!A:Z` }));
       await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
-        spreadsheetId, range: `${v.tab}!A1`, valueInputOption: "USER_ENTERED", resource: { values: v.sheet.rows },
+        spreadsheetId: dstId, range: `${v.tab}!A1`, valueInputOption: "USER_ENTERED", resource: { values: v.sheet.rows },
       }));
 
       // ── formatting: yellow title/total, green name+holding blocks, orange CLOSING-STOCK band,
@@ -2273,9 +2901,9 @@ export async function generateTrxRegister(
       itrMissingPan = itrSheet.missingPan;
       itrUnfooted = itrSheet.unfooted;
       const itrSheetId = byTitle(itrTab)?.sheetId;
-      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${itrTab}!A:Z` }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId: dstId, range: `${itrTab}!A:Z` }));
       await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
-        spreadsheetId, range: `${itrTab}!A1`, valueInputOption: "RAW", resource: { values: itrSheet.rows },
+        spreadsheetId: dstId, range: `${itrTab}!A1`, valueInputOption: "RAW", resource: { values: itrSheet.rows },
       }));
       if (itrSheetId !== undefined && itrSheetId !== null) {
         const HDRFILL = { red: 0.851, green: 0.882, blue: 0.949 };   // FFD9E1F2 — the filed file's own header fill
@@ -2342,7 +2970,7 @@ export async function generateTrxRegister(
     // reason to spend three.
     if (paint.length) {
       try {
-        await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId, resource: { requests: paint } }));
+        await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({ spreadsheetId: dstId, resource: { requests: paint } }));
       } catch (fmtErr) {
         console.warn("Holding tab values written; formatting skipped:", fmtErr);
       }
@@ -2373,7 +3001,7 @@ export async function generateTrxRegister(
       const xCharges = (row: any[], c: Charges) => {
         row[TX.brok] = c.brok ? r2(c.brok) : ""; row[TX.stt] = c.stt ? r2(c.stt) : "";
         row[TX.gst] = c.gst ? r2(c.gst) : ""; row[TX.et] = c.et ? r2(c.et) : "";
-        row[TX.dmat] = c.dmat ? r2(c.dmat) : ""; row[TX.stamp] = c.stamp ? r2(c.stamp) : "";
+        row[TX.stamp] = c.stamp ? r2(c.stamp) : "";
         row[TX.sebi] = c.sebi ? r2(c.sebi) : ""; row[TX.ipf] = c.ipf ? r2(c.ipf) : "";
       };
 
@@ -2464,20 +3092,20 @@ export async function generateTrxRegister(
         + "a transfer pays no consideration and a split restates an existing holding.";
       xout.push(note);
 
-      await ensureSheetTabs(spreadsheetId, [txnTabName]);
+      await ensureSheetTabs(dstId, [txnTabName]);
       let xSheetId: number | undefined;
       {
         const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
-          spreadsheetId, fields: "sheets.properties(sheetId,title)",
+          spreadsheetId: dstId, fields: "sheets.properties(sheetId,title)",
         }));
         xSheetId = ((meta?.result?.sheets || []).find((s: any) =>
           (s.properties?.title || "").toString().trim().toLowerCase() === txnTabName.trim().toLowerCase()) || {}).properties?.sheetId;
       }
       // A:Z, wider than the 17 columns written, so a previous run's right-hand cells cannot be
       // stranded beside this one's - the same reason the capital-gains clear uses A:Z.
-      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId, range: `${txnTabName}!A:Z` }));
+      await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.clear({ spreadsheetId: dstId, range: `${txnTabName}!A:Z` }));
       await withBackoff(() => (gapi.client as any).sheets.spreadsheets.values.update({
-        spreadsheetId, range: `${txnTabName}!A1`, valueInputOption: "USER_ENTERED", resource: { values: xout },
+        spreadsheetId: dstId, range: `${txnTabName}!A1`, valueInputOption: "USER_ENTERED", resource: { values: xout },
       }));
       txnTabByClass.set(id, txnTabName);
 
@@ -2501,7 +3129,7 @@ export async function generateTrxRegister(
             },
           });
           await withBackoff(() => (gapi.client as any).sheets.spreadsheets.batchUpdate({
-            spreadsheetId,
+            spreadsheetId: dstId,
             resource: {
               requests: [
                 {
@@ -2533,9 +3161,43 @@ export async function generateTrxRegister(
     }
   }
 
+  // ── 10. REPORTS WENT SOMEWHERE ELSE — so say what is left behind. ──
+  //
+  // Only when redirected, and it costs ONE `spreadsheets.get` on an explicit user action - the
+  // same class of read `writeAndPaint` already makes per tab, not the 13-portfolio fan-out the
+  // read-quota rule is about.
+  //
+  // Wrapped so it can NEVER fail the run: the register is already written at this point and a
+  // metadata read on the old sheet must not turn a finished job into an error. Same discipline
+  // as the CMP write-back and the transfer-column creation.
+  const staleInSource: string[] = [];
+  if (redirected) {
+    try {
+      const written = [
+        tabName, intradayTabName,
+        periodCg[0].tab, periodCg[1].tab, acqCg[0].tab, acqCg[1].tab,
+        ...classCg.map(c => c.tab), ...txnTabByClass.values(),
+        equityHoldingTab, peHoldingTab, combinedHoldingTab, itrUnlistedTab,
+      ].filter(Boolean);
+      const meta: any = await withBackoff(() => (gapi.client as any).sheets.spreadsheets.get({
+        spreadsheetId: srcId, fields: "sheets.properties(title)",
+      }));
+      const have = new Set((meta?.result?.sheets || [])
+        .map((sh: any) => (sh?.properties?.title || "").toString().trim().toLowerCase()));
+      for (const t of written) if (have.has(t.trim().toLowerCase())) staleInSource.push(t);
+    } catch (e) {
+      // A failure here is NOT silence. An empty list would read as "nothing left behind",
+      // which is the one conclusion this check must never state without having looked.
+      console.warn("Capital Gains: could not check the account's own sheet for superseded tabs:", e);
+      staleInSource.push("(could not read the account's own sheet to check)");
+    }
+  }
+
   return {
     tabName, intradayTabName, holdingTabName, fyLabel,
+    reportSheetId: dstId, staleInSource,
     periodTabs: { short: periodCg[0].tab, long: periodCg[1].tab },
+    acqTabs: { short: acqCg[0].tab, long: acqCg[1].tab },
     holdingTabs: { equity: equityHoldingTab, pe: peHoldingTab, combined: combinedHoldingTab },
     itrUnlistedTab, itrCompanies, itrMissingPan, itrUnfooted, listedDuringFy,
     classTabs: ASSET_CLASS_IDS
@@ -2559,6 +3221,7 @@ export async function generateTrxRegister(
       .filter(([, off]) => off)
       .map(([k]) => nameByKey.get(k) || k)
       .sort((a, b) => a.localeCompare(b)),
+    dmatNotShown: r2(dmatNotShown),
     unclassified: unclassifiedSales,
   };
 }

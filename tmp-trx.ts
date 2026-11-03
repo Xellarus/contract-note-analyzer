@@ -18,6 +18,7 @@
  */
 import { generateTrxRegister } from './src/lib/trxRegister';
 import { SCRIP_MASTER_SPREADSHEET_ID, invalidateScripCache } from './src/lib/scripMaster';
+import { PORTFOLIOS, portfolioById, sheetIdForId, REPORT_DESTINATIONS, reportDestinationFor, reportSheetIdFor } from './src/lib/portfolios';
 import { invalidatePrivateEquityCache } from './src/lib/privateEquities';
 import { carryLots } from './src/lib/holdingsCalc';
 import { parseRatio, freeSharesFor } from './src/lib/tradeRowSchema';
@@ -54,7 +55,7 @@ const TE_HEADER = [
   'SEBI Turnover Fees', 'IPF Charges', 'Demat Charges',
 ];
 
-interface TeOpts { cls?: string; brok?: number; stt?: number; gst?: number }
+interface TeOpts { cls?: string; brok?: number; stt?: number; gst?: number; dmat?: number }
 /** One True Entry row. Charges default to a distinct, easily-traced set. */
 const te = (
   d: [number, number, number], name: string, isin: string,
@@ -63,7 +64,7 @@ const te = (
   serial(...d), name, isin, type, qty, price,
   qty * price, type === 'Buy' ? qty * price + (o.brok ?? 10) : qty * price - (o.brok ?? 10),
   o.cls ?? 'Delivery', '',
-  o.brok ?? 10, o.stt ?? 5, o.gst ?? 2, 1, 0.5, 0.1, 0.05, 0,
+  o.brok ?? 10, o.stt ?? 5, o.gst ?? 2, 1, 0.5, 0.1, 0.05, o.dmat ?? 0,
 ];
 
 const MASTER_TAB = 'Scrip Master';
@@ -112,7 +113,7 @@ const written = (tab: string): any[][] | undefined => {
   return hit.length ? hit[hit.length - 1].resource.values : undefined;
 };
 /** TRANSACTION STATEMENT column indices - see TXN_HDR in trxRegister.ts. */
-const TXC = { sno: 0, date: 1, name: 2, type: 3, qty: 4, rate: 5, amt: 6, brok: 7, net: 16 };
+const TXC = { sno: 0, date: 1, name: 2, type: 3, qty: 4, rate: 5, amt: 6, brok: 7, net: 15 };
 /** Rows of a transaction statement whose TYPE cell matches, e.g. 'BUY' or 'TOTAL SELL'. */
 const txnRows = (tab: any[][] | undefined, type: string): any[][] =>
   (tab || []).filter(r => (r[TXC.type] || '').toString().trim() === type);
@@ -293,13 +294,101 @@ export async function run() {
     ok('A: while the main tab keeps its own', fA.some(r => r.includes('CLOSING')),
       'the period tabs clone their blocks; mutating them would strip the main tab too');
 
-    // THE OVERLAP IS STATED ON THE TAB. A block's purchase charges appear on BOTH period tabs,
-    // so the two expense totals must never be added — which is exactly the kind of difference
-    // between two filed pages that nobody can debug six months later.
-    ok('A: the short-term tab discloses the shared purchase charges',
-      fSt.some(r => r.includes('do not add the two expense totals together')));
-    ok('A: ...and says where the position lives',
-      fSt.some(r => r.includes('holding tabs are the authority')));
+    // NO NARRATION ON A POPULATED TAB (03-Nov-2026, owner: "I have notice these narrations in
+    // all of our calculating sheet, please remove them"). These tabs carried four explanatory
+    // paragraphs between the column header and the first block; they are gone.
+    //
+    // Checked BOTH ways on purpose. The phrase list alone would pass the day someone reworded a
+    // note, and the structural check alone would pass if a paragraph moved further down the
+    // page - so the first is pinned by its exact sentences and the second by the geometry.
+    for (const phrase of ['at the quantity those sales actually consumed',
+                          'OPENING STOCK IS NEVER SHOWN AS A PURCHASE HERE',
+                          'MAY be added',
+                          'still held on 31 March',
+                          'do not add the two expense totals together']) {
+      ok(`A: the short-term tab no longer narrates — "${phrase.slice(0, 32)}..."`,
+        !fSt.some(r => r.includes(phrase)));
+      ok(`A: ...nor the long-term tab — "${phrase.slice(0, 32)}..."`,
+        !fLt.some(r => r.includes(phrase)));
+    }
+    // Structural half: the row directly under SCRIPT NAME must be a block row, not prose. A
+    // sentence row carries its text in the NAME column with every other cell blank, so a long
+    // string there with nothing beside it is exactly the shape that was removed.
+    const underHeader = (t: any[][]) => {
+      const h = t.findIndex(r => r.some((c: any) => `${c}`.trim() === 'SCRIPT NAME'));
+      return h >= 0 && h + 1 < t.length ? t[h + 1] : [];
+    };
+    for (const [label, t] of [['short-term', aSt], ['long-term', aLt]] as [string, any[][]][]) {
+      const row = underHeader(t);
+      const prose = `${row[1] ?? ''}`.length > 60 && row.every((c: any, i: number) =>
+        i === 1 || `${c ?? ''}`.trim() === '');
+      ok(`A: the ${label} grid starts at the first block, with no note row above it`, !prose);
+    }
+
+    // THE PURCHASE COLUMN FAMILY CARRIES NO DATA, which covers two regressions at once: a
+    // purchase row coming back, and a SPLIT or corp-action RESTATEMENT being filed there
+    // because `restateCols` read `blk.purchases.length` off a block that still had them. The
+    // COLUMNS stay - the geometry is shared with the main tab - it is the DATA that must go.
+    const P_FAM = [6, 7, 8, 9];   // pDate, pQty, pRate, pAmt - see LEFT_KEYS in trxRegister.ts
+    const headerEnd = (t: any[][]) => {
+      let i = -1;
+      t.forEach((r, k) => {
+        if (r.some((c: any) => ['SCRIPT NAME', 'PURCHASE', 'IPF'].includes(`${c}`.trim()))) i = k;
+      });
+      return i;
+    };
+    const purchaseCells = (t: any[][]) =>
+      t.slice(headerEnd(t) + 1).filter(r => P_FAM.some(c => `${r[c] ?? ''}`.trim() !== '')).length;
+    /** Total of the PURCHASE quantity column (index 7 - see LEFT_KEYS), past the headers. */
+    const purchaseQtyOn = (t: any[][]) =>
+      t.slice(headerEnd(t) + 1).reduce((sum, r) => sum + (typeof r[7] === 'number' ? r[7] : 0), 0);
+
+    // ONLY THE PURCHASES THESE SALES ATE, PRO-RATED TO WHAT THEY ATE. BETA bought 500 in-FY and
+    // sold 200 of them SHORT, so the short-term tab shows that purchase at 200 - not 500, and
+    // not nothing. All three answers are disjoint, which is the point of using this fixture.
+    eq('A: the short-term tab shows the funding purchase at the quantity SOLD', purchaseQtyOn(aSt), 200);
+    eq('A: ...where the main tab shows the whole 500 it bought', purchaseQtyOn(a), 500);
+
+    // AN OPENING LOT IS NOT A PURCHASE, whatever period it was sold in - the owner's explicit
+    // instruction. ALPHA's long-term sale came entirely out of opening stock, so the long-term
+    // tab carries no purchase row at all.
+    eq('A: the long-term tab shows no purchase - ALPHA sold out of OPENING stock', purchaseCells(aLt), 0);
+
+    // AND IT NEVER CAN, which is arithmetic rather than a special case: the longest an in-FY
+    // purchase can be held inside one FY is 364 days, short of the 365-day listed threshold.
+    // Pinned because a future `ltDays` change would make it reachable and nobody would look.
+    ok('A: ...and no in-FY purchase can EVER fund a long-term sale in the same FY',
+      purchaseQtyOn(aLt) === 0,
+      'if this ever fires, the long-term tab has become reachable and its notes need rewriting');
+
+    // THE TOTALS NOW MEAN SOMETHING, and fixture A makes the right and wrong answers disjoint.
+    // BETA buys in-FY and sells SHORT; ALPHA sells out of opening stock, LONG. Three in-FY
+    // trades at 18.65 of charges each. Old behaviour put BETA's purchase on the short-term tab,
+    // so the two summed to 55.95 - the main tab's own total, by coincidence of this fixture.
+    // Now they sum to the SALE charges alone and the shortfall is exactly that purchase.
+    const expTotalOf = (t: any[][]): number | null => {
+      const i = t.findIndex(r => r.some((c: any) => /Expenses$/.test(`${c}`)));
+      if (i < 0) return null;
+      const n = (t[i + 1] || []).find((c: any) => typeof c === 'number');
+      return typeof n === 'number' ? n : null;
+    };
+    const stE = expTotalOf(aSt) || 0, ltE = expTotalOf(aLt) || 0, mainE = expTotalOf(a) || 0;
+    near("A: short-term expenses are BETA's sale PLUS the 200 shares it sold", stE, 26.11);
+    near("A: long-term expenses are ALPHA's sale alone - it bought nothing", ltE, 18.65);
+    near('A: the two add to 44.76', stE + ltE, 44.76);
+    // 18.65 x 300/500. The 300 BETA shares still held on 31-Mar carry their buy-side charges
+    // on the main tab and on neither period tab, which is the whole reason the purchase arm of
+    // the partition check is a CEILING and not an equality.
+    near("A: falling short of the main tab by the UNSOLD 300 shares' charges", mainE - (stE + ltE), 11.19);
+    ok('A: ...and all three of these totals are distinct', new Set([
+      Number(stE.toFixed(2)), Number(ltE.toFixed(2)), Number(mainE.toFixed(2)) ]).size === 3,
+      'a fixture where two of them coincide cannot tell a right answer from a wrong one');
+    // The tab used to SAY all of this in a note above the first block. The narration came off
+    // on 03-Nov-2026, so the 11.19 shortfall is now stated nowhere on the page - it is pinned
+    // here instead, and the arithmetic is still what the CEILING arm of the partition check
+    // enforces on every run. Asserted absent, with the rest of the prose, further up.
+    ok('A: ...and the note that used to explain the shortfall is gone',
+      !fSt.some(r => r.includes('holding tabs are the authority')));
 
     // THE PARTITION, asserted on the FIGURE: each period's P/L must equal what is already
     // filed for that period on the main tab.
@@ -313,9 +402,135 @@ export async function run() {
     ok('A: ...and neither side is nil', Math.abs(plAt(a, 'Short term')) > 0 && Math.abs(plAt(a, 'Long term')) > 0,
       'a fixture with an empty period would satisfy the tie trivially');
 
-    // The expense footer the format already carries, labelled for the period it covers.
-    ok('A: the short-term tab keeps its expense footer', fSt.some(r => r.includes('Short Term Expenses')));
-    ok('A: the long-term tab keeps its expense footer', fLt.some(r => r.includes('Long Term Expenses')));
+    // The expense footer. Matched as an EXACT CELL, never a substring of the row: the note
+    // rows quote the label in prose, so `includes` would pass on a tab whose footer had gone.
+    ok('A: the short-term tab keeps its expense footer',
+      aSt.some(r => r.some((c: any) => `${c}`.trim() === 'Short Term Expenses')));
+    ok('A: the long-term tab keeps its expense footer',
+      aLt.some(r => r.some((c: any) => `${c}`.trim() === 'Long Term Expenses')));
+
+    // -- THE TWO ACQUISITION TABS (28-Oct-2026) ---------------------------------------
+    //
+    // The same ST/LT split with ONE acquisition column family instead of two: no OPENING
+    // STOCK columns, and the stock FIFO carried in printed as a B/F purchase row.
+    //
+    // Fixture A is the right one for this because the two scrips are DISJOINT in exactly the
+    // way that matters here. BETA's short-term sale was funded by an IN-YEAR buy, so its
+    // acquisition tab must look like its period tab. ALPHA's long-term sale came entirely out
+    // of OPENING stock, so its period tab shows no purchase at all while its acquisition tab
+    // must show one - and that pair is the whole fold-in, with the right and wrong answers on
+    // opposite sides of zero.
+    const ST_ACQ = `Short Term Capital Gains (Acquisitions) for ${FY_LABEL}`;
+    const LT_ACQ = `Long Term Capital Gains (Acquisitions) for ${FY_LABEL}`;
+    const aStA = written(ST_ACQ), aLtA = written(LT_ACQ);
+    ok('A: the short-term ACQUISITIONS tab was written', !!aStA);
+    ok('A: the long-term ACQUISITIONS tab was written', !!aLtA);
+    eq('A: the result names both', `${resA.acqTabs?.short}|${resA.acqTabs?.long}`, `${ST_ACQ}|${LT_ACQ}`);
+
+    if (aStA && aLtA) {
+      const fStA = flatOf(aStA), fLtA = flatOf(aLtA);
+
+      // THE GEOMETRY. Four columns narrower than its period sibling, which is the opening
+      // family and nothing else - and the group header must not still announce one.
+      eq('A: an acquisition tab is FOUR columns narrower than its period sibling',
+        aSt[2].length - aStA[2].length, 4);
+      ok('A: ...and carries no OPENING STOCK heading',
+        !aStA[1].some((c: any) => `${c}`.trim() === 'OPENING STOCK'));
+      ok('A: while its period sibling still does',
+        aSt[1].some((c: any) => `${c}`.trim() === 'OPENING STOCK'),
+        'the acquisition tabs take their own variant; they must not restyle the period tabs');
+      ok('A: the purchase family is headed for what it now holds',
+        aStA[1].some((c: any) => `${c}`.trim() === 'PURCHASE / ACQUISITION'));
+      eq('A: ...and the charge block still ends at IPF', aStA[2][aStA[2].length - 1], 'IPF');
+
+      // The acquisition family on these tabs: pDate..pAmt at 2..5, since the opening four are
+      // gone. Pinned against the HEADER rather than taken on trust - a positional constant
+      // that disagreed with the layout would compare two different columns and call it a check.
+      eq('A: PURCHASE follows SCRIPT NAME with nothing between, so its QTY is index 3',
+        `${aStA[1][2]}|${aStA[2][2]}|${aStA[2][3]}`, 'PURCHASE / ACQUISITION|DATE|NO OF SHARE');
+      const acqQtyOn = (t: any[][]) =>
+        t.slice(headerEnd(t) + 1).reduce((sum, r) => sum + (typeof r[3] === 'number' ? r[3] : 0), 0);
+
+      // BETA's 200 short-term shares came from the in-year buy, so the short-term acquisition
+      // tab reads exactly as its period sibling does - and carries NO B/F row.
+      eq('A: short-term acquisitions show the in-year buy at the quantity sold', acqQtyOn(aStA), 200);
+      eq('A: ...the same quantity its period sibling shows', acqQtyOn(aStA), purchaseQtyOn(aSt));
+      // The label is tested as an EXACT SCRIPT NAME CELL past the headers, never as a
+      // substring of the row. The prose that used to quote "B/F" above the first block came
+      // off on 03-Nov-2026, so `includes` would pass today - the exact-cell form stays because
+      // it is the stricter test and the reason it was needed can come back. Same rule as the
+      // footer, which the notes also used to quote.
+      const bfRows = (t: any[][]) =>
+        t.slice(headerEnd(t) + 1).filter(r => `${r[1] ?? ''}`.trim() === 'B/F').length;
+      eq('A: ...and nothing brought forward - BETA bought in-year', bfRows(aStA), 0);
+
+      // THE FOLD-IN ITSELF. ALPHA sold out of opening stock: its period tab shows no purchase
+      // row at all, its acquisition tab shows those shares as B/F. Zero against a real
+      // quantity - the two answers cannot be confused.
+      eq('A: the long-term period tab shows no purchase', purchaseQtyOn(aLt), 0);
+      ok('A: ...while the long-term ACQUISITIONS tab shows the stock FIFO consumed',
+        acqQtyOn(aLtA) > 0,
+        'this is the fold-in; a 0 here means opening lots never became acquisition rows');
+      ok('A: ...labelled B/F, so blank charge cells read as a prior year rather than missing data',
+        bfRows(aLtA) > 0);
+      // And it really is charge-free ON THE ROW, not merely absent from the total: a charge
+      // written into a B/F row that happened to cancel elsewhere would pass the total check.
+      ok('A: ...with every charge cell on that row blank',
+        aLtA.slice(headerEnd(aLtA) + 1)
+          .filter(r => `${r[1] ?? ''}`.trim() === 'B/F')
+          .every(r => r.slice(aLtA[2].indexOf('Brok.Total')).every((c: any) => `${c ?? ''}`.trim() === '')));
+
+      // A B/F ROW CARRIES NO CHARGES, which is what keeps the expense total identical to the
+      // sibling's. If it ever inherited the opening lot's charges, this is what fires - and
+      // nothing on the tab could show it, because those cells are blank by design.
+      const stAE = expTotalOf(aStA) || 0, ltAE = expTotalOf(aLtA) || 0;
+      near('A: short-term acquisition expenses equal the period tab figure', stAE, stE);
+      near('A: long-term acquisition expenses equal the period tab figure', ltAE, ltE);
+      near('A: ...and are the same 26.11 / 18.65, not a new pair of figures', stAE + ltAE, 44.76);
+      ok('A: ...a tie that is NOT trivial, since ALPHA added an acquisition row to one of them',
+        acqQtyOn(aLtA) > 0 && Math.abs(ltAE - ltE) < 0.005,
+        'the long-term tab gained a row and its expense total did not move - that is the point');
+
+      // The P/L is untouched: these tabs restate sales already filed.
+      near('A: short-term acquisition P/L ties to the main tab', plAt(aStA, 'Short term'), plAt(a, 'Short term'));
+      near('A: long-term acquisition P/L ties to the main tab', plAt(aLtA, 'Long term'), plAt(a, 'Long term'));
+      ok('A: one P/L column each here too', !aStA[1].some((c: any) => `${c}`.trim() === 'Long term'));
+
+      // SALES less ACQUISITIONS is the P/L already filed - the property these tabs have and
+      // the period tabs cannot, because every lot that paid for these sales is on the page.
+      const sumCol = (t: any[][], c: number) =>
+        t.slice(headerEnd(t) + 1).reduce((n, r) => n + (typeof r[c] === 'number' ? r[c] : 0), 0);
+      eq('A: SALES AMOUNT is index 9 on an acquisition tab',
+        `${aStA[1][6]}|${aStA[2][9]}`, 'SALES|AMOUNT');
+      near('A: SALES less ACQUISITIONS is the short-term P/L already filed',
+        sumCol(aStA, 9) - sumCol(aStA, 5), plAt(a, 'Short term'));
+      near('A: ...and the long-term one too',
+        sumCol(aLtA, 9) - sumCol(aLtA, 5), plAt(a, 'Long term'));
+
+      // CLOSING stays absent here as well - a closing POSITION is not a holding-period fact.
+      ok('A: no closing section on an acquisition tab', !fStA.some(r => r.includes('CLOSING')));
+
+      // NARRATION IS OFF THESE TABS TOO (03-Nov-2026). Four paragraphs stood between the
+      // column header and the first block; each is now asserted ABSENT, in the same both-ways
+      // form the period tabs get above - exact sentences plus the geometry.
+      //
+      // The B/F paragraph is the one that carried a real fact: a carried-in lot's blank charge
+      // cells are deliberate, not a failed import. The `B/F` LABEL on the row is what states
+      // that now, which is why the label itself is pinned as an exact cell further up and why
+      // dropping the sentence does not leave the page saying nothing.
+      for (const phrase of ['A B/F ROW CARRIES NO CHARGES', 'identical to the figure on',
+                            'less PURCHASE AMOUNT', 'appears as a sentence',
+                            'holding tabs are the authority']) {
+        ok(`A: the acquisition tab no longer narrates — "${phrase.slice(0, 30)}..."`,
+          !fStA.some(r => r.includes(phrase)));
+      }
+      for (const [label, t] of [['short-term', aStA], ['long-term', aLtA]] as [string, any[][]][]) {
+        const row = underHeader(t);
+        const prose = `${row[1] ?? ''}`.length > 60 && row.every((c: any, i: number) =>
+          i === 1 || `${c ?? ''}`.trim() === '');
+        ok(`A: the ${label} acquisition grid starts at the first block`, !prose);
+      }
+    }
   }
 
   // The note rows must be PUSHED before the first block, never spliced in after the emission:
@@ -344,6 +559,28 @@ export async function run() {
     // input nothing else can tell the difference.
     ok('A: the partition check counts the period tabs, not the main tab',
       /const rows = periodCg\.reduce\(\(s, p\) => s \+ p\.em\.sellRows, 0\);/.test(reg));
+
+    // THE ACQUISITION TABS MUST STAY OUT OF THAT SUM TOO, and they are the THIRD restatement:
+    // counting all three QUADRUPLES every listed charge, the guard sees drift, and no register
+    // writes at all. Source, for the same reason - the symptom is a total failure to write.
+    ok('A: the acquisition tabs stay OUT of the charge-conservation sum',
+      cgSum.length > 40 && !cgSum.includes('acqCg'));
+
+    // And `opening: []` on the acquisition clone is what makes the ABSENT opening family safe
+    // rather than merely unused: with it, `openAgg` is empty on every block and `openCols()` -
+    // which THROWS on that variant - is never reached. Source, because the failure is again a
+    // refusal to write rather than anything visible on a tab.
+    const acqClone = reg.slice(reg.indexOf('const acqCg ='), reg.indexOf('const classCg'));
+    ok('A: the acquisition clone is locatable in source', acqClone.length > 400);
+    ok('A: ...and empties `opening` so the absent column family is never addressed',
+      /opening: \[\]/.test(acqClone));
+    ok('A: ...and strips the SPLIT and corp-action FIGURES, keeping their sentences',
+      /splits: \[\], corpNotes: notesOnly\(b\)/.test(acqClone));
+    // A carried-in row must take a FRESH zero bundle. Inheriting the lot's own charges is a
+    // deduction claimed for a cost incurred in a year already filed, and the row's charge
+    // cells are blank by design so nothing on the page could show it.
+    ok('A: a brought-forward row takes a fresh ZERO_CHARGES bundle',
+      /charges: \{ \.\.\.ZERO_CHARGES \}/.test(reg.slice(reg.indexOf('const matchedAcquisitions'))));
   }
 
   // ── FIXTURE A2 — an EMPTY period is still written ─────────────────────────
@@ -403,7 +640,36 @@ export async function run() {
   ok('unreadable Private Equities tab still refuses to write',
     /Private Equities/.test(refused) && /not written/i.test(refused), `got: ${refused || '(no throw)'}`);
 
-  // ── the split itself ──────────────────────────────────────────────────────
+  // ── the removed Dmat column, and the figure that must not vanish with it ─────
+  //
+  // The column went on 26-Oct-2026 because nothing but INTEGRATED ever filled it. But dmat had
+  // to leave the charge-conservation guard's `expect` at the same time, or the guard would see a
+  // charge it expects and no tab emitting it and write NO REGISTER AT ALL - so this pair is the
+  // whole safety case for the removal: the register still writes, AND the rupees are reported.
+  {
+    install(FIXTURE_A, OPENING_A);
+    const plain = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    // The ordinary book, and the answer that justified removing the column in the first place.
+    eq('A: a ledger with no demat charge reports none', plain.dmatNotShown, 0);
+
+    // The SAME fixture with a DP charge on each of its THREE in-year trades. Right and wrong
+    // answers are disjoint: 3 x 7.25 against 0, and against a register that refuses to write.
+    const WITH_DMAT = FIXTURE_A.map((r, i) =>
+      i === 0 ? r : [...r.slice(0, 17), (r[3] === 'Buy' || r[3] === 'Sell') ? 7.25 : 0]);
+    install(WITH_DMAT, OPENING_A);
+    let threw = ''; let withD: any = null;
+    try { withD = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio'); }
+    catch (e: any) { threw = e?.message || String(e); }
+    ok('A: a demat charge no longer breaks the conservation guard', !threw, `got: ${threw}`);
+    eq('A: ...and the rupees it no longer shows are REPORTED', withD?.dmatNotShown, 21.75);
+    // On NO tab - which is the point of the removal, and is what makes the report load-bearing
+    // rather than decorative.
+    const dD = written(CG_TAB) || [];
+    ok('A: ...while appearing on no tab at all',
+      !dD.some(r => r.some((c: any) => typeof c === 'number' && Math.abs(c - 7.25) < 0.001)));
+  }
+
+  // ── the split itself ────────────────────────────────────────────
   // Fixture A has no intraday at all, so the delivery tab must be BYTE-IDENTICAL to the
   // pre-split register with one column removed and the two intra-day footer rows dropped.
   // Anything else means the refactor moved a figure.
@@ -416,15 +682,24 @@ export async function run() {
     eq('A: delivery drops the Intra-Day caption', dA[1].indexOf('Intra-Day'), -1);
     eq('A: delivery keeps Short term', dA[1].indexOf('Short term') >= 0, true);
     eq('A: delivery keeps Long term', dA[1].indexOf('Long term') >= 0, true);
-    eq('A: delivery is 25 columns wide', dA[2].length, 25);
+    eq('A: delivery is 24 columns wide', dA[2].length, 24);
     eq('A: delivery has two P/L headers', dA[2].filter((c: any) => c === 'P/L').length, 2);
     eq('A: IPF is still the last column', dA[2][dA[2].length - 1], 'IPF');
+    // THE DMAT COLUMN IS GONE (26-Oct-2026, asked for directly). Nothing but INTEGRATED ever
+    // populated it, so on this book it was a headed blank on every filed tab. Asserted as the
+    // WHOLE charge block in order rather than as "Dmat is absent": the geometry is derived from
+    // CHARGE_HDR, so a re-insertion anywhere shifts every charge one column right in a document
+    // someone files, and only the full sequence catches that.
+    eq('A: the charge block is the eight charges, in order, with no Dmat',
+      dA[2].slice(dA[2].indexOf('Brok.Total')),
+      ['Brok.Total', 'STT', 'GST', 'ET Charges', 'Stamp duty', 'SEBI Chg.', 'EXCH.Clg.', 'IPF']);
     const foot = dA.filter(r => r.some((c: any) => /Expenses$/.test(String(c))));
     eq('A: delivery footer names only delivery expenses', foot.map(r => r.find((c: any) => /Expenses$/.test(String(c)))), ['Delivery Expenses']);
   }
   if (iA) {
     eq('A: intraday keeps only the Intra-Day caption', iA[1].filter((c: any) => /term|Intra-Day/.test(String(c))), ['Intra-Day']);
-    eq('A: intraday is 24 columns wide', iA[2].length, 24);
+    eq('A: intraday is 23 columns wide', iA[2].length, 23);
+    eq('A: the intraday tab lost the Dmat column too', iA[2].indexOf('Dmat'), -1);
     eq('A: intraday has one P/L header', iA[2].filter((c: any) => c === 'P/L').length, 1);
     ok('A: empty intraday says so rather than looking like a lost tab',
       iA.some(r => r.some((c: any) => /No intra-day/.test(String(c)))));
@@ -743,6 +1018,11 @@ export async function run() {
       const buys = txnRows(mfTxn, 'BUY'), sells = txnRows(mfTxn, 'SELL');
       eq('E: the fund has exactly one BUY row', buys.length, 1);
       eq('E: and exactly one SELL row - the row no other tab shows', sells.length, 1);
+      // The transaction statement REUSES CHARGE_HDR verbatim, so it lost the column with the
+      // gains tabs - by design, and enforced by the module-load alignment check. A statement
+      // sitting beside a gains tab must carry the same charge block in the same order.
+      eq('E: the statement lost the Dmat column with the gains tabs', (mfTxn[2] || []).indexOf('Dmat'), -1);
+      eq('E: ...and NET moved left with it', (mfTxn[2] || [])[TXC.net], 'NET AMOUNT');
       eq('E: the BUY row carries qty / amount / net', [buys[0]?.[TXC.qty], buys[0]?.[TXC.amt], buys[0]?.[TXC.net]],
         [100, 10000, 10010]);
       // 100 x 120 = 12,000 turnover, net of the 10 brokerage = 11,990.
@@ -790,6 +1070,24 @@ export async function run() {
     try { resF = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio'); }
     catch (e: any) { threwF = e?.message || String(e); }
     ok('F: a PE-only book still produces a register', !threwF, `threw: ${threwF}`);
+
+    // ── COLLECT MODE: the off-market flag the formula twin actually receives ─────────
+    //
+    // Source-asserted elsewhere because neither suite could EXECUTE this channel - `derive` is
+    // filled only in collect mode and read only by the gapi-driven view. It can be executed from
+    // here, which is better: a source assertion proves the line exists, not that the flag
+    // arrives. Fixture F writes a Private Equity gains tab beside the listed ones, so one collect
+    // run carries both kinds and the two must disagree.
+    {
+      const collected: any[] = [];
+      await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio', collected);
+      const byTab = (frag: string) => collected.find(c => c.tab.includes(frag));
+      const listed = byTab('Capital Gains for') && collected.find(c => c.tab === `Capital Gains for ${FY_LABEL}`);
+      const pe = byTab('Private Equity');
+      ok('F: collect mode carries the Private Equity tab', !!pe, `tabs: ${collected.map(c => c.tab).join(', ')}`);
+      eq('F: ...flagged OFF-MARKET for the twin', pe && pe.derive.isOffMarket, true);
+      eq('F: ...while the listed tab is NOT', listed && listed.derive.isOffMarket, false);
+    }
 
     const peCg = written(`Private Equity Capital Gains for ${FY_LABEL}`);
     ok('F: a Private Equity Capital Gains tab is written', !!peCg, `tabs: ${tabsWritten().join(', ')}`);
@@ -1693,6 +1991,488 @@ export async function run() {
     ok('N5: ...and off the PE holding tab',
       !holdHas(written(`Holding Private Equity Only as on 31st March ${FY + 2}`), 'NEXUS UNLISTED PVT LTD'));
     eq('N5: ...and that year reports no listing of its own', resE.listedDuringFy, []);
+  }
+
+  // ── FIXTURE P — a RESTATEMENT on a period tab, which is the subtle half of dropping
+  //              purchases from those tabs ────────────────────────────────────────────
+  //
+  // `restateCols` decides which column family a SPLIT or corp-action restatement is printed in
+  // by asking `blk.purchases.length`. That is why purchases are dropped on the CLONE rather
+  // than gated inside `emitTab` on `L.id` the way CLOSING is: gate the emission alone and the
+  // block still answers "I have purchases", so the SPLIT line is filed under the PURCHASE
+  // column family on a tab that shows no purchase rows at all.
+  //
+  // No other fixture can see this - none of them puts a split on a period tab beside an in-FY
+  // purchase - so without this one the `purchaseCells === 0` assertions above test green while
+  // the restatement half is never executed, and a future tidy-up to an `L.id` gate ships.
+  {
+    const HDR_P = [...TE_HEADER, 'Ratio'];
+    const rowP = (d: [number, number, number], type: string, qty: number, price: number, ratio = '') => [
+      serial(...d), 'DELTA POWER LIMITED', 'INE004A01012', type, qty, price,
+      qty * price, type === 'Buy' ? qty * price + 10 : qty * price - 10, 'Delivery', '',
+      10, 5, 2, 1, 0.5, 0.1, 0.05, 0, ratio,
+    ];
+    // Bought 1-May-2025, split 2:1 in August, all 200 sold 1-Mar-2026 - 304 days, so SHORT
+    // term, and the whole block lands on the short-term tab.
+    install([
+      HDR_P,
+      rowP([2025, 5, 1], 'Buy', 100, 100),
+      rowP([2025, 8, 1], 'Split', 100, 0, '2:1'),
+      rowP([2026, 3, 1], 'Sell', 200, 80),
+    ]);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const pMain = written(`Capital Gains for ${FY_LABEL}`);
+    const pSt = written(`Short Term Capital Gains for ${FY_LABEL}`);
+    const flatP = (t: any[][] | undefined) => (t || []).map(r => r.join('|'));
+
+    const P_FAM2 = [6, 7, 8, 9];
+    const hEnd = (t: any[][] | undefined) => {
+      let i = -1;
+      (t || []).forEach((r, k) => {
+        if (r.some((c: any) => ['SCRIPT NAME', 'PURCHASE', 'IPF'].includes(`${c}`.trim()))) i = k;
+      });
+      return i;
+    };
+    const famCells = (t: any[][] | undefined) =>
+      (t || []).slice(hEnd(t) + 1).filter(r => P_FAM2.some(c => `${r[c] ?? ''}`.trim() !== '')).length;
+    /** Rows carrying data in the OPENING family (C-F), past the headers. */
+    const openCells = (t: any[][] | undefined) =>
+      (t || []).slice(hEnd(t) + 1).filter(r => [2, 3, 4, 5].some(c => `${r[c] ?? ''}`.trim() !== '')).length;
+
+    ok('P: the short-term tab carries the block', flatP(pSt).some(r => r.includes('DELTA POWER LIMITED')));
+    ok('P: the main tab files the SPLIT in the PURCHASE family', famCells(pMain) > 0,
+      'the main tab HAS purchases, so restateCols must use D-G there');
+
+    // P1: the whole purchase WAS sold, so it is on the period tab in full - at the quantity
+    // BOUGHT (100), not the 200 the post-split lot became. The split rescales the lot; it does
+    // not rewrite the contract note. `Math.min(avail, p.qty)` is what caps it.
+    ok('P: the funding purchase is on the period tab', famCells(pSt) > 0);
+    eq('P: ...at the quantity BOUGHT, not the post-split lot size',
+      pSt!.slice(hEnd(pSt) + 1)
+        // The SPLIT restatement sits in this same column family on THIS tab (the block has
+        // purchases here, so restateCols correctly uses D-G), and it carries the RESTATED
+        // holding of 200. Summing the column blind counts it as a second purchase.
+        .filter(r => `${r[1] ?? ''}`.trim() !== 'SPLIT')
+        .reduce((sum, r) => sum + (typeof r[7] === 'number' ? r[7] : 0), 0), 100);
+    ok('P: the SPLIT line survives', flatP(pSt).some(r => r.includes('SPLIT')));
+
+    // And the arithmetic the tab exists for is untouched: 200 sold at 80 is 16,000 against a
+    // 10,000 cost, so 6,000 short-term - a figure neither the split nor the dropped purchase
+    // rows may move.
+    const plP = (t: any[][] | undefined) => {
+      const gi = (t || []).findIndex(r => r.some((c: any) => `${c}`.trim() === 'GRAND TOTAL'));
+      return gi < 0 ? null : ((t || [])[gi].find((c: any) => typeof c === 'number' && c !== 0) ?? null);
+    };
+    near('P: the short-term gain is unmoved by any of this', plP(pSt) as number, 6000);
+
+    // ── P2 — THE CLONE-VS-GATE PROBE TARGET, and the only shape that can see it ─────────
+    //
+    // A block that HAS an in-FY purchase whose period sales consumed NONE of it: opening stock
+    // bought 1-Feb-2025 (still SHORT when sold in September), an untouched in-FY buy in July,
+    // and a 2:1 split over both. FIFO eats the opening lot, so `matchedPurchases` returns [].
+    //
+    // `restateCols` must then follow THIS TAB's rows and file the SPLIT in the OPENING family.
+    // Gate the purchase loop on `L.id` instead of rewriting the clone and the block still
+    // answers "I have purchases" with the July buy, so the split lands in the PURCHASE family
+    // on a tab showing no purchase row - right charges, wrong layout, and no arithmetic guard
+    // anywhere can see it.
+    install([
+      HDR_P,
+      rowP([2025, 7, 1], 'Buy', 100, 200),
+      rowP([2025, 8, 1], 'Split', 200, 0, '2:1'),
+      rowP([2025, 9, 15], 'Sell', 200, 80),
+    ], [
+      ['Security', 'ISIN', 'Acquisition Date', 'Quantity', 'Cost Per Share', 'Total Cost', '', ''],
+      ['DELTA POWER LIMITED', 'INE004A01012', serial(2025, 2, 1), 100, 100, 10000, '', ''],
+    ]);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const p2St = written(`Short Term Capital Gains for ${FY_LABEL}`);
+    const p2Main = written(`Capital Gains for ${FY_LABEL}`);
+
+    ok('P2: the short-term tab carries the block', flatP(p2St).some(r => r.includes('DELTA POWER LIMITED')));
+    ok('P2: the main tab still files its July purchase', famCells(p2Main) > 0);
+    eq('P2: the period tab shows NO purchase - the sale came out of opening stock', famCells(p2St), 0);
+    ok('P2: ...and the SPLIT is still printed', flatP(p2St).some(r => r.includes('SPLIT')));
+    ok('P2: ...in the OPENING family, because restateCols follows THIS tab', openCells(p2St) > 0);
+
+    // ── P3 — TWO PURCHASES ON ONE DATE, which is what the `want` drawdown is for ────────
+    //
+    // `matchedPurchases` keys on `buyTs` alone, so two buys on 1-Jul share one bucket of
+    // matched quantity. It must be DRAWN DOWN as each purchase takes its share: 200 sold means
+    // 200 shown, out of the first lot FIFO ate. Leave the `want.set(...)` out and both rows
+    // claim the full 200 - the page then shows 400 shares bought to fund a 200-share sale.
+    //
+    // The CEILING arm cannot catch this (12.43 of claimed charges against 37.30 filed is still
+    // under the ceiling), which is exactly why the quantity is asserted here instead.
+    install([
+      HDR_P,
+      rowP([2025, 7, 1], 'Buy', 300, 100),
+      rowP([2025, 7, 1], 'Buy', 200, 100),
+      rowP([2025, 9, 15], 'Sell', 200, 120),
+    ]);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const p3St = written(`Short Term Capital Gains for ${FY_LABEL}`);
+    const p3Qty = (p3St || []).slice(hEnd(p3St) + 1)
+      .reduce((sum, r) => sum + (typeof r[7] === 'number' ? r[7] : 0), 0);
+    eq('P3: two same-day buys fund a 200-share sale with 200 shares, not 400', p3Qty, 200);
+    eq('P3: ...and the main tab still shows everything it bought',
+      (p3Main => (p3Main || []).slice(hEnd(p3Main) + 1)
+        .reduce((sum, r) => sum + (typeof r[7] === 'number' ? r[7] : 0), 0))(
+        written(`Capital Gains for ${FY_LABEL}`)), 500);
+
+    // -- FIXTURE Q - THE ACQUISITION FOLD-IN, built for the two probes nothing else reached --
+    //
+    // Three separate things have to be true at once before the carried-in half of
+    // `matchedAcquisitions` is exercised at all, and fixture A has none of them:
+    //
+    //   1. AN OPENING LOT THAT CARRIES CHARGES. The `Opening Holdings` seed sets
+    //      ZERO_CHARGES, so every fixture seeded that way makes the guard "a B/F row carries
+    //      no charges" trivially true - a probe that let those rows INHERIT the lot charges
+    //      came back SILENT. A pre-FY row in True Entry is replayed like any other, so its
+    //      lot reaches the opening snapshot with its REAL brokerage and STT on it. That is
+    //      also the production shape: the ledger is not FY-scoped, the register is.
+    //
+    //   2. MORE MATCHED QUANTITY AT ONE DATE THAN WAS BOUGHT THAT DATE. A 2:1 split doubles
+    //      the lot while `b.purchases` still records the 100 the contract note says, so the
+    //      01-Jul claim runs out mid-way.
+    //
+    //   3. TWO MATCHED LOTS SHARING THAT DATE, which takes two sales. With one, the drawdown
+    //      and no drawdown give the same answer - which is exactly why that probe was silent.
+    //
+    // 1-Feb-2025 buy 200 @ 100 (pre-FY, charged) . 1-Jul buy 100 @ 200 . 2:1 split 1-Aug, so
+    // the lots become 400 @ 50 and 200 @ 100 . sell 500 on 1-Sep (400 + 100) . sell 100 on
+    // 1-Oct. Every parcel is SHORT term, so the whole block lands on one tab.
+    //
+    // Right and wrong answers are DISJOINT: 600 acquisition shares against 500, and without
+    // the drawdown the quantity invariant throws and NO REGISTER WRITES AT ALL.
+    install([
+      HDR_P,
+      rowP([2025, 2, 1], 'Buy', 200, 100),
+      rowP([2025, 7, 1], 'Buy', 100, 200),
+      rowP([2025, 8, 1], 'Split', 300, 0, '2:1'),
+      rowP([2025, 9, 1], 'Sell', 500, 120),
+      rowP([2025, 10, 1], 'Sell', 100, 130),
+    ]);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const qSt = written(`Short Term Capital Gains for ${FY_LABEL}`);
+    const qStA = written(`Short Term Capital Gains (Acquisitions) for ${FY_LABEL}`);
+    const qMain = written(`Capital Gains for ${FY_LABEL}`);
+    ok('Q: the short-term ACQUISITIONS tab was written', !!qStA);
+
+    if (qSt && qStA && qMain) {
+      const past = (t: any[][]) => t.slice(hEnd(t) + 1);
+      // The acquisition family starts right after SCRIPT NAME on these tabs, so QTY is 3.
+      const qtyA = past(qStA).reduce((n, r) => n + (typeof r[3] === 'number' ? r[3] : 0), 0);
+      const bf = past(qStA).filter(r => `${r[1] ?? ''}`.trim() === 'B/F');
+
+      // EVERY SHARE FIFO CONSUMED, ONCE. 400 carried in, 100 of the in-year buy, 100 more of
+      // it from the second sale - which is the parcel the drawdown decides the fate of.
+      eq('Q: the acquisition tab carries all 600 shares the sales consumed', qtyA, 600);
+      eq('Q: ...as ONE brought-forward row beside one in-year purchase', bf.length, 1);
+      eq('Q: ...the carried-in one being the 400 that predate the year',
+        bf.reduce((n, r) => n + (typeof r[3] === 'number' ? r[3] : 0), 0), 400);
+
+      // THE IN-YEAR LOT IS ONE ROW, NOT A PURCHASE PLUS A REMAINDER - which is the units bug
+      // this fixture was built to find. 100 shares were bought and a 2:1 split made them 200;
+      // allocating in SHARES capped the purchase at the 100 the note says and spilled the
+      // other 100 into a second, brought-forward row, counting Rs 10,000 of one lot's cost
+      // twice on a filed page. Allocating in COST - which a split does not change - absorbs
+      // the whole lot into the purchase it came from.
+      const inYear = past(qStA).filter(r => `${r[2] ?? ''}`.trim() === '01.07.2025');
+      eq('Q: the in-year lot is a single acquisition row', inYear.length, 1);
+      eq('Q: ...at its POST-split share count', inYear[0][3], 200);
+      eq('Q: ...and its whole, undivided cost', inYear[0][5], 20000);
+      eq('Q: so the acquisition column totals the 40,000 these sales really cost',
+        past(qStA).reduce((n, r) => n + (typeof r[5] === 'number' ? r[5] : 0), 0), 40000);
+
+      // The period sibling renders the SAME allocation in the CONTRACT NOTE's units: the 100
+      // shares the note records, not the 200 they became. Its SPLIT restatement is filed in
+      // this same column family (`restateCols`), so it has to come out of the sum - the same
+      // filter fixture P1 already needs.
+      eq('Q: its period sibling shows the in-year buy in NOTE units',
+        past(qSt).filter(r => `${r[1] ?? ''}`.trim() !== 'SPLIT')
+          .reduce((n, r) => n + (typeof r[7] === 'number' ? r[7] : 0), 0), 100);
+
+      // THE OPENING LOT GENUINELY CARRIES CHARGES HERE - the pre-FY buy was charged 10 / 5 /
+      // 2 / 1 / 0.50 / 0.10 / 0.05 and is held whole at FY start - so a B/F row inheriting
+      // them is a real possibility rather than a hypothetical one. That cost was incurred in
+      // a year already filed; claiming it here would be a deduction against this year's gain.
+      const brokCol = qStA[2].indexOf('Brok.Total');
+      ok('Q: the charge block is locatable', brokCol > 0);
+      ok('Q: every brought-forward row is charge-free ON THE ROW',
+        bf.every(r => r.slice(brokCol).every((c: any) => `${c ?? ''}`.trim() === '')));
+
+      const expOf = (t: any[][]): number => {
+        const i = t.findIndex(r => r.some((c: any) => /Expenses$/.test(`${c}`)));
+        if (i < 0) return NaN;
+        const n = (t[i + 1] || []).find((c: any) => typeof c === 'number');
+        return typeof n === 'number' ? n : NaN;
+      };
+      // ...so the two tabs' expense totals are EQUAL, and here that is a real statement: the
+      // acquisition tab has two extra rows and its total did not move.
+      near('Q: so the acquisition expense total equals its period sibling', expOf(qStA), expOf(qSt));
+      ok('Q: ...and neither is nil', expOf(qSt) > 0,
+        'a fixture with no charges at all would satisfy the tie trivially');
+
+      // SALES less ACQUISITIONS is the P/L already filed - which only holds because every lot
+      // that paid for these sales is on the page, carried-in ones included.
+      const sum = (t: any[][], c: number) =>
+        past(t).reduce((n, r) => n + (typeof r[c] === 'number' ? r[c] : 0), 0);
+      const qPl = (() => {
+        const c = qMain[1].findIndex((x: any) => `${x}`.trim() === 'Short term');
+        const gt = qMain.find(r => r[1] === 'GRAND TOTAL');
+        return c >= 0 && gt ? Number(gt[c]) || 0 : NaN;
+      })();
+      near('Q: SALES less ACQUISITIONS is the short-term P/L already filed',
+        sum(qStA, 9) - sum(qStA, 5), qPl);
+      ok('Q: ...and that P/L is not zero', Math.abs(qPl) > 1);
+
+      // The SPLIT is a sentence here, not a figure: the acquisition rows already carry the
+      // restated 50 / 100 rates, so printing the restatement again would double the column.
+      const flatQ = qStA.map(r => r.join('|'));
+      ok('Q: the split is disclosed as a sentence', flatQ.some(r => r.includes('holding restated to')));
+      eq('Q: ...and not as a SPLIT figure row',
+        past(qStA).filter(r => `${r[1] ?? ''}`.trim() === 'SPLIT').length, 0);
+      ok('Q: while the main tab still prints its SPLIT row',
+        qMain.some(r => `${r[1] ?? ''}`.trim() === 'SPLIT'),
+        'the acquisition tabs clone their blocks; stripping figures must not reach the main tab');
+    }
+
+    // -- FIXTURE R - TWO LOTS AT ONE DATE, WHICH IS WHAT `room` IS FOR -------------------
+    //
+    // The allocator draws down on BOTH sides as a purchase absorbs a lot: the lot's remaining
+    // quantity, and the purchase's remaining COST. Fixture P3 covers the first (two same-day
+    // buys at the SAME price merge into one matched lot, so only `h.qty` is in play). Nothing
+    // covered the second, and a probe removing `room` came back SILENT.
+    //
+    // It needs two DISTINCT lots sharing one date, which means two buys at DIFFERENT prices -
+    // 100 at 100 and 100 at 200 on 1-Jul, both sold. Without the `room` drawdown the first
+    // purchase absorbs the second lot as well: it reports 20,000 of cost against its own
+    // 10,000, so `f` comes out at 2.0 and it claims DOUBLE its brokerage, while the second
+    // purchase claims half of its own. The total cost still ties and the share count still
+    // ties - only the CHARGES move, which is why neither existing invariant can see it.
+    //
+    // What catches it is the period tabs' CEILING arm: the two tabs would claim 2.5x a
+    // purchase's charges where the main tab carries 2x, and the register refuses to write.
+    install([
+      HDR_P,
+      rowP([2025, 7, 1], 'Buy', 100, 100),
+      rowP([2025, 7, 1], 'Buy', 100, 200),
+      rowP([2025, 9, 1], 'Sell', 200, 300),
+    ]);
+    await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const rStA = written(`Short Term Capital Gains (Acquisitions) for ${FY_LABEL}`);
+    const rMain = written(`Capital Gains for ${FY_LABEL}`);
+    ok('R: the short-term ACQUISITIONS tab was written', !!rStA);
+
+    if (rStA && rMain) {
+      const pastR = (t: any[][]) => t.slice(hEnd(t) + 1);
+      // Both lots are fully consumed, so both purchases appear whole: 100 at 100 and 100 at
+      // 200. A `room` that never ran down would report 150 shares against the first and 50
+      // against the second - the same 200 in total, which is exactly why the quantity cannot
+      // be what guards this.
+      const rows = pastR(rStA).filter(r => typeof r[3] === 'number' && r[3] > 0);
+      eq('R: both same-day lots appear as their own acquisition rows', rows.length, 2);
+      eq('R: ...the cheaper one whole at 100 shares', rows[0][3], 100);
+      eq('R: ...and the dearer one whole at 100 shares', rows[1][3], 100);
+      eq('R: ...costing 10,000 and 20,000', `${rows[0][5]}|${rows[1][5]}`, '10000|20000');
+
+      // And each carries its OWN charges, undoubled. Both notes were charged identically, so
+      // a doubled first row and a halved second would still sum correctly down the column -
+      // the per-row figure is the only place it shows.
+      const brokR = rStA[2].indexOf('Brok.Total');
+      eq('R: each acquisition row carries its own brokerage, neither doubled nor halved',
+        `${rows[0][brokR]}|${rows[1][brokR]}`, '10|10');
+    }
+  }
+
+  // ── FIXTURE S — THE REPORTS GO TO A DIFFERENT WORKBOOK ────────────────────
+  //
+  // (29-Oct-2026, owner request: FY26-27 for Integrated / Saket Agarwal / S713 writes its
+  // reports to a separate sheet. The LEDGER does not move.)
+  //
+  // One identifier used to do both jobs. Splitting it is the kind of change where a single
+  // missed site is silent in the worst way, and only an assertion on the DESTINATION of every
+  // call can see it - the written grid is byte-identical either way.
+  //
+  // The stub keys its ranges on `spreadsheetId + "::" + range`, so a read pointed at the
+  // report workbook finds no True Entry and throws. That is what makes the read half
+  // self-proving here rather than merely asserted.
+  {
+    const DEST = 'REPORT-WORKBOOK-UNDER-TEST';
+    // THREE separate reads come off the account's own sheet - True Entry, Opening Holdings
+    // and Corporate Actions - and each needs something in it here, or a probe pointing that
+    // read at the destination is a no-op and tests green while doing nothing. (The first
+    // sweep found exactly that: the opening-basis probe was SILENT because this fixture had
+    // no opening lots, and every fixture that HAS them passes no destination at all.)
+    const S_OPENING = [
+      ['Security', 'ISIN', 'Acquisition Date', 'Quantity', 'Cost Per Share', 'Total Cost', '', ''],
+      ['GAMMA TECH LIMITED', 'INE003A01015', serial(2023, 4, 1), 300, 50, 15000, '', ''],
+    ];
+    const S_CORP = [
+      ['Date', 'Type', 'From', 'To', 'Shares In', 'Cost', 'Notes'],
+      ['20/06/2025', 'Demerger', 'GAMMA TECH LIMITED', 'DELTA POWER LIMITED', 300, 5000, ''],
+    ];
+    const installS = () => install([
+      TE_HEADER,
+      te([2025, 6, 10], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Buy', 100, 50),
+      te([2025, 9, 20], 'ALPHA INDUSTRIES LIMITED', 'INE001A01011', 'Sell', 100, 70),
+      te([2025, 11, 5], 'GAMMA TECH LIMITED', 'INE003A01015', 'Sell', 100, 90),
+    ], S_OPENING, S_CORP);
+    installS();
+    // The destination is a DIFFERENT workbook that knows nothing about this account. Giving it
+    // only a stray "Sheet1" is the real shape: an empty sheet the owner just created.
+    g.__firstTab[DEST] = 'Sheet1';
+    g.__sheetTabs[DEST] = ['Sheet1'];
+    const resS = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio', undefined, DEST);
+
+    // THE READ STILL CAME FROM THE ACCOUNT'S OWN SHEET. If it had followed the destination the
+    // stub would have thrown on `True Entry!A:Z` and the year would be empty - so a non-zero
+    // scrip count IS the assertion, not a weaker proxy for it.
+    ok('S: the ledger is still read from the account own sheet', resS.scrips > 0,
+      'a 0 here means the read followed the destination and found no True Entry');
+    eq('S: ...and both sales were seen', resS.sellRows, 2);
+
+    // ...AND SO ARE THE OTHER TWO READS. The opening lot is a COST BASIS: lose it and the sale
+    // becomes an uncovered quantity booked at zero P/L, which prints a finished-looking tax tab
+    // carrying a gain that is wrong by the whole cost of the shares. The corporate action moves
+    // basis between two scrips and leaves a sentence row that no other row can stand in for.
+    const sMain = written(`Capital Gains for ${FY_LABEL}`);
+    const sFlat = (sMain || []).map(r => r.join('|'));
+    // ASSERTED ON THE FIGURE, not on the presence of a 300 anywhere on the tab - the first
+    // version of this check was satisfied by the DEMERGER parcel, which is also 300 shares, so
+    // it passed with the opening lot gone. GAMMA opens at 300 @ 50 (15,000), the demerger takes
+    // 5,000 of that cost to DELTA leaving 33.333333/share, and 100 sold at 90 is a LONG-term
+    // gain of 5,666.67. Lose the opening lot and the sale is an UNCOVERED quantity booked at
+    // ZERO - a finished-looking tax tab whose gain is wrong by the whole cost of the shares.
+    const sLt = (() => {
+      const c = ((sMain || [])[1] || []).findIndex((x: any) => `${x}`.trim() === 'Long term');
+      const gt = (sMain || []).find(r => r[1] === 'GRAND TOTAL');
+      return c >= 0 && gt ? Number(gt[c]) || 0 : NaN;
+    })();
+    near('S: Opening Holdings is still read from the account own sheet', sLt, 5666.67);
+    ok('S: ...and that answer is disjoint from the one a lost basis gives', Math.abs(sLt) > 1,
+      'with the opening lot gone the sale is uncovered and this is exactly 0');
+    ok('S: Corporate Actions is still read from the account own sheet',
+      sFlat.some(r => r.toUpperCase().includes('DEMERGER')),
+      'the action is gone, so basis moved between two scrips with nothing on the page saying so');
+
+    // EVERY WRITE WENT TO THE DESTINATION, AND NOT ONE TO THE SOURCE. Asserted over the call
+    // log rather than over the grid, because the grid is identical whichever sheet it lands in.
+    const wrote = (g.__updated || []).concat(g.__cleared || []);
+    ok('S: the run actually wrote something', wrote.length > 0);
+    eq('S: every value write went to the report workbook',
+      wrote.filter((u: any) => u.spreadsheetId !== DEST).length, 0);
+    eq('S: ...and none to the account own sheet',
+      wrote.filter((u: any) => u.spreadsheetId === PORTFOLIO).length, 0);
+    // The PAINT too - a tab written to one sheet and coloured in another is a `batchUpdate`
+    // against a sheetId that belongs to a different workbook.
+    const painted = (g.__batched || []).filter((b: any) => b.spreadsheetId === PORTFOLIO);
+    eq('S: no formatting batch touched the account own sheet', painted.length, 0);
+
+    // And the result SAYS where they went. A badge that cannot distinguish "written elsewhere"
+    // from "written here" leaves the owner opening a sheet that has none of the tabs named.
+    eq('S: the result names the destination', resS.reportSheetId, DEST);
+    ok('S: ...which differs from the account own sheet', resS.reportSheetId !== PORTFOLIO);
+
+    // ── S2 — NOTHING REDIRECTED. Every other portfolio and every other FY takes this path,
+    // so it is the one that must be byte-identical to how the register has always behaved.
+    installS();
+    const resS2 = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio');
+    const wrote2 = (g.__updated || []).concat(g.__cleared || []);
+    eq('S2: with no destination every write goes to the account own sheet',
+      wrote2.filter((u: any) => u.spreadsheetId !== PORTFOLIO).length, 0);
+    eq('S2: ...and the result reports that sheet, never an empty string', resS2.reportSheetId, PORTFOLIO);
+    eq('S2: ...and nothing is reported as superseded', (resS2.staleInSource || []).length, 0);
+
+    // ── S3 — THE SUPERSEDED COPIES. The account's own sheet still carries this FY's tabs from
+    // a run made before the redirect: last year's figures under this year's heading, which is
+    // the orphan the legacy-tab rename exists to prevent, arriving from a new direction.
+    // They are NAMED, never deleted - once a redirect is in force this function does not write
+    // to that sheet at all.
+    installS();
+    g.__sheetTabs[PORTFOLIO] = ['True Entry', 'Opening Holdings', 'Corporate Actions',
+                                `Capital Gains for ${FY_LABEL}`, `Intra-Day for ${FY_LABEL}`];
+    g.__firstTab[DEST] = 'Sheet1';
+    g.__sheetTabs[DEST] = ['Sheet1'];
+    const resS3 = await generateTrxRegister(PORTFOLIO, FY, 'Test Portfolio', undefined, DEST);
+    ok('S3: the superseded copies in the account own sheet are NAMED',
+      (resS3.staleInSource || []).includes(`Capital Gains for ${FY_LABEL}`));
+    ok('S3: ...both of them', (resS3.staleInSource || []).includes(`Intra-Day for ${FY_LABEL}`));
+    // The ledger tabs are NOT reports and must never be listed - naming True Entry here would
+    // read as an instruction to delete the account's database.
+    ok('S3: ...and the ledger tabs are not among them',
+      !(resS3.staleInSource || []).some(t => ['True Entry', 'Opening Holdings', 'Corporate Actions'].includes(t)),
+      'listing a ledger tab here reads as "delete this", which would destroy the account');
+    // Still nothing written to the source, even though it was READ for this check.
+    eq('S3: and the check itself wrote nothing to the account own sheet',
+      ((g.__updated || []).concat(g.__cleared || [])).filter((u: any) => u.spreadsheetId === PORTFOLIO).length, 0);
+
+    // ── S4 — THE REGISTRY, driven directly. It is pure, so this needs no stub at all, and
+    // the two SCOPES are what the whole table is for: a redirect that leaked across years
+    // would regenerate an already-filed year into a new workbook on the next click, and one
+    // that leaked across accounts would file one client's gains in another client's book.
+    eq('S4: S713 FY26-27 resolves to the report workbook',
+      reportSheetIdFor('s713', 2026), '1W3XgGm8-vJksXeOg0EA2Gq7yNOdrfAkTk7ZJ5ShzRaA');
+    eq('S4: ...and FY25-26 for the SAME account does not', reportSheetIdFor('s713', 2025), sheetIdForId('s713'));
+    eq('S4: ...nor FY27-28', reportSheetIdFor('s713', 2027), sheetIdForId('s713'));
+    // The "different account" control is OADR97 - Share India, and the SAME PERSON as S713.
+    // It was T059 until 03-Nov-2026, when T059 gained a redirect of its own; picking another
+    // Saket Agarwal account keeps the control sharp, because it proves the key is the ACCOUNT
+    // and not the holder. Any account that later gains an entry must move this control again.
+    eq('S4: ...and FY26-27 for a DIFFERENT account does not',
+      reportSheetIdFor('oadr97', 2026), sheetIdForId('oadr97'));
+    ok('S4: no destination is reported where none exists', !reportDestinationFor('oadr97', 2026));
+    ok('S4: ...and one is where it does', !!reportDestinationFor('s713', 2026));
+
+    // The four added 03-Nov-2026. Each is asserted against its OWN workbook id, so a pair of
+    // entries swapped between two accounts - which resolves, writes, and looks entirely
+    // ordinary - fails here rather than on a filed page.
+    for (const [pid, dest] of [
+      ['t059',  '12v7dp0j9c6XIMMLBDWijLZpBHdH1yHVibe1fNAGy638'],
+      ['s1404', '1HPtBzHEFLJ872APSfjLHXBwd8-5J6sfGN3ru8KXJLkE'],
+      ['g058',  '1Sc5w91euToJDu7SfbkVDZuikhSVtnoRiqqNjx-1tFSs'],
+      ['c087',  '1W7G6WJ3x_NsvdsXYMub2K_lWZ57gPUp3F5iQND91Ke4'],
+    ] as [string, string][]) {
+      eq(`S4: ${pid.toUpperCase()} FY26-27 resolves to its own report workbook`,
+        reportSheetIdFor(pid, 2026), dest);
+      eq(`S4: ...and ${pid.toUpperCase()} FY25-26 still writes to its ledger`,
+        reportSheetIdFor(pid, 2025), sheetIdForId(pid));
+    }
+    // An unknown id must fall back rather than resolve to something. It returns '' because
+    // `sheetIdForId` does, which is what every other caller already handles.
+    eq('S4: an unknown portfolio resolves to nothing, never to a redirect',
+      reportSheetIdFor('no-such-account', 2026), '');
+
+    // INVARIANTS over the table, which is what catches a typo in a hand-maintained list.
+    for (const d of REPORT_DESTINATIONS) {
+      ok(`S4: "${d.portfolioId}" is a real portfolio`, !!portfolioById(d.portfolioId),
+        'a typo here falls back silently to the account own sheet and the redirect simply never happens');
+      ok(`S4: "${d.portfolioId}" FY${d.fyStartYear} points somewhere ELSE`,
+        !!d.sheetId && d.sheetId !== sheetIdForId(d.portfolioId),
+        'an entry naming the account own sheet is a no-op wearing the clothes of a redirect');
+      ok(`S4: "${d.portfolioId}" FY${d.fyStartYear} does not target another ACCOUNT ledger`,
+        !PORTFOLIOS.some(x => x.sheetId === d.sheetId),
+        'writing one account reports into another account database is the worst outcome here');
+    }
+    // NO TWO ENTRIES MAY SHARE A WORKBOOK. The tab names carry the FY but not the account, so
+    // two accounts pointing at one book do not collide loudly - the second run OVERWRITES the
+    // first's `Capital Gains for FY26-27` in place and one client's filed figures are simply
+    // gone, with both runs reporting success. Self-evident with one entry; it stopped being so
+    // at five, which is why it is pinned now rather than then.
+    {
+      const seen = new Map<string, string>();
+      for (const d of REPORT_DESTINATIONS) {
+        const k = `${d.sheetId}|${d.fyStartYear}`;
+        ok(`S4: "${d.portfolioId}" FY${d.fyStartYear} has a workbook of its own`,
+          !seen.has(k), `it shares one with "${seen.get(k)}", whose tabs it would overwrite`);
+        seen.set(k, d.portfolioId);
+      }
+      // And a destination is never some OTHER entry's destination for a different year either,
+      // which is the same overwrite one FY later.
+      eq('S4: every destination workbook appears exactly once',
+        new Set(REPORT_DESTINATIONS.map(d => d.sheetId)).size, REPORT_DESTINATIONS.length);
+    }
   }
 
   // ── report ────────────────────────────────────────────────────────────────
