@@ -34,6 +34,46 @@ export function looksLikeDerivativesNote(text: string): boolean {
     || /\bderivatives?\s+segment\b/i.test(text);
 }
 
+/**
+ * Is this security an F&O CONTRACT rather than a share? NFO/BFO trades are not imported.
+ *
+ * Until 17-Sep-2026 they were kept out by accident: `finalizeContractNote` dropped every row
+ * without an ISIN, and a contract row has none. That gate was removed so wrapped equity rows
+ * would import, and every option on a mixed CM + FO note came in with it — 145 of 146 trades on
+ * CS1106 29-10-2026. Exclusion is now stated, by the contract's own shape:
+ *
+ *   NIFTY03NOV202621550PE  /  SENSEX29OCT202674600CE   trade rows: underlying, DDMMMYYYY,
+ *                                                       strike, CE|PE (futures end FUT)
+ *   NIFTY(OPTIDX-21550-03-11-2026)                      the Annexure II STT statement
+ */
+export function isDerivativeContract(name: string): boolean {
+  const s = (name || "").trim().toUpperCase();
+  return /^[A-Z][A-Z0-9&-]*\d{2}[A-Z]{3}\d{2,4}(\d+(\.\d+)?)?(CE|PE|FUT)$/.test(s)
+    || /\b(OPT|FUT)(IDX|STK|CUR|IRD)\b/.test(s);
+}
+
+/**
+ * STT on the derivative rows of the Annexure II STT statement. That statement's `Total STT` is
+ * this parser's STT anchor, and it covers EVERY segment — on CS1106 30-10-2026 it is 16,385.13
+ * of which the one equity row is 2,065.07. With the F&O rows no longer imported, their STT has
+ * to come off the anchor too, or `allocateStt` loads it onto the equity trades.
+ *
+ * Reads the LAST number on each row (the row's TOTAL STT column). Rows whose last token is not a
+ * number are skipped, never guessed at.
+ */
+export function derivativeSttInAnnexure(text: string): number {
+  let sum = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const m = line.match(/^\d+\s+(\S*\((?:OPT|FUT)(?:IDX|STK|CUR|IRD)-[^)]*\))\s+(.*)$/i);
+    if (!m) continue;
+    const tokens = m[2].trim().split(/\s+/);
+    const v = parseNumber(tokens[tokens.length - 1]);
+    if (!isNaN(v)) sum += Math.abs(v);
+  }
+  return Math.round(sum * 100) / 100;
+}
+
 export class ShareIndiaBrokerStrategy implements BrokerStrategy {
   id = 'shareindia';
   name = 'Share India';
@@ -363,7 +403,7 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     const fullText = doc.body?.textContent || doc.documentElement?.textContent || "";
     const mainSummary = this.extractSummaryRobustly(fullText);
     const fallbackSummary = this.extractSummaryOld(doc);
-    return this.mergeSummaries(mainSummary, fallbackSummary);
+    return this.withoutDerivativeStt(this.mergeSummaries(mainSummary, fallbackSummary), fullText);
   }
 
   private extractSummaryFromTextOld(text: string): Summary {
@@ -542,7 +582,22 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
   private extractSummaryFromText(text: string): Summary {
     const mainSummary = this.extractSummaryRobustly(text);
     const fallbackSummary = this.extractSummaryFromTextOld(text);
-    return this.mergeSummaries(mainSummary, fallbackSummary);
+    return this.withoutDerivativeStt(this.mergeSummaries(mainSummary, fallbackSummary), text);
+  }
+
+  /**
+   * Take the F&O rows' STT off the anchor — but ONLY when the anchor really is Annexure II's
+   * all-segment `Total STT`. If STT came from the `NCL CM` obligation row instead it is already
+   * equity-only, and subtracting again would understate it.
+   */
+  private withoutDerivativeStt(s: Summary, text: string): Summary {
+    const m = text.match(/total\s+stt\s+([\d,]+(?:\.\d+)?)/i);
+    if (!m) return s;
+    const annexureTotal = Math.abs(parseNumber(m[1]));
+    if (isNaN(annexureTotal) || Math.abs(annexureTotal - s.stt) > 0.005) return s;
+    const fo = derivativeSttInAnnexure(text);
+    if (fo > 0 && fo <= s.stt) s.stt = Math.round((s.stt - fo) * 100) / 100;
+    return s;
   }
 
   private extractTrades(doc: Document): any[] {
@@ -753,6 +808,9 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       if (lowerName.length < 2) continue;
       if (lowerName.includes("security") || lowerName.includes("contract") || lowerName.includes("description") || lowerName.includes("order no") || lowerName.includes("trade no")) continue;
       if (lowerName === "total" || lowerName === "subtotal" || lowerName.startsWith("page no")) continue;
+      // A per-contract subtotal label, never a security. Under a layout extractor (pdftotext
+      // -layout) an F&O row's numbers can land on this line, and it would import as a trade.
+      if (lowerName.startsWith("scrip summary")) continue;
 
       trades.push({
         securityName: finalName,
@@ -802,6 +860,9 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
       const cleanName = t.securityName.trim().toUpperCase();
       if (exchangeNames.includes(cleanName)) return false;
       if (t.quantity >= 10000000) return false;
+      // NFO/BFO contracts are not imported. This is the line the old ISIN gate used to be by
+      // accident — see `isDerivativeContract`.
+      if (isDerivativeContract(cleanName)) return false;
       // NO ISIN REQUIREMENT (owner directive, 17-Sep-2026). This used to be
       // `if (!t.isin || t.isin.length < 12) return false;` and it is how a correctly parsed
       // trade disappeared: the security description wraps, the ISIN lands on a neighbouring
@@ -818,6 +879,10 @@ export class ShareIndiaBrokerStrategy implements BrokerStrategy {
     if (validatedTrades.length === 0) {
       // Say what actually happened. Claiming F&O here was always a guess and usually a wrong
       // one — this branch never even looked at the note for evidence of a derivative.
+      // Every row was an F&O contract: this time the F&O answer is evidenced, row by row.
+      if (rawTrades.length > 0 && rawTrades.every((t: any) => isDerivativeContract(t.securityName || ""))) {
+        throw new Error("This contract note only has F&O transactions, which this app does not import.");
+      }
       if (rawTrades.length > 0) {
         const names = rawTrades.map((t: any) => t.securityName).filter(Boolean).slice(0, 4).join(", ");
         throw new Error(
