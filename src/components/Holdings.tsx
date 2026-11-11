@@ -11,7 +11,7 @@ import { PortfolioHolding, ContractNoteResult } from '../types';
 import { useGoogleLogin } from '@react-oauth/google';
 import { gapi } from "gapi-script";
 import { persistGoogleToken, hasValidGoogleToken } from '../lib/googleAuth';
-import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedScrip } from '../lib/holdingsCalc';
+import { rebuildHoldingTab, syncCapitalGains, RebuildHoldingResult, UnresolvedScrip, parseDateTs } from '../lib/holdingsCalc';
 import { generateTrxRegister, TrxRegisterResult } from '../lib/trxRegister';
 import { generateFormulaView, FormulaViewResult } from '../lib/trxFormulaView';
 import { loadScripMaster, lookupScrip, normName, normNamePrivate, listedFromTs, isPeScrip, assetClassOf, peEntry, classOfEntryAsOf, ltDaysFor, ScripMaster, SCRIP_MASTER_SPREADSHEET_ID } from '../lib/scripMaster';
@@ -32,7 +32,7 @@ import { deleteSheetRow, insertSheetRow } from '../lib/sheetTabs';
 import { registerBackStep } from '../lib/appBack';
 import { useRowNav } from '../lib/rowNav';
 import { onShortcut, HOLDINGS_SEARCH_ID } from '../lib/shortcuts';
-import { ledgerSide, isSplitType, isTransferType, isTransferLeg, solveQtyPriceAmount, isFreeShareType, parseRatio, formatRatio, freeSharesFor, FreeShareRatio } from '../lib/tradeRowSchema';
+import { ledgerSide, isSplitType, isTransferType, isTransferLeg, solveQtyPriceAmount, isFreeShareType, parseRatio, formatRatio, freeSharesFor, FreeShareRatio, colA1 } from '../lib/tradeRowSchema';
 import { TransferHoldingModal } from './TransferHoldingModal';
 import { formatDMY, formatDMYTime, isDateInputSane, DATE_INPUT_MIN, DATE_INPUT_MAX } from '../lib/dates';
 import ScripReviewModal from './ScripReviewModal';
@@ -65,6 +65,10 @@ const parsePriceStamp = (s: string): number => {
 // so Friday's 15:45 capture stays "settled" over the weekend. A pre-bell refresh the next
 // morning reads as unsettled, which is correct: that session's close isn't in yet.
 const MARKET_CLOSE_MIN = 15 * 60 + 30;
+
+// The first FY True Entry holds (FY25-26 - earlier years are the opening basis), and so the first
+// year the "Open Google Sheet" menu offers. Later years appear as the FY rolls over.
+const FIRST_LEDGER_FY = 2025;
 const isSettledClose = (stamp: string): boolean => {
   const ts = parsePriceStamp(stamp || '');
   if (!ts) return false;
@@ -604,6 +608,25 @@ export default function Holdings({
   // Derived from True Entry + Opening Holdings — NOT the Holding tab, which only
   // ever contains qty > 0 positions (rebuildHoldingTab filters them out).
   const [showSold, setShowSold] = useState(false);
+  // Latest Trade Date on this account's True Entry, STAMPED with the portfolio it was read from
+  // so a reply landing after a switch can never label one account with another's date.
+  const [lastTrade, setLastTrade] = useState<{ pid: string; ts: number } | null>(null);
+  const [sheetMenuOpen, setSheetMenuOpen] = useState(false);
+  const sheetMenuRef = useRef<HTMLDivElement>(null);
+  // Close the sheet menu on an outside click or Escape, and on an account switch (its links
+  // belong to the account it was opened on). Its own document listener, like the other menus
+  // here - the global shortcut handler deliberately owns no Escape.
+  useEffect(() => {
+    if (!sheetMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (sheetMenuRef.current && !sheetMenuRef.current.contains(e.target as Node)) setSheetMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSheetMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [sheetMenuOpen]);
+  useEffect(() => { setSheetMenuOpen(false); }, [activePortfolio]);
   // Which asset class the grid lists. Listed equity and unlisted companies live in the SAME
   // ledger and both count toward this account's totals; this only narrows the list. Deliberately
   // not persisted (like showSold) — a filter silently restored on a later visit would show an
@@ -861,7 +884,10 @@ export default function Holdings({
 
   // Live fetching trigger from Google Sheet.
   // silent=true → background refresh: no spinner, keep current rows visible, never blank the view on error.
-  const fetchSheetHoldings = async (portfolio: string, silent = false) => {
+  // periodic=true is the 2-minute auto-refresh ONLY: it skips the last-trade-date read, which
+  // only moves when the ledger does. Every other caller (open, login, save, edit, delete, import)
+  // is a moment the ledger may have changed, silent or not.
+  const fetchSheetHoldings = async (portfolio: string, silent = false, periodic = false) => {
     // BEFORE the guards, unconditionally, and on the silent path too. Every `return` below
     // used to jump over the clearing block further down, which is how another account's rows
     // stayed on screen. This drops them the moment we know we are being asked about a
@@ -964,6 +990,7 @@ export default function Holdings({
       setSheetHoldings(parsed);
       stampHoldings(portfolio);            // these rows are THIS portfolio's, and only its
       setSheetLoadedAt(Date.now());
+      if (!periodic) fetchLastTradeDate(portfolio);
       setSheetRefreshFailed(null);
       setSheetTotal(totalValue);
       setPortfolioTotals(prev => ({ ...prev, [portfolio]: totalValue }));
@@ -988,6 +1015,41 @@ export default function Holdings({
       if (!silent) setSheetError(errorMsg + " Ensure you have permissions to the active sheet.");
     } finally {
       if (!silent) setIsLoadingSheet(false);
+    }
+  };
+
+  // The latest Trade Date on True Entry. ONE request: the header row and column A together in a
+  // batchGet, so the column is still found BY HEADER — only if "Trade Date" has moved off A does
+  // it cost a second read. Serials, not display strings (see `parseDateTs`). Deliberately NOT on
+  // the 2-minute auto-refresh: the date only moves when the ledger does, and every ledger write
+  // in this app ends in a non-periodic holdings refresh, which is what calls this.
+  const fetchLastTradeDate = async (portfolio: string) => {
+    if (portfolio === 'local') return;
+    const spreadsheetId = sheetIdForId(portfolio);
+    const token = (gapi.client as any)?.getToken?.();
+    if (!spreadsheetId || !token?.access_token) return;
+    try {
+      const sheets = (gapi.client as any).sheets.spreadsheets.values;
+      const opts = { valueRenderOption: 'UNFORMATTED_VALUE', dateTimeRenderOption: 'SERIAL_NUMBER' };
+      const res = await sheets.batchGet({ spreadsheetId, ranges: ['True Entry!1:1', 'True Entry!A2:A'], ...opts });
+      const [hdr, colA] = res?.result?.valueRanges || [];
+      const header: string[] = (hdr?.values?.[0] || []).map((h: any) => (h ?? '').toString().trim().toLowerCase());
+      const idx = header.indexOf('trade date');
+      let cells: any[][] = colA?.values || [];
+      if (idx > 0) {
+        const L = colA1(idx);
+        const r2 = await sheets.get({ spreadsheetId, range: `True Entry!${L}2:${L}`, ...opts });
+        cells = r2?.result?.values || [];
+      } else if (idx === -1) {
+        throw new Error('no "Trade Date" column on True Entry');
+      }
+      let max = 0;
+      for (const r of cells) { const ts = parseDateTs(r?.[0]); if (ts > max) max = ts; }
+      setLastTrade({ pid: portfolio, ts: max });
+    } catch (err: any) {
+      // Never silent: a missing date and a failed read must not look the same on screen.
+      console.error('Failed to read last trade date:', err);
+      setLastTrade({ pid: portfolio, ts: -1 });
     }
   };
 
@@ -1337,7 +1399,7 @@ export default function Holdings({
     const refreshId = window.setInterval(() => {
       if (document.hidden) return;
       if (!hasAuthorizedGoogle()) return;
-      fetchSheetHoldings(activePortfolio, true);
+      fetchSheetHoldings(activePortfolio, true, true);
     }, 120_000);
     return () => window.clearInterval(refreshId);
   }, [activePortfolio]);
@@ -4635,7 +4697,24 @@ export default function Holdings({
           sheet whose prices have NEVER been fetched shows no control at all - the affordance
           appearing only once its own precondition is met, which is unreachable by definition. */}
       {activePortfolio !== 'local' && (
-        <div className="flex justify-end">
+        <div className="flex justify-end items-center gap-3">
+          {/* The latest Trade Date on this account's ledger. Plain text, NOT part of the button
+              beside it - that button refreshes PRICES, and nothing here refetches the ledger.
+              Gated on the stamp, so a reply for the account just left never shows on this one.
+              Inside an account ONLY: on the portfolio list `activePortfolio` is still whichever
+              account was last opened, so the date would describe one card on a page of all of them. */}
+          {isDetailView && lastTrade && lastTrade.pid === activePortfolio && (
+            <span className="text-[11px] text-slate-400" title="The most recent Trade Date on this account's True Entry ledger">
+              {lastTrade.ts > 0 ? (
+                <>Last trade: <span className="font-semibold text-slate-500">{formatDMY(new Date(lastTrade.ts))}</span></>
+              ) : lastTrade.ts === 0 ? (
+                <>No trades on the ledger</>
+              ) : (
+                <>Last trade: couldn't read the ledger</>
+              )}
+              <span className="mx-2 text-slate-300">·</span>
+            </span>
+          )}
           {/* The timestamp IS the refresh control - the separate "Refresh Prices" button is gone.
               Same text, same size, same colours: a <button> reset to inherit so nothing about the
               line changes until it is hovered or running. While running it says so in place,
@@ -5171,16 +5250,46 @@ WRITTEN TO A SEPARATE WORKBOOK, not this account's own sheet — every tab named
 
             <div className="flex items-center gap-2 flex-wrap">
               {activePortfolio !== 'local' ? (
-                <>
-                  <a
-                    href={portfolioSheetUrl(activePortfolio as string)}
-                    target="_blank" rel="noopener noreferrer"
-                    title="Open this portfolio's Google Sheet in a new tab"
+                <div ref={sheetMenuRef} className="relative">
+                  {/* One entry per FY, each resolved through `reportSheetIdFor` - the SAME registry
+                      the register writes through - so this menu can never open a different
+                      workbook from the one a year's tabs were filed in. From FY25-26, the first
+                      year True Entry holds. */}
+                  <button
+                    type="button"
+                    onClick={() => setSheetMenuOpen(o => !o)}
+                    aria-haspopup="menu"
+                    aria-expanded={sheetMenuOpen}
+                    title="Open one of this portfolio's Google Sheets in a new tab"
                     className="px-4 py-2 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
                   >
                     <ExternalLink className="w-3.5 h-3.5" /> Open Google Sheet
-                  </a>
-                </>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${sheetMenuOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {sheetMenuOpen && (
+                    <div role="menu" className="absolute right-0 mt-1.5 z-30 min-w-[15rem] bg-white border border-slate-200 rounded-xl shadow-xl py-1">
+                      {[...fyOptions].filter(y => y >= FIRST_LEDGER_FY).sort((a, b) => a - b).map(y => {
+                        const pid = activePortfolio as string;
+                        const redirected = !!reportDestinationFor(pid, y);
+                        return (
+                          <a
+                            key={y}
+                            role="menuitem"
+                            href={`https://docs.google.com/spreadsheets/d/${reportSheetIdFor(pid, y)}/edit`}
+                            target="_blank" rel="noopener noreferrer"
+                            onClick={() => setSheetMenuOpen(false)}
+                            className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-slate-700 hover:bg-indigo-50 transition-colors"
+                          >
+                            <span className="font-bold">{`FY${String(y).slice(2)}-${String(y + 1).slice(2)}`}</span>
+                            <span className="text-[10px] text-slate-400">
+                              {redirected ? 'Reports workbook' : 'Account sheet (ledger)'}
+                            </span>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               ) : (
                 <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full">
                   <span className="relative flex h-2 w-2">

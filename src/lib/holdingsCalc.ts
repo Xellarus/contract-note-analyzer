@@ -74,7 +74,7 @@ const serialToTs = (serial: number): number => {
 
 // Accepts a Sheets date **serial number** (preferred — unambiguous) or a string
 // (DD/MM/YYYY, DD-MM-YYYY, DD-MMM-YYYY, YYYY-MM-DD). → epoch ms (0 if unparseable).
-const parseDateTs = (s: any): number => {
+export const parseDateTs = (s: any): number => {
   if (s === null || s === undefined || s === "") return 0;
   if (typeof s === "number") return isFinite(s) ? serialToTs(s) : 0;
   const c = s.toString().trim();
