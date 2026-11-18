@@ -730,7 +730,28 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  // On a wide screen the sidebar DOCKS: it takes its own column and the page narrows beside it,
+  // so it can stay open while you work instead of blurring the page every time. Below `lg` it is
+  // still an overlay with a backdrop - there is no room to dock. The open/closed choice is
+  // remembered per browser (a convenience only; it renders correctly without storage).
+  const DOCK_QUERY = '(min-width: 1024px)';
+  const [isWide, setIsWide] = useState(() => typeof window !== 'undefined' && window.matchMedia(DOCK_QUERY).matches);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
+    try { return window.matchMedia(DOCK_QUERY).matches && localStorage.getItem('sidebarDocked') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    const mq = window.matchMedia(DOCK_QUERY);
+    const on = () => setIsWide(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  useEffect(() => {
+    if (!isWide) return;   // an overlay opened on a phone must not come back docked on desktop
+    try { localStorage.setItem('sidebarDocked', isSidebarOpen ? '1' : '0'); } catch { /* storage blocked */ }
+  }, [isSidebarOpen, isWide]);
+  const sidebarDocked = isSidebarOpen && isWide;
+  /** Navigating closes an OVERLAY sidebar (it covers the page), never a docked one. */
+  const closeSidebarIfOverlay = () => { if (!window.matchMedia(DOCK_QUERY).matches) setIsSidebarOpen(false); };
 
   // Light/dark theme — persisted, defaults to the OS preference. Applied by
   // toggling a `dark` class on <html>, which activates the dark override layer
@@ -759,7 +780,7 @@ export default function App() {
    * are deliberately unbound; a stray keypress must never start a sheet write.
    */
   useEffect(() => {
-    const goto = (v: AppView) => { setCurrentView(v); setIsSidebarOpen(false); };
+    const goto = (v: AppView) => { setCurrentView(v); closeSidebarIfOverlay(); };
     const run = (a: ShortcutAction) => {
       switch (a) {
         case 'goDashboard': goto('dashboard'); break;
@@ -1974,7 +1995,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#f4efe3] via-[#f1ebdc] to-[#ebe4d1] dark:from-[#121110] dark:via-[#121110] dark:to-[#161410] text-slate-900 dark:text-slate-100 font-sans pb-20 animate-fadeIn">
+    <div className={`min-h-screen bg-gradient-to-br from-[#f4efe3] via-[#f1ebdc] to-[#ebe4d1] dark:from-[#121110] dark:via-[#121110] dark:to-[#161410] text-slate-900 dark:text-slate-100 font-sans pb-20 animate-fadeIn transition-[padding] duration-200 ${sidebarDocked ? 'pl-64' : ''}`}>
 
       {/* Live IST time, pinned bottom-right - and the session gauge. The ink drifts to gold as
           the Google token nears expiry, and clicking it re-authorises, so the warning and the
@@ -2014,13 +2035,16 @@ export default function App() {
       <AnimatePresence>
         {isSidebarOpen && (
           <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsSidebarOpen(false)}
-              className="fixed inset-0 bg-slate-900/35 backdrop-blur-xs z-[80]"
-            />
+            {/* Backdrop only when the sidebar is an OVERLAY. Docked, the page stays live beside it. */}
+            {!isWide && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsSidebarOpen(false)}
+                className="fixed inset-0 bg-slate-900/35 backdrop-blur-xs z-[80]"
+              />
+            )}
             <motion.div
               initial={{ x: '-100%' }}
               animate={{ x: 0 }}
@@ -2047,31 +2071,31 @@ export default function App() {
                 </div>
                 <div className="p-4 space-y-1.5">
                   <button
-                    onClick={() => { setCurrentView('dashboard'); setIsSidebarOpen(false); }}
+                    onClick={() => { setCurrentView('dashboard'); closeSidebarIfOverlay(); }}
                     className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'dashboard' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                   >
                     <Gauge className="w-4 h-4" /> Dashboard
                   </button>
                   <button
-                    onClick={() => { setCurrentView('holdings'); setIsSidebarOpen(false); }}
+                    onClick={() => { setCurrentView('holdings'); closeSidebarIfOverlay(); }}
                     className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'holdings' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                   >
                     <Briefcase className="w-4 h-4" /> Holdings
                   </button>
                   <button
-                    onClick={() => { setCurrentView('imports'); setIsSidebarOpen(false); }}
+                    onClick={() => { setCurrentView('imports'); closeSidebarIfOverlay(); }}
                     className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'imports' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                   >
                     <Upload className="w-4 h-4" /> Imports
                   </button>
                   <button
-                    onClick={() => { setReportsFocus(null); setCurrentView('reports'); setIsSidebarOpen(false); }}
+                    onClick={() => { setReportsFocus(null); setCurrentView('reports'); closeSidebarIfOverlay(); }}
                     className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'reports' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                   >
                     <BarChart3 className="w-4 h-4" /> Reports
                   </button>
                   <button
-                    onClick={() => { setCurrentView('settings'); setIsSidebarOpen(false); }}
+                    onClick={() => { setCurrentView('settings'); closeSidebarIfOverlay(); }}
                     className={`w-full text-left p-3 rounded-xl transition-all flex items-center gap-3 text-xs font-bold ${currentView === 'settings' ? 'bg-indigo-600 text-white font-black shadow shadow-indigo-500/25' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                   >
                     <SlidersHorizontal className="w-4 h-4" /> Settings
@@ -2087,9 +2111,10 @@ export default function App() {
         <div className="flex-1 flex items-center space-x-2">
           <button
             id="btn-open-menu"
-            onClick={() => setIsSidebarOpen(true)}
+            onClick={() => setIsSidebarOpen((o) => !o)}
+            aria-expanded={isSidebarOpen}
             className="p-2 hover:bg-slate-100 rounded-xl transition-all text-slate-600 hover:text-slate-950 flex items-center justify-center border border-slate-200 shadow-xs cursor-pointer mr-2"
-            title="Open backoffice navigation drawer"
+            title={isSidebarOpen ? "Hide navigation" : "Show navigation"}
           >
             <Menu className="w-5 h-5 font-bold" />
           </button>

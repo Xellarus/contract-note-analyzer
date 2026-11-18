@@ -528,6 +528,20 @@ function buildExpenseReport(vals: any[][], detailed: boolean, fromDate: string, 
 }
 
 const todayStr = () => new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+
+/** Start year of the Indian FY containing today (Apr-Mar): Nov-2026 -> 2026, Feb-2027 -> 2026. */
+const currentFyStart = () => { const t = todayStr(); const y = +t.slice(0, 4), m = +t.slice(5, 7); return m >= 4 ? y : y - 1; };
+/** `FY26-27` for 2026 - the same spelling the register's tabs use. */
+const fyLabel = (y: number) => `FY${String(y % 100).padStart(2, '0')}-${String((y + 1) % 100).padStart(2, '0')}`;
+/** 1-Apr to 31-Mar, with the current FY's end CLAMPED to today: the To input carries
+ *  `max={todayStr()}`, and a value past it would sit in the field as an invalid date. */
+const fyBounds = (y: number) => {
+  const end = `${y + 1}-03-31`, t = todayStr();
+  return { from: `${y}-04-01`, to: end > t ? t : end };
+};
+/** Newest first, back to FY2015-16 - the opening-basis history reaches years before True Entry. */
+const REPORT_FY_FLOOR = 2015;
+const reportFyYears = () => { const out: number[] = []; for (let y = currentFyStart(); y >= REPORT_FY_FLOOR; y--) out.push(y); return out; };
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const looksNumeric = (s: string) => /^-?[\d,]+(\.\d+)?$/.test(s.trim()) && s.trim().length > 0;
 
@@ -569,6 +583,15 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
   const [asOf, setAsOf] = useState<string>(todayStr());
   const [fromDate, setFromDate] = useState<string>('');     // capital gains / transactions period
   const [toDate, setToDate] = useState<string>(todayStr());
+  // Which FY the two dates describe EXACTLY, or null for a custom range / all history. Derived,
+  // never stored, so the dropdown can never claim a year the dates have been edited away from.
+  const selectedFy = (() => {
+    if (!fromDate) return null;
+    const y = +fromDate.slice(0, 4);
+    if (fromDate.slice(5) !== '04-01') return null;
+    const b = fyBounds(y);
+    return toDate === b.to || toDate === `${y + 1}-03-31` ? y : null;
+  })();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Holding result
@@ -1171,39 +1194,60 @@ export default function Reports({ focus = null, onClearFocus }: { focus?: StockF
             ) : (
               <>
                 <label className="block mt-5 text-[11px] font-black uppercase tracking-wider text-slate-500">Period</label>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-1.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-bold text-slate-500 w-9">From</span>
-                    <CalendarDays className="w-4 h-4 text-slate-400" />
+                {/* Financial year first: almost every report here is run for one FY, and typing two
+                    dates per run is how a 31-Mar ends up as 30-Mar. Picking a year only FILLS the two
+                    date fields below - they stay editable, and an edit that leaves the FY's bounds
+                    shows "Custom range" rather than a year the dates no longer describe. */}
+                <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                  <select
+                    value={selectedFy === null ? '' : String(selectedFy)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (!v) return;
+                      const b = fyBounds(Number(v));
+                      setFromDate(b.from);
+                      setToDate(b.to);
+                    }}
+                    title="Fill the period with a whole financial year (1-Apr to 31-Mar)"
+                    className="flex-1 min-w-[10rem] px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold text-slate-700 focus:outline-none focus:border-indigo-400 bg-white cursor-pointer"
+                  >
+                    <option value="">{fromDate === '' ? 'All history' : 'Custom range'}</option>
+                    {reportFyYears().map((y) => (
+                      <option key={y} value={y}>{fyLabel(y)}{y === currentFyStart() ? ' (current)' : ''}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setFromDate('')}
+                    title="Include everything from the first trade / opening position"
+                    className={`text-[11px] font-bold px-3 py-2 rounded-lg border transition-colors cursor-pointer ${fromDate === '' ? 'bg-indigo-600 text-white border-indigo-600' : 'text-slate-500 border-slate-200 hover:bg-slate-100'}`}
+                  >
+                    Since inception
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <label className="flex flex-col gap-1 min-w-0">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">From</span>
                     <input
                       type="date"
                       value={fromDate}
                       min={DATE_INPUT_MIN}
                       max={toDate || todayStr()}
                       onChange={(e) => { if (isDateInputSane(e.target.value)) setFromDate(e.target.value); }}
-                      className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
+                      className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
                     />
-                    <button
-                      type="button"
-                      onClick={() => setFromDate('')}
-                      title="Include everything from the first trade / opening position"
-                      className={`text-[11px] font-bold px-2.5 py-2 rounded-lg border transition-colors cursor-pointer ${fromDate === '' ? 'bg-indigo-600 text-white border-indigo-600' : 'text-slate-500 border-slate-200 hover:bg-slate-100'}`}
-                    >
-                      Since inception
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-bold text-slate-500 w-9">To</span>
-                    <CalendarDays className="w-4 h-4 text-slate-400" />
+                  </label>
+                  <label className="flex flex-col gap-1 min-w-0">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">To</span>
                     <input
                       type="date"
                       value={toDate}
                       min={fromDate || DATE_INPUT_MIN}
                       max={todayStr()}
                       onChange={(e) => { if (isDateInputSane(e.target.value)) setToDate(e.target.value); }}
-                      className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
+                      className="w-full min-w-0 px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:outline-none focus:border-indigo-400 bg-white"
                     />
-                  </div>
+                  </label>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">{meta.desc} Pick <strong className="text-slate-500">Since inception</strong> (or clear From) for all history.</p>
               </>
